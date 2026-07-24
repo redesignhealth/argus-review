@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-24
+
 ### Added
 
 - Initial public release of Argus: a self-orchestrated PR review agent
@@ -20,5 +22,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-<!-- No tags exist yet — add a "[Unreleased]: .../compare/vX.Y.Z...HEAD"
-     link once v0.1.0 is tagged (see docs/RELEASING.md). -->
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/redesignhealth/argus-review/commits/v0.1.0
