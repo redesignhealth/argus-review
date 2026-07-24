@@ -109,7 +109,7 @@ export ANTHROPIC_API_KEY=...
 export GITHUB_TOKEN_RO=...
 export OPENAI_API_KEY=...
 
-uvx argus-code-review review owner/repo --pr 123
+uvx --from argus-code-review argus review owner/repo --pr 123
 ```
 
 Prefer a `.env` file over exporting in your shell? Copy
@@ -120,11 +120,13 @@ That's it for a first run. With no other configuration, Argus stores round
 history and pipeline checkpoints in a local SQLite database at
 `~/.local/share/argus/history.db` — nothing else to set up.
 
-`uvx argus-code-review ...` downloads the `argus-code-review` package into a
-throwaway environment and runs its `argus` console script for you — that's
-why the command above starts with `review`, not `argus review`. If you'll
-be running Argus repeatedly, install it once instead of re-resolving it
-every invocation:
+`uvx --from argus-code-review argus ...` downloads the `argus-code-review`
+package into a throwaway environment and runs its `argus` console script —
+the `--from` is required because the installable package name
+(`argus-code-review`) and the console script it provides (`argus`) differ,
+and `uvx` only infers the script name from the package name when they
+match. If you'll be running Argus repeatedly, install it once instead of
+re-resolving it every invocation:
 
 ```bash
 uv tool install argus-code-review
