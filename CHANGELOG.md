@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-24
+
+### Fixed
+
+- README quickstart command: `uvx argus-code-review ...` doesn't work
+  as documented — `uvx` only infers the console script name from the
+  package name when they match, and here they don't (package
+  `argus-code-review`, script `argus`). Corrected to
+  `uvx --from argus-code-review argus ...`, confirmed working
+  end-to-end against a real PR.
+
 ## [0.1.0] - 2026-07-24
 
 ### Added
@@ -22,5 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/redesignhealth/argus-review/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/redesignhealth/argus-review/commits/v0.1.0
