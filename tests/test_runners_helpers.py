@@ -1,0 +1,279 @@
+"""Unit tests for pure helper functions in helpers.py.
+
+These are security controls and parsing logic with no LLM dependency.
+"""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+from argus.helpers import (
+    append_degraded_coverage_section,
+    collect_reviewed_files,
+    filter_diff_for_files,
+    parse_review_result,
+    sanitize_file_paths,
+    timed_out_reviewer_labels,
+)
+from argus.pipeline_models import RawFinding, SystemReviewResult
+
+
+# ---------------------------------------------------------------------------
+# filter_diff_for_files
+# ---------------------------------------------------------------------------
+
+
+class TestFilterDiffForFiles:
+    SAMPLE_DIFF = (
+        "diff --git a/src/main.py b/src/main.py\n"
+        "--- a/src/main.py\n"
+        "+++ b/src/main.py\n"
+        "@@ -1,3 +1,4 @@\n"
+        "+import os\n"
+        " def main():\n"
+        "     pass\n"
+        "diff --git a/src/utils.py b/src/utils.py\n"
+        "--- a/src/utils.py\n"
+        "+++ b/src/utils.py\n"
+        "@@ -1 +1,2 @@\n"
+        "+# new comment\n"
+        " def helper():\n"
+        "diff --git a/tests/test_main.py b/tests/test_main.py\n"
+        "--- a/tests/test_main.py\n"
+        "+++ b/tests/test_main.py\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+
+    def test_filters_to_matching_files(self) -> None:
+        result = filter_diff_for_files(self.SAMPLE_DIFF, ["src/main.py"])
+        assert "src/main.py" in result
+        assert "src/utils.py" not in result
+        assert "tests/test_main.py" not in result
+
+    def test_multiple_files(self) -> None:
+        result = filter_diff_for_files(self.SAMPLE_DIFF, ["src/main.py", "tests/test_main.py"])
+        assert "src/main.py" in result
+        assert "tests/test_main.py" in result
+        assert "src/utils.py" not in result
+
+    def test_no_matching_files(self) -> None:
+        result = filter_diff_for_files(self.SAMPLE_DIFF, ["nonexistent.py"])
+        assert result == ""
+
+    def test_empty_diff(self) -> None:
+        assert filter_diff_for_files("", ["src/main.py"]) == ""
+
+    def test_empty_files(self) -> None:
+        assert filter_diff_for_files(self.SAMPLE_DIFF, []) == ""
+
+
+# ---------------------------------------------------------------------------
+# parse_review_result
+# ---------------------------------------------------------------------------
+
+
+class TestParseReviewResult:
+    def test_json_in_code_block(self) -> None:
+        raw = '```json\n{"system_group": "test", "findings": [{"file": "a.py", "line": 10, "description": "bug"}], "files_explored": ["a.py"]}\n```'
+        result = parse_review_result(raw, "fallback-name")
+        assert result.system_group == "test"
+        assert len(result.findings) == 1
+        assert result.findings[0].file == "a.py"
+        assert result.findings[0].line == 10
+
+    def test_raw_json(self) -> None:
+        raw = '{"system_group": "raw", "findings": [], "files_explored": ["b.py"]}'
+        result = parse_review_result(raw, "fallback")
+        assert result.system_group == "raw"
+        assert result.files_explored == ["b.py"]
+
+    def test_malformed_json_fallback(self) -> None:
+        raw = "This is not JSON at all, just a text finding."
+        result = parse_review_result(raw, "my-group")
+        assert result.system_group == "my-group"
+        assert len(result.findings) == 1
+        assert "not JSON" in result.findings[0].description
+
+    def test_empty_input(self) -> None:
+        result = parse_review_result("", "empty")
+        assert result.system_group == "empty"
+        assert result.findings == []
+
+    def test_whitespace_only(self) -> None:
+        result = parse_review_result("   \n\n  ", "ws")
+        assert result.findings == []
+
+    def test_missing_keys(self) -> None:
+        raw = '{"findings": [{"description": "no file or line"}]}'
+        result = parse_review_result(raw, "partial")
+        assert len(result.findings) == 1
+        assert result.findings[0].file is None
+        assert result.findings[0].line is None
+
+    def test_string_line_number(self) -> None:
+        raw = '{"findings": [{"file": "a.py", "line": "52-55", "description": "range"}]}'
+        result = parse_review_result(raw, "range")
+        assert result.findings[0].line == "52-55"
+
+    def test_numeric_string_line_coerced(self) -> None:
+        raw = '{"findings": [{"file": "a.py", "line": "42", "description": "coerce"}]}'
+        result = parse_review_result(raw, "coerce")
+        assert result.findings[0].line == 42
+
+
+# ---------------------------------------------------------------------------
+# sanitize_file_paths
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeFilePaths:
+    def test_normal_paths_pass_through(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "src").mkdir()
+            Path(root, "src/main.py").touch()
+            result = sanitize_file_paths(["src/main.py"], root)
+            assert result == ["src/main.py"]
+
+    def test_path_traversal_dropped(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            result = sanitize_file_paths(["../../../etc/passwd"], root)
+            assert result == []
+
+    def test_absolute_path_stripped_to_relative(self) -> None:
+        """Absolute paths have leading / stripped — they become repo-relative."""
+        with tempfile.TemporaryDirectory() as root:
+            result = sanitize_file_paths(["/etc/passwd"], root)
+            assert result == ["etc/passwd"]  # Leading / stripped, stays in repo
+
+    def test_leading_slash_stripped(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "src").mkdir()
+            Path(root, "src/file.py").touch()
+            result = sanitize_file_paths(["/src/file.py"], root)
+            assert result == ["src/file.py"]
+
+    def test_mixed_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            Path(root, "good.py").touch()
+            result = sanitize_file_paths(
+                ["good.py", "../../evil.py"],
+                root,
+            )
+            assert result == ["good.py"]
+
+
+# ---------------------------------------------------------------------------
+# collect_reviewed_files
+# ---------------------------------------------------------------------------
+
+
+class TestCollectReviewedFiles:
+    def test_from_findings(self) -> None:
+        results = [
+            SystemReviewResult(
+                system_group="test",
+                findings=[RawFinding(file="a.py", line=1, description="x")],
+                files_explored=[],
+            )
+        ]
+        assert collect_reviewed_files(results) == {"a.py"}
+
+    def test_from_files_explored(self) -> None:
+        results = [
+            SystemReviewResult(
+                system_group="test",
+                findings=[],
+                files_explored=["b.py", "c.py"],
+            )
+        ]
+        assert collect_reviewed_files(results) == {"b.py", "c.py"}
+
+    def test_combined(self) -> None:
+        results = [
+            SystemReviewResult(
+                system_group="g1",
+                findings=[RawFinding(file="a.py", line=1, description="x")],
+                files_explored=["b.py"],
+            ),
+            SystemReviewResult(
+                system_group="g2",
+                findings=[RawFinding(file="c.py", line=2, description="y")],
+                files_explored=["a.py"],
+            ),
+        ]
+        assert collect_reviewed_files(results) == {"a.py", "b.py", "c.py"}
+
+    def test_empty(self) -> None:
+        assert collect_reviewed_files([]) == set()
+
+    def test_none_file_ignored(self) -> None:
+        results = [
+            SystemReviewResult(
+                system_group="test",
+                findings=[RawFinding(file=None, line=None, description="general")],
+                files_explored=[],
+            )
+        ]
+        assert collect_reviewed_files(results) == set()
+
+
+# ---------------------------------------------------------------------------
+# timed_out_reviewer_labels / append_degraded_coverage_section
+# ---------------------------------------------------------------------------
+
+
+class TestTimedOutReviewerLabels:
+    def test_no_timeouts_returns_empty(self) -> None:
+        results = [
+            SystemReviewResult(system_group="g1", findings=[], files_explored=[]),
+            SystemReviewResult(system_group="g2", findings=[], files_explored=[]),
+        ]
+        assert timed_out_reviewer_labels(results) == []
+
+    def test_collects_only_timed_out_labels_in_order(self) -> None:
+        results = [
+            SystemReviewResult(system_group="g1", findings=[], files_explored=[]),
+            SystemReviewResult(
+                system_group="specialist/orchestration::g2",
+                findings=[],
+                files_explored=[],
+                timed_out=True,
+            ),
+            SystemReviewResult(system_group="g3", findings=[], files_explored=[]),
+            SystemReviewResult(
+                system_group="g4",
+                findings=[],
+                files_explored=[],
+                timed_out=True,
+            ),
+        ]
+        assert timed_out_reviewer_labels(results) == [
+            "specialist/orchestration::g2",
+            "g4",
+        ]
+
+    def test_empty_results(self) -> None:
+        assert timed_out_reviewer_labels([]) == []
+
+
+class TestAppendDegradedCoverageSection:
+    def test_no_labels_returns_comment_unchanged(self) -> None:
+        comment = "## Review\n\nLooks good."
+        assert append_degraded_coverage_section(comment, []) == comment
+
+    def test_labels_appended_as_visible_section(self) -> None:
+        comment = "## Review\n\nLooks good."
+        result = append_degraded_coverage_section(comment, ["specialist/orchestration::g2"])
+        assert result.startswith(comment)
+        assert "Degraded coverage" in result
+        assert "specialist/orchestration::g2" in result
+        assert "not reviewed" in result
+
+    def test_multiple_labels_each_get_a_bullet(self) -> None:
+        result = append_degraded_coverage_section("body", ["a", "b", "c"])
+        assert "- a" in result
+        assert "- b" in result
+        assert "- c" in result

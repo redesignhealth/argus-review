@@ -1,0 +1,163 @@
+[project]
+name = "argus-code-review"
+dynamic = ["version"]
+description = "Self-orchestrated PR review agent using LangGraph + Claude Agent SDK"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Redesign Health" }]
+requires-python = ">=3.12,<3.14"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    # PyPI's license badge and license-filter still read the trove
+    # classifier, not the SPDX `license` field above -- keep both until
+    # PyPI's SPDX migration is complete.
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    # Claude Agent SDK for orchestrator + subagent dispatch.
+    # Pinned to ==0.1.81: regenerating the lock on a sliding
+    # exclude-newer window would otherwise downgrade to 0.1.75 and
+    # potentially miss API surface added in 0.1.76+.
+    "claude-agent-sdk==0.1.81",
+    # LangGraph for pipeline orchestration
+    "langgraph>=1.0.10,<2",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    # SQLite checkpointer used by the HTTP-storage mode path in graph.py
+    # when the sandbox can't reach Postgres on :5432.
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    # psycopg[binary] bundles a precompiled libpq, so tests and the
+    # Postgres checkpointer path (argus/graph.py) don't depend on a
+    # system libpq install. Without it, psycopg falls back to its pure
+    # Python ctypes implementation, which fails to import on macOS
+    # runners that don't ship libpq (ubuntu-latest happens to have it
+    # preinstalled, which is why this only broke macOS CI).
+    "psycopg[binary]>=3.2.0",
+    "psycopg-pool>=3.2.0",
+    # LangChain for structured LLM calls
+    "langchain>=1.2.10,<2",
+    "langchain-anthropic>=1.2.0",
+    # LangSmith for Agent SDK session tracing
+    "langsmith>=0.2.0,<1",
+    # HTTP client (GitHub API, storage HTTP shim)
+    "httpx>=0.27.0",
+    # OpenAI SDK for the plan-extraction fallback path
+    "openai>=1.50.0",
+    # Postgres storage backend (history + checkpoints)
+    "sqlalchemy[asyncio]>=2.0.0",
+    "asyncpg>=0.29.0",
+    # Pydantic for data contracts + configuration
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    # .env support (argus.dotenv_utils)
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+Repository = "https://github.com/redesignhealth/argus-review"
+Issues = "https://github.com/redesignhealth/argus-review/issues"
+Changelog = "https://github.com/redesignhealth/argus-review/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio<=0.21.2",
+    "pytest-httpx>=0.30.0",
+    "mypy>=1.10.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+argus = "argus.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+testpaths = ["tests"]
+# --strict-markers turns unregistered @pytest.mark.<name> typos into errors.
+addopts = ["-m", "not integration", "--strict-markers"]
+markers = [
+    "integration: marks tests as integration tests (require live DB; skipped locally)",
+    "packaging: marks tests that build the wheel via `uv build` (slow; shells out)",
+]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "claude_agent_sdk",
+    "claude_agent_sdk.*",
+    "langgraph.*",
+    "langchain.*",
+    "langchain_anthropic.*",
+    "langchain_core.*",
+]
+ignore_missing_imports = true
+
+# Tests intentionally build partial/untyped fixtures (plain dicts standing in
+# for TypedDict state, small untyped helper functions) — relax the handful of
+# strict-mode flags that would otherwise require annotating every test helper
+# and casting every fixture dict to the full ReviewState/AsyncSession shape.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+check_untyped_defs = false
+implicit_reexport = true
+disallow_any_generics = false
+disable_error_code = ["arg-type"]
+
+# argus.cli exposes stdlib modules (threading/time/os) as attributes for
+# test-time patching (patch.object(cli.threading, "Thread", ...)); allow
+# that without requiring an explicit __all__.
+[[tool.mypy.overrides]]
+module = "argus.cli"
+implicit_reexport = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[build-system]
+# hatchling>=1.24 is required for the `license-files` PEP 639 field above --
+# an older hatchling would silently omit LICENSE from the wheel.
+requires = ["hatchling>=1.24", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+# Single-sourced version: derived from the git tag (e.g. `v0.1.0` -> `0.1.0`)
+# rather than a hand-maintained literal. With no tags yet in this repo, this
+# resolves to a `0.1.dev<N>+g<sha>`-style dev version — see docs/RELEASING.md.
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["argus"]
+# argus/prompts/*.md and any other package-relative data files are included
+# by hatchling's default wheel packaging (whole-package copy) — no extra
+# `include`/`force-include` needed. Verified by tests/test_packaging.py.
+# schema/*.sql is intentionally NOT packaged into the wheel: it lives outside
+# the `argus` package and ships as repo/sdist content only (Postgres DDL for
+# self-hosters running the postgres storage backend). See docs/RELEASING.md.
+# CHANGELOG.md is the same story: docs-only, not a runtime resource `argus`
+# imports, so it ships in the sdist below but not the wheel.
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/argus",
+    "/schema",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]

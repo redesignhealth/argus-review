@@ -1,0 +1,323 @@
+{
+  "$defs": {
+    "DroppedFinding": {
+      "description": "A BLOCKING finding that was rejected by the post-writer validator.",
+      "properties": {
+        "finding": {
+          "$ref": "#/$defs/Finding"
+        },
+        "rejection_rationale": {
+          "description": "Evidence-based explanation of why this finding was rejected",
+          "title": "Rejection Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "finding",
+        "rejection_rationale"
+      ],
+      "title": "DroppedFinding",
+      "type": "object"
+    },
+    "Finding": {
+      "description": "A single review finding.",
+      "properties": {
+        "category": {
+          "description": "Review category: code-correctness, security, cross-layer, test-adequacy, cross-cutting",
+          "title": "Category",
+          "type": "string"
+        },
+        "description": {
+          "description": "Human-readable description of the finding",
+          "title": "Description",
+          "type": "string"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "File path, if applicable",
+          "title": "File"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Line number, if applicable",
+          "title": "Line"
+        },
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
+        "suggestion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Suggested fix or improvement",
+          "title": "Suggestion"
+        }
+      },
+      "required": [
+        "severity",
+        "category",
+        "description"
+      ],
+      "title": "Finding",
+      "type": "object"
+    },
+    "PriorFeedbackItem": {
+      "description": "Status of a prior-round finding after verification.",
+      "properties": {
+        "description": {
+          "description": "Original finding description",
+          "title": "Description",
+          "type": "string"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "rationale": {
+          "default": "",
+          "description": "Why this status was assigned",
+          "title": "Rationale",
+          "type": "string"
+        },
+        "severity": {
+          "description": "Original severity: BLOCKING or SUGGESTION",
+          "title": "Severity",
+          "type": "string"
+        },
+        "status": {
+          "description": "RESOLVED, UNRESOLVED, or REGRESSED",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "description",
+        "status"
+      ],
+      "title": "PriorFeedbackItem",
+      "type": "object"
+    },
+    "RiskLevel": {
+      "description": "Risk classification for the PR.",
+      "enum": [
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ],
+      "title": "RiskLevel",
+      "type": "string"
+    },
+    "Severity": {
+      "description": "Finding severity \u2014 only two levels by design.\n\nBLOCKING = runtime failures and security vulnerabilities only.\nSUGGESTION = everything else.",
+      "enum": [
+        "BLOCKING",
+        "SUGGESTION"
+      ],
+      "title": "Severity",
+      "type": "string"
+    },
+    "SystemCoverage": {
+      "description": "Coverage status for a reviewed system group.",
+      "properties": {
+        "checks_performed": {
+          "description": "What conventions/patterns were checked",
+          "items": {
+            "type": "string"
+          },
+          "title": "Checks Performed",
+          "type": "array"
+        },
+        "files_explored": {
+          "description": "Files the subagent read",
+          "items": {
+            "type": "string"
+          },
+          "title": "Files Explored",
+          "type": "array"
+        },
+        "system": {
+          "description": "System group name, e.g. 'Review service orchestrator'",
+          "title": "System",
+          "type": "string"
+        }
+      },
+      "required": [
+        "system"
+      ],
+      "title": "SystemCoverage",
+      "type": "object"
+    },
+    "TokenUsage": {
+      "description": "Aggregated token usage across orchestrator + all subagents.",
+      "properties": {
+        "cache_creation_tokens": {
+          "default": 0,
+          "title": "Cache Creation Tokens",
+          "type": "integer"
+        },
+        "cache_read_tokens": {
+          "default": 0,
+          "title": "Cache Read Tokens",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "default": 0.0,
+          "description": "Estimated total cost in USD",
+          "title": "Cost Usd",
+          "type": "number"
+        },
+        "input_tokens": {
+          "default": 0,
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "default": 0,
+          "title": "Output Tokens",
+          "type": "integer"
+        }
+      },
+      "title": "TokenUsage",
+      "type": "object"
+    },
+    "Verdict": {
+      "description": "Overall review verdict.",
+      "enum": [
+        "APPROVE",
+        "BLOCKING"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "description": "POST /review response body.",
+  "properties": {
+    "coverage_map": {
+      "items": {
+        "$ref": "#/$defs/SystemCoverage"
+      },
+      "title": "Coverage Map",
+      "type": "array"
+    },
+    "dropped_findings": {
+      "description": "BLOCKING findings rejected by the validator (audit trail, not shown in comment)",
+      "items": {
+        "$ref": "#/$defs/DroppedFinding"
+      },
+      "title": "Dropped Findings",
+      "type": "array"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/$defs/Finding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "lite_mode": {
+      "default": false,
+      "description": "True if this review was performed in lite mode (single-pass check)",
+      "title": "Lite Mode",
+      "type": "boolean"
+    },
+    "notes_for_next_round": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Structured notes for the next review round (coverage map + findings with status)",
+      "title": "Notes For Next Round"
+    },
+    "preflight_reason": {
+      "default": "",
+      "description": "Preflight routing reason \u2014 stored in result_json for lite round history",
+      "title": "Preflight Reason",
+      "type": "string"
+    },
+    "prior_feedback": {
+      "description": "Verification status of prior-round findings (empty for round 1)",
+      "items": {
+        "$ref": "#/$defs/PriorFeedbackItem"
+      },
+      "title": "Prior Feedback",
+      "type": "array"
+    },
+    "prior_review_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "UUID of the prior review this round builds on (None for round 1)",
+      "title": "Prior Review Id"
+    },
+    "review_comment": {
+      "description": "Formatted markdown comment ready to post on the PR",
+      "title": "Review Comment",
+      "type": "string"
+    },
+    "review_round": {
+      "default": 1,
+      "description": "Which review round this is (1 = first review, 2+ = incremental)",
+      "title": "Review Round",
+      "type": "integer"
+    },
+    "risk_level": {
+      "$ref": "#/$defs/RiskLevel"
+    },
+    "usage": {
+      "$ref": "#/$defs/TokenUsage"
+    },
+    "verdict": {
+      "$ref": "#/$defs/Verdict"
+    }
+  },
+  "required": [
+    "verdict",
+    "risk_level",
+    "review_comment"
+  ],
+  "title": "ReviewResponse",
+  "type": "object"
+}

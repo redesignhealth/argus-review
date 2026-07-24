@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Version is derived from git tags via hatch-vcs (see
+          # pyproject.toml [tool.hatch.version]); `uv sync` builds the
+          # local package, so it needs full tag history, not the default
+          # shallow (depth-1) clone.
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --all-extras
+      - name: ruff check
+        run: uv run ruff check .
+      - name: ruff format --check
+        run: uv run ruff format --check .
+      - name: mypy
+        run: uv run mypy .
+
+  # Argus must never depend on rh_lib (a private, RH-internal package) at
+  # the code level — Argus is a standalone package. Scoped to *.py only:
+  # five prompt files under argus/prompts/*.md intentionally mention
+  # "rh_lib" verbatim, because they ship Redesign Health's production review
+  # criteria as a worked example (see docs/CUSTOMIZING_PROMPTS.md) — that's
+  # prose content for the LLM to read, not a code dependency, and scrubbing
+  # it would misrepresent the prompts as something other than what they are.
+  guard-rh-lib:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No rh_lib references in Python source
+        run: |
+          if grep -rn "rh_lib" --include="*.py" argus/ tests/; then
+            echo "Found rh_lib references in Python code — argus must be a standalone package." >&2
+            echo "(Prompt .md files are exempt — see the comment on this job in ci.yml.)" >&2
+            exit 1
+          fi
+
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install dependencies
+        run: uv sync --all-extras
+      - name: pytest
+        run: uv run pytest
