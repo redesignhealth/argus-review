@@ -770,9 +770,19 @@ def _build_coverage_messages(
 
 
 def _get_llm(model_id: str, max_tokens: int = 16384, temperature: float | None = None) -> Any:
-    """Create a LangChain chat model with explicit API key from settings."""
+    """Create a LangChain chat model with explicit API key from settings.
+
+    ``langchain_anthropic.ChatAnthropic`` has no ``auth_token``/bearer-style
+    field (only ``anthropic_api_key``, always sent as ``x-api-key``) — unlike
+    the raw Anthropic SDK and the Claude Agent SDK subprocess path (see
+    ``runners.py``), which both support ANTHROPIC_AUTH_TOKEN natively. When
+    only ANTHROPIC_AUTH_TOKEN is configured, pass its value through as the
+    api_key kwarg anyway: this is a real limitation for gateways that reject
+    x-api-key, but works for any gateway that accepts either header.
+    """
     settings = get_settings()
-    kwargs: dict[str, Any] = {"api_key": settings.ANTHROPIC_API_KEY, "max_tokens": max_tokens}
+    _, anthropic_credential = settings.anthropic_credential
+    kwargs: dict[str, Any] = {"api_key": anthropic_credential, "max_tokens": max_tokens}
     if temperature is not None:
         kwargs["temperature"] = temperature
     return init_chat_model(model_id, **kwargs)
@@ -2321,6 +2331,8 @@ async def build_pipeline() -> AsyncIterator[Any]:
     # setdefault avoids overwriting values already present in the environment.
     if settings.ANTHROPIC_API_KEY:
         os.environ.setdefault("ANTHROPIC_API_KEY", settings.ANTHROPIC_API_KEY)
+    if settings.ANTHROPIC_AUTH_TOKEN:
+        os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", settings.ANTHROPIC_AUTH_TOKEN)
     if settings.OPENAI_API_KEY:
         os.environ.setdefault("OPENAI_API_KEY", settings.OPENAI_API_KEY)
     if settings.LANGSMITH_API_KEY:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 
@@ -30,14 +31,57 @@ def test_get_settings_reads_required_env_vars(monkeypatch: pytest.MonkeyPatch) -
     assert settings.OPENAI_API_KEY == "openai-key"
 
 
-def test_missing_required_var_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing ANTHROPIC_API_KEY (or any required var) fails loudly at construction."""
+def test_missing_github_or_openai_token_raises_at_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """GITHUB_TOKEN_RO / OPENAI_API_KEY have no alternative -- still hard-required.
+
+    chdir to an empty tmp_path: Settings loads a local ``.env`` (relative to
+    cwd) as a fallback, and this repo checkout has a real dev ``.env`` on
+    disk -- deleting the OS env var alone wouldn't test "truly absent."
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GITHUB_TOKEN_RO", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    with pytest.raises(Exception, match="GITHUB_TOKEN_RO"):
+        get_settings()
+
+
+def test_anthropic_auth_token_alone_does_not_raise_at_construction(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ANTHROPIC_AUTH_TOKEN (the gateway/proxy convention) is a full substitute
+    for ANTHROPIC_API_KEY -- Settings() must not require both, or either
+    specifically. (Whether *neither* is set is cli._check_settings's job, for
+    a clean CLI error instead of a raw pydantic traceback -- see
+    tests/test_cli_preflight.py.)
+
+    chdir to an empty tmp_path -- see test_missing_github_or_openai_token_
+    raises_at_construction's docstring for why deleting the OS env var
+    alone isn't enough (this repo checkout has a real dev .env on disk).
+    """
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "proxy-token")
     monkeypatch.setenv("GITHUB_TOKEN_RO", "github-token")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
 
-    with pytest.raises(Exception, match="ANTHROPIC_API_KEY"):
-        get_settings()
+    settings = get_settings()
+    assert settings.ANTHROPIC_API_KEY is None
+    assert settings.ANTHROPIC_AUTH_TOKEN == "proxy-token"
+    assert settings.anthropic_credential == ("ANTHROPIC_AUTH_TOKEN", "proxy-token")
+
+
+def test_anthropic_api_key_wins_when_both_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "proxy-token")
+    monkeypatch.setenv("GITHUB_TOKEN_RO", "github-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    settings = get_settings()
+    assert settings.anthropic_credential == ("ANTHROPIC_API_KEY", "anthropic-key")
 
 
 def test_supabase_db_url_alias_used_when_argus_db_url_unset(

@@ -365,7 +365,8 @@ async def run_system_reviewer(
         model=_SYSTEM_REVIEWER_MODEL,
         system_prompt=system_prompt,
         user_message=user_message,
-        api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
@@ -450,7 +451,8 @@ async def run_specialist_reviewer(
         model=_SYSTEM_REVIEWER_MODEL,
         system_prompt=system_prompt,
         user_message=user_message,
-        api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
@@ -523,7 +525,8 @@ async def run_cross_cutting_reviewer(
         model=_CROSS_CUTTING_MODEL,
         system_prompt=system_prompt,
         user_message=user_message,
-        api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
@@ -579,7 +582,8 @@ async def run_tests_and_docs_reviewer(
         model=_SYSTEM_REVIEWER_MODEL,
         system_prompt=system_prompt,
         user_message=user_message,
-        api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
@@ -647,7 +651,8 @@ async def run_feedback_verifier(
         model=_SYSTEM_REVIEWER_MODEL,
         system_prompt=system_prompt,
         user_message=user_message,
-        api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
@@ -774,7 +779,8 @@ async def run_blocking_validator(
         model=_SYSTEM_REVIEWER_MODEL,
         system_prompt=system_prompt,
         user_message=user_message,
-        api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_api_key=settings.ANTHROPIC_API_KEY,
+        anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
@@ -823,7 +829,8 @@ def _run_session_in_subprocess(
     model: str,
     system_prompt: str,
     user_message: str,
-    api_key: str,
+    anthropic_api_key: str | None = None,
+    anthropic_auth_token: str | None = None,
     context7_key: str | None,
     context7_library_id: str | None = None,
     cwd: str,
@@ -848,7 +855,8 @@ def _run_session_in_subprocess(
             model,
             system_prompt,
             user_message,
-            api_key,
+            anthropic_api_key,
+            anthropic_auth_token,
             context7_key,
             context7_library_id,
             cwd,
@@ -883,7 +891,8 @@ def _validator_worker(
     model: str,
     system_prompt: str,
     user_message: str,
-    api_key: str,
+    anthropic_api_key: str | None,
+    anthropic_auth_token: str | None,
     context7_key: str | None,
     context7_library_id: str | None,
     cwd: str,
@@ -899,7 +908,18 @@ def _validator_worker(
     with contextlib.suppress(OSError, AttributeError):
         os.setsid()
 
-    os.environ["ANTHROPIC_API_KEY"] = api_key
+    # Set whichever credential the caller actually configured -- forcing
+    # everything to ANTHROPIC_API_KEY would send a gateway/proxy bearer
+    # token as an x-api-key, which not every gateway accepts. Clear the
+    # other var explicitly (rather than leaving a stale inherited value)
+    # so get_settings() below re-resolves to exactly this one credential.
+    if anthropic_auth_token:
+        os.environ["ANTHROPIC_AUTH_TOKEN"] = anthropic_auth_token
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+    else:
+        assert anthropic_api_key
+        os.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
+        os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
     if context7_key:
         os.environ["CONTEXT7_API_KEY"] = context7_key
     # Must accompany CONTEXT7_API_KEY: get_settings() is called fresh in this
@@ -1080,7 +1100,7 @@ async def _run_claude_session(
         model=model,
         system_prompt=system_prompt,
         max_turns=_MAX_TURNS,
-        env={"ANTHROPIC_API_KEY": settings.ANTHROPIC_API_KEY},
+        env=dict([settings.anthropic_credential]),
         stderr=_stderr_handler,
     )
 

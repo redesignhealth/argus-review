@@ -16,7 +16,15 @@ class Settings(BaseSettings):
     """Application settings for the Argus reviewer.
 
     Required:
-        ANTHROPIC_API_KEY: Claude Agent SDK + LangChain calls.
+        ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN): Claude Agent SDK +
+            LangChain calls. Exactly the same dual-credential convention
+            Anthropic's own SDK and the Claude Code CLI support natively:
+            ``ANTHROPIC_API_KEY`` is sent as ``x-api-key`` (a real Anthropic
+            API key); ``ANTHROPIC_AUTH_TOKEN`` is sent as
+            ``Authorization: Bearer`` (the standard mechanism for routing
+            through a corporate LLM gateway/proxy, where the credential
+            isn't a real Anthropic key). Provide at least one; if both are
+            set, ``ANTHROPIC_API_KEY`` wins.
         GITHUB_TOKEN_RO: PR diff fetch + repo clone (read-only PAT).
         OPENAI_API_KEY: Plan-extraction fallback path.
 
@@ -45,7 +53,8 @@ class Settings(BaseSettings):
             Defaults to 300 (5 minutes).
     """
 
-    ANTHROPIC_API_KEY: str
+    ANTHROPIC_API_KEY: str | None = None
+    ANTHROPIC_AUTH_TOKEN: str | None = None
     GITHUB_TOKEN_RO: str
     OPENAI_API_KEY: str
 
@@ -81,6 +90,29 @@ class Settings(BaseSettings):
     def db_url(self) -> str | None:
         """Resolved Postgres URL: ``ARGUS_DB_URL`` wins over ``SUPABASE_DB_URL``."""
         return self.ARGUS_DB_URL or self.SUPABASE_DB_URL
+
+    @property
+    def anthropic_credential(self) -> tuple[str, str]:
+        """The configured Anthropic credential as ``(env_var_name, value)``.
+
+        Callers that need to hand this credential to something that itself
+        reads an env var (the spawned ``claude`` CLI subprocess) must set
+        the SAME variable name the caller configured — forcing everything
+        to ``ANTHROPIC_API_KEY`` would send a proxy/gateway bearer token as
+        an ``x-api-key``, which not every gateway accepts. ``ANTHROPIC_API_KEY``
+        wins when both are set, matching the Anthropic SDK's own precedence.
+
+        Raises ``ValueError`` if neither is set -- ``Settings`` construction
+        deliberately allows this (enforcement is ``cli._check_settings``'s
+        job, for a clean CLI error instead of a raw pydantic traceback), so
+        this property is the backstop for any caller that reaches here
+        without having gone through that check first.
+        """
+        if self.ANTHROPIC_API_KEY:
+            return ("ANTHROPIC_API_KEY", self.ANTHROPIC_API_KEY)
+        if self.ANTHROPIC_AUTH_TOKEN:
+            return ("ANTHROPIC_AUTH_TOKEN", self.ANTHROPIC_AUTH_TOKEN)
+        raise ValueError("One of ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is required")
 
 
 @lru_cache(maxsize=1)

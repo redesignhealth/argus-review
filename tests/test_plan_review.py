@@ -72,6 +72,12 @@ def _fake_settings() -> Any:
     with patch("argus.graph.get_settings") as m:
         s = MagicMock()
         s.ANTHROPIC_API_KEY = "test-key"
+        # Explicit None, not an auto-generated (truthy) MagicMock attribute --
+        # and anthropic_credential is a real property on Settings that this
+        # bare mock can't derive, so it's stubbed directly to match what the
+        # real object would return given ANTHROPIC_API_KEY above.
+        s.ANTHROPIC_AUTH_TOKEN = None
+        s.anthropic_credential = ("ANTHROPIC_API_KEY", "test-key")
         s.OPENAI_API_KEY = "test-openai-key"
         m.return_value = s
         yield m

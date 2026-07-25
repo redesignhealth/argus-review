@@ -47,8 +47,12 @@ Environment variables (HTTP-mode opt-in):
 
 No storage env vars are required: with neither ``ARGUS_DB_URL`` nor the
 HTTP-shim URLs set, round history and checkpoints default to local SQLite.
-Required secrets are only ANTHROPIC_API_KEY, GITHUB_TOKEN_RO,
-and OPENAI_API_KEY.
+Required secrets are only one of ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
+GITHUB_TOKEN_RO, and OPENAI_API_KEY. ANTHROPIC_AUTH_TOKEN is the standard
+mechanism for routing through a corporate LLM gateway/proxy instead of a
+real Anthropic API key (sent as ``Authorization: Bearer`` rather than
+``x-api-key``) — the same convention the Anthropic SDK and Claude Code
+itself support natively.
 """
 
 from __future__ import annotations
@@ -154,6 +158,7 @@ def _load_settings() -> "Settings":
     # them directly picks up the right values.
     for attr in (
         "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
         "OPENAI_API_KEY",
         "GITHUB_TOKEN_RO",
         "LANGSMITH_API_KEY",
@@ -172,18 +177,18 @@ def _load_settings() -> "Settings":
 def _check_settings(settings: "Settings") -> None:
     """Validate that critical secrets were loaded, fail loudly otherwise.
 
-    Only the three API credentials are required: ``ANTHROPIC_API_KEY``
-    (Agent SDK + LangChain), ``GITHUB_TOKEN_RO`` (diff fetch + clone), and
-    ``OPENAI_API_KEY`` (plan-extraction path). No storage configuration is
-    required — with neither ``ARGUS_DB_URL`` nor the HTTP-shim URLs set,
-    history and checkpoints default to local SQLite.
+    Only the three API credentials are required: one of ``ANTHROPIC_API_KEY``
+    / ``ANTHROPIC_AUTH_TOKEN`` (Agent SDK + LangChain), ``GITHUB_TOKEN_RO``
+    (diff fetch + clone), and ``OPENAI_API_KEY`` (plan-extraction path). No
+    storage configuration is required — with neither ``ARGUS_DB_URL`` nor
+    the HTTP-shim URLs set, history and checkpoints default to local SQLite.
 
     Args:
         settings: Resolved settings object.
     """
     missing = []
-    if not settings.ANTHROPIC_API_KEY:
-        missing.append("ANTHROPIC_API_KEY")
+    if not settings.ANTHROPIC_API_KEY and not settings.ANTHROPIC_AUTH_TOKEN:
+        missing.append("ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN)")
     if not settings.GITHUB_TOKEN_RO:
         missing.append("GITHUB_TOKEN_RO")
     if not settings.OPENAI_API_KEY:
