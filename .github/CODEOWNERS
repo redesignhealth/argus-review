@@ -1,0 +1,5 @@
+# Required reviewers for all changes (see branch protection: "require review
+# from code owners"). This is the mechanism that makes the "require 1
+# approving review" rule actually restrictive on a public repo -- without
+# it, any GitHub account (not just maintainers) can satisfy that count.
+* @ptollinger @aronszanto @purpleCowOnWheels @dannycpan-main @vd-hue @sourav-sarkar-rh
