@@ -45,6 +45,10 @@ def _stub_settings(db_url: str | None = "stub-db-url") -> MagicMock:
         "CONTEXT7_API_KEY",
     ):
         setattr(settings, k, f"stub-{k.lower()}")
+    # Only one of ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN is normally set --
+    # explicit None (not an auto-generated MagicMock, which is truthy) so the
+    # propagation loop's `if val:` guard skips it correctly.
+    settings.ANTHROPIC_AUTH_TOKEN = None
     settings.db_url = db_url
     return settings
 
@@ -68,6 +72,10 @@ def test_check_settings_exits_when_required_missing(
 
     settings = MagicMock()
     settings.ANTHROPIC_API_KEY = None
+    # Explicit None, not an auto-generated (truthy) MagicMock attribute --
+    # otherwise the "missing" check's `not settings.ANTHROPIC_AUTH_TOKEN`
+    # half is always False and this test can't actually exercise the path.
+    settings.ANTHROPIC_AUTH_TOKEN = None
     settings.GITHUB_TOKEN_RO = "gh"
     settings.OPENAI_API_KEY = "oa"
     settings.db_url = "url"
@@ -79,11 +87,24 @@ def test_check_settings_exits_when_required_missing(
     assert any("ANTHROPIC_API_KEY" in rec.message for rec in caplog.records)
 
 
+def test_check_settings_accepts_auth_token_in_place_of_api_key() -> None:
+    """ANTHROPIC_AUTH_TOKEN alone (the gateway/proxy convention) is not 'missing'."""
+    settings = MagicMock()
+    settings.ANTHROPIC_API_KEY = None
+    settings.ANTHROPIC_AUTH_TOKEN = "proxy-token"
+    settings.GITHUB_TOKEN_RO = "gh"
+    settings.OPENAI_API_KEY = "oa"
+    settings.db_url = "url"
+
+    argus_review_local._check_settings(settings)  # should not raise
+
+
 def test_check_settings_does_not_require_db_url() -> None:
     """A DB URL is NOT required: no ARGUS_DB_URL / SUPABASE_DB_URL
     and no HTTP storage URLs → SQLite history + checkpoints is the default."""
     settings = MagicMock()
     settings.ANTHROPIC_API_KEY = "a"
+    settings.ANTHROPIC_AUTH_TOKEN = None
     settings.GITHUB_TOKEN_RO = "gh"
     settings.OPENAI_API_KEY = "oa"
     settings.db_url = None

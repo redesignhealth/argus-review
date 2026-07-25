@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ANTHROPIC_AUTH_TOKEN` (the standard bearer/gateway-proxy credential
+  convention) is now supported alongside `ANTHROPIC_API_KEY`. Previously
+  `Settings` required `ANTHROPIC_API_KEY` unconditionally, so a caller
+  routing through a corporate LLM gateway/proxy with only
+  `ANTHROPIC_AUTH_TOKEN` set got a hard startup failure with no
+  workaround.
+
 ## [0.1.1] - 2026-07-24
 
 ### Fixed
