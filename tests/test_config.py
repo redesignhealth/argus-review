@@ -156,11 +156,11 @@ def test_optional_fields_default_to_none(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.ARGUS_PROMPTS_DIR is None
 
 
-def test_session_timeout_defaults_to_300(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_timeout_defaults_to_600(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_required(monkeypatch)
     monkeypatch.delenv("ARGUS_SESSION_TIMEOUT", raising=False)
     settings = get_settings()
-    assert settings.ARGUS_SESSION_TIMEOUT == 300
+    assert settings.ARGUS_SESSION_TIMEOUT == 600
 
 
 def test_session_timeout_override(monkeypatch: pytest.MonkeyPatch) -> None:

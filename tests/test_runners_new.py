@@ -44,7 +44,7 @@ def _make_session_result(result_text: str = "", cost_usd: float = 0.0) -> MagicM
     sr.tool_names = []
     sr.context7_call_count = 0
     sr.model = "claude-sonnet-4-6"
-    sr.timed_out = False
+    sr.failure_reason = None
     return sr
 
 
@@ -126,15 +126,16 @@ class TestRunTestsAndDocsReviewer:
 
     @pytest.mark.asyncio
     async def test_timed_out_session_marks_result_and_agent_run(self) -> None:
-        """A SessionResult with timed_out=True flows through _parse_review_result's
-        output into SystemReviewResult.timed_out and AgentRunData.timed_out, so a
-        killed reviewer is distinguishable from one that genuinely found nothing.
+        """A SessionResult with failure_reason="timeout" flows through
+        _parse_review_result's output into SystemReviewResult.failure_reason and
+        AgentRunData.failure_reason, so a killed reviewer is distinguishable from
+        one that genuinely found nothing.
         """
         mock_settings = MagicMock()
         mock_settings.CONTEXT7_API_KEY = None
         mock_settings.ARGUS_SESSION_TIMEOUT = 300
         timeout_session = _make_session_result("", cost_usd=0.0)
-        timeout_session.timed_out = True
+        timeout_session.failure_reason = "timeout"
 
         with (
             patch(
@@ -155,12 +156,45 @@ class TestRunTestsAndDocsReviewer:
                 settings=mock_settings,
             )
 
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
         assert result.findings == []
         assert agent_run is not None
-        assert agent_run.timed_out is True
+        assert agent_run.failure_reason == "timeout"
         call_kwargs = mock_session.call_args.kwargs
         assert call_kwargs["timeout_s"] == 300
+
+    @pytest.mark.asyncio
+    async def test_user_message_includes_large_file_read_directive(self) -> None:
+        """TECH-4643: reviewers that trace across files need explicit
+        Grep-first/scoped-Read guidance for large targets, or a full Read of
+        a multi-thousand-line file can exhaust enough context budget in one
+        tool call to autocompact-thrash for the rest of the session --
+        silently, since the session still exits normally rather than timing
+        out."""
+        mock_settings = MagicMock()
+        mock_settings.CONTEXT7_API_KEY = None
+
+        with (
+            patch(
+                f"{_RUNNERS_MODULE}.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="You are a test reviewer.",
+            ),
+            patch(
+                f"{_RUNNERS_MODULE}._run_session_in_subprocess",
+                return_value=_make_session_result(_VALID_REVIEW_JSON, 0.05),
+            ) as mock_session,
+        ):
+            from argus.runners import run_tests_and_docs_reviewer
+
+            await run_tests_and_docs_reviewer(
+                plan=_make_plan(),
+                diff_text="diff --git a/src/app.py ...",
+                settings=mock_settings,
+            )
+
+        call_kwargs = mock_session.call_args.kwargs
+        assert "Reading Large Files" in call_kwargs["user_message"]
 
     @pytest.mark.asyncio
     async def test_empty_result_text_returns_empty_findings(self) -> None:
@@ -352,7 +386,7 @@ class TestRunSessionInSubprocess:
         assert result.finished_at == result.started_at + timedelta(seconds=_SUBPROCESS_TIMEOUT_S)
         mock_os.killpg.assert_called_once_with(12345, signal.SIGKILL)
         mock_process.kill.assert_not_called()
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
 
     def test_timeout_kills_process_group_when_worker_is_group_leader(self) -> None:
         """On timeout, os.killpg is called with the worker's pgid when
@@ -392,7 +426,7 @@ class TestRunSessionInSubprocess:
         assert result.finished_at == result.started_at + timedelta(seconds=_SUBPROCESS_TIMEOUT_S)
         mock_os.killpg.assert_called_once_with(99001, signal.SIGKILL)
         mock_process.kill.assert_not_called()
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
 
     def test_timeout_startup_race_falls_back_to_kill(self) -> None:
         """On timeout, when pgid != pid (setsid not yet run - startup race),
@@ -431,7 +465,7 @@ class TestRunSessionInSubprocess:
         assert result.finished_at == result.started_at + timedelta(seconds=_SUBPROCESS_TIMEOUT_S)
         mock_os.killpg.assert_not_called()
         mock_process.kill.assert_called_once()
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
 
     def test_custom_timeout_s_overrides_default(self) -> None:
         """A caller-supplied ``timeout_s`` (from settings.ARGUS_SESSION_TIMEOUT)
@@ -466,7 +500,7 @@ class TestRunSessionInSubprocess:
 
         mock_process.join.assert_any_call(timeout=45)
         assert result.duration_seconds == 45.0
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
 
     def test_normal_completion_returns_result(self) -> None:
         """When subprocess completes and pipe has data, returns that data."""
@@ -532,6 +566,7 @@ class TestRunSessionInSubprocess:
 
         assert result.result_text == ""
         assert result.cost_usd == 0.0
+        assert result.failure_reason == "worker_crashed"
         mock_process.kill.assert_not_called()
 
 
@@ -574,6 +609,7 @@ class TestValidatorWorker:
         # After the refactor, worker sends a SessionResult on error
         assert sent_value.result_text == ""
         assert sent_value.cost_usd == 0.0
+        assert sent_value.failure_reason == "worker_crashed"
         mock_pipe.close.assert_called_once()
 
 
@@ -741,7 +777,7 @@ class TestRunBlockingValidator:
         timeout_session.finished_at = timeout_session.started_at + timedelta(
             seconds=_SUBPROCESS_TIMEOUT_S
         )
-        timeout_session.timed_out = True
+        timeout_session.failure_reason = "timeout"
 
         mock_settings = MagicMock(CONTEXT7_API_KEY=None)
 
@@ -767,6 +803,34 @@ class TestRunBlockingValidator:
 
         assert agent_run is not None
         assert agent_run.duration_seconds == float(_SUBPROCESS_TIMEOUT_S)
-        assert agent_run.timed_out is True
+        assert agent_run.failure_reason == "timeout"
         # Timed-out session produces no output text, so validator conservatively confirms.
         assert len(result.items) == len(_VALID_BLOCKING_FINDINGS)
+
+
+# ---------------------------------------------------------------------------
+# TECH-4643: large-file-read directive wiring
+# ---------------------------------------------------------------------------
+
+
+class TestLargeFileReadDirectiveWiring:
+    def test_directive_reaches_every_broad_exploration_reviewer(self) -> None:
+        """Guards against a future edit to one of these four prompt-building
+        functions silently dropping the _LARGE_FILE_READ_DIRECTIVE append --
+        each is a reviewer that traces across files (the failure mode
+        TECH-4643 describes), unlike the feedback-verifier/blocking-validator,
+        which only check specific, already-scoped claims."""
+        import inspect
+
+        from argus import runners
+
+        for func in (
+            runners.run_system_reviewer,
+            runners.run_specialist_reviewer,
+            runners.run_cross_cutting_reviewer,
+            runners.run_tests_and_docs_reviewer,
+        ):
+            source = inspect.getsource(func)
+            assert "_LARGE_FILE_READ_DIRECTIVE" in source, (
+                f"{func.__name__} is missing the large-file-read directive"
+            )

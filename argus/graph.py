@@ -32,16 +32,19 @@ import logging
 import operator
 import os
 import re
+import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
-from argus.helpers import append_degraded_coverage_section, timed_out_reviewer_labels
+from argus.helpers import append_degraded_coverage_section, failed_reviewer_labels
 from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
+from argus.llm.pricing import get_token_cost
 
 from langchain.chat_models import init_chat_model
 from anthropic import APIConnectionError, APITimeoutError
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy.exc import ProgrammingError
 from langgraph.types import RetryPolicy, Send
 from langsmith import traceable
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -53,9 +56,17 @@ from argus.storage.resolver import (
     HistoryBackendKind,
     get_history_backend,
     resolve_history_backend_kind,
+    validate_history_backend_connectivity,
 )
 from argus.storage.sql import AgentRunIn, CodeReviewRoundIn
-from argus.models import DroppedFinding, ReviewRequest, ReviewResponse, Severity, Verdict
+from argus.models import (
+    DroppedFinding,
+    ReviewRequest,
+    ReviewResponse,
+    Severity,
+    TokenUsage,
+    Verdict,
+)
 from argus.pipeline_models import (
     AgentRunData,
     CoverageResult,
@@ -105,18 +116,36 @@ _checkpoint_tables_created = False
 _PLANNER_MODEL = f"anthropic:{CLAUDE_FRONTIER}"
 _WRITER_MODEL = f"anthropic:{CLAUDE_DEFAULT}"
 _COVERAGE_MODEL = f"anthropic:{CLAUDE_FRONTIER}"
+# run_lite_review() and _estimate_lite_review_cost() must agree on which
+# model actually ran -- a single constant instead of two independent
+# f"anthropic:{CLAUDE_DEFAULT}"/CLAUDE_DEFAULT references means a future
+# change to one call site can't silently leave the other mispriced.
+_LITE_REVIEW_MODEL = CLAUDE_DEFAULT
+
+
+def _estimate_lite_review_cost(usage: TokenUsage, model: str) -> float:
+    """Approximate USD cost for the lite-review path from raw token counts.
+
+    The lite path bypasses ``agent_runs`` cost tracking entirely, so this is
+    the only place its cost is ever computed. Pricing comes from
+    ``argus.llm.pricing`` (litellm-backed); if the model has no pricing
+    entry, cost for this call is silently omitted (logged, not raised) --
+    cost tracking is observability, not a correctness gate.
+    """
+    token_cost = get_token_cost(model)
+    if token_cost is None:
+        return 0.0
+    return (
+        usage.input_tokens * token_cost.input_cost_per_token
+        + usage.output_tokens * token_cost.output_cost_per_token
+        + usage.cache_read_tokens * token_cost.cache_read_cost_per_token
+        + usage.cache_creation_tokens * token_cost.cache_write_cost_per_token
+    )
+
 
 # Git SHA validation — accept short (7+) through full (40) hex digests. Used
 # for defense-in-depth before interpolating SHAs into GitHub compare URLs.
 _SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
-
-# claude-sonnet-4-6 pricing ($/token) — used for lite review cost aggregation.
-# Lite reviews bypass the agent_runs cost tracking used by the full pipeline,
-# so costs are approximated from token counts returned by the LangChain response.
-_SONNET_INPUT_COST = 3e-6
-_SONNET_OUTPUT_COST = 15e-6
-_SONNET_CACHE_READ_COST = 0.3e-6
-_SONNET_CACHE_WRITE_COST = 3.75e-6
 
 # File path prefixes/suffixes that force full review regardless of preflight LLM decision.
 # A pre-LLM deterministic gate — the prompt is the suspenders; this is the belt.
@@ -769,6 +798,20 @@ def _build_coverage_messages(
 # ---------------------------------------------------------------------------
 
 
+_TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = frozenset(
+    {
+        # Derived from the registry constants (not hardcoded literals) so this
+        # set tracks ALIAS_MAP automatically if claude-frontier/claude-default
+        # are ever re-pinned. Confirmed live: both currently reject an
+        # explicit `temperature` with invalid_request_error "temperature is
+        # deprecated for this model". claude-haiku-4-5 (CLAUDE_MINI) accepts
+        # it fine, so is deliberately not included here.
+        CLAUDE_FRONTIER,
+        CLAUDE_DEFAULT,
+    }
+)
+
+
 def _get_llm(model_id: str, max_tokens: int = 16384, temperature: float | None = None) -> Any:
     """Create a LangChain chat model with explicit API key from settings.
 
@@ -783,7 +826,8 @@ def _get_llm(model_id: str, max_tokens: int = 16384, temperature: float | None =
     settings = get_settings()
     _, anthropic_credential = settings.anthropic_credential
     kwargs: dict[str, Any] = {"api_key": anthropic_credential, "max_tokens": max_tokens}
-    if temperature is not None:
+    resolved_model = model_id.rsplit(":", 1)[-1]
+    if temperature is not None and resolved_model not in _TEMPERATURE_UNSUPPORTED_MODELS:
         kwargs["temperature"] = temperature
     return init_chat_model(model_id, **kwargs)
 
@@ -1181,7 +1225,7 @@ async def run_lite_review(
 
     settings = get_settings()
     prompt = await fetch_prompt("pr-review-lite")
-    model = _get_llm(f"anthropic:{CLAUDE_DEFAULT}")
+    model = _get_llm(f"anthropic:{_LITE_REVIEW_MODEL}")
 
     messages = [
         {"role": "system", "content": prompt},
@@ -1954,11 +1998,12 @@ async def _node_run_reviewer(inputs: ReviewerInput, config: RunnableConfig) -> d
         _files = result.files_explored[:5]
         _files_str = ", ".join(_files) + (" ..." if len(result.files_explored) > 5 else "")
         _dur = agent_run.duration_seconds if agent_run else 0.0
-        if getattr(result, "timed_out", False):
+        if result.failure_reason is not None:
             logger.warning(
-                "Reviewer [%s] TIMED OUT after %.1fs — treated as 0 findings, "
+                "Reviewer [%s] FAILED (%s) after %.1fs — treated as 0 findings, "
                 "coverage degraded for this group",
                 _label,
+                result.failure_reason,
                 _dur,
             )
         else:
@@ -2488,6 +2533,50 @@ async def build_pipeline() -> AsyncIterator[Any]:
             )
 
 
+def _looks_like_missing_schema_object(exc: Exception) -> bool:
+    """Best-effort duck-typed check that ``exc`` signals a missing DB column or table.
+
+    Both ``sqlalchemy.exc.ProgrammingError`` (Postgres) and
+    ``sqlite3.OperationalError`` are much broader than "missing schema
+    object" -- bad SQL, wrong bind-param count, disk I/O, lock contention,
+    busy-timeout, and more all raise the same exception class. Narrowing to
+    the specific message shapes a missing migration actually produces means
+    those other, unrelated error classes still land as a generic non-fatal
+    warning instead of a misleading "check your migrations" alert.
+
+    Message shapes covered:
+    - Postgres missing column: ``column "x" of relation "y" does not exist``
+    - Postgres missing table: ``relation "review_service.agent_runs" does
+      not exist`` -- strictly worse than a missing column (schema/015 itself
+      was never applied), and lacks the word "column" entirely.
+    - SQLite missing column on INSERT: ``table agent_runs has no column
+      named failure_reason`` -- NOT "no such column", which is SQLite's
+      phrasing for a SELECT/WHERE reference, not an INSERT column list.
+
+    Best-effort, not guaranteed: with asyncpg (the async Postgres driver),
+    the actual Postgres message sometimes lives on ``exc.__cause__`` rather
+    than inline in ``str(exc)`` -- checked here, but a future driver/wrapper
+    change could still put it somewhere neither this function nor its
+    caller looks, in which case this returns a false negative and the error
+    is (safely, just less loudly) treated as a generic warning instead.
+    """
+
+    def _matches(text: str) -> bool:
+        missing_column = "column" in text and (
+            "does not exist" in text or "no such column" in text or "has no column named" in text
+        )
+        missing_relation = "relation" in text and "does not exist" in text
+        return missing_column or missing_relation
+
+    candidates = [str(exc)]
+    if exc.__cause__ is not None:
+        candidates.append(str(exc.__cause__))
+    # Each candidate checked independently, not joined into one string --
+    # joining would let "column" in one message and "does not exist" in an
+    # unrelated other message combine into a false positive.
+    return any(_matches(c.lower()) for c in candidates)
+
+
 # ---------------------------------------------------------------------------
 # Public API -- called from an external orchestrator (or the CLI, for local runs)
 # ---------------------------------------------------------------------------
@@ -2503,6 +2592,19 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     import time
     import uuid
 
+    # Fail fast on a bad ARGUS_DB_URL / ARGUS_HISTORY_DB_PATH, before any of
+    # the pipeline's LLM cost runs. Both history-backend implementations
+    # connect lazily on first use, and for a local/CLI run (no flow_run_id)
+    # that first use used to be upsert_completed_row at the very end of this
+    # function -- so a bad DB config discarded an entire completed review
+    # instead of failing before it started. Deliberately not caught here:
+    # HistoryBackendConnectivityError should propagate to the caller exactly
+    # like a missing required secret does in the CLI's own preflight.
+    await validate_history_backend_connectivity()
+
+    # Recorded after the connectivity probe, not before: pipeline_start
+    # feeds duration_seconds on the finalize row, and the probe (normally
+    # sub-10ms) isn't part of the review pipeline itself.
     pipeline_start = time.monotonic()
 
     # Upsert a row so the status endpoint knows the pipeline exists.
@@ -2623,27 +2725,22 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
         # Lite path bypasses agent_runs cost tracking; approximate from token counts
         # captured in run_lite_review. Use += to preserve early_verifier cost
         # (round 2+) already accumulated above.
-        total_cost_usd += (
-            response.usage.input_tokens * _SONNET_INPUT_COST
-            + response.usage.output_tokens * _SONNET_OUTPUT_COST
-            + response.usage.cache_read_tokens * _SONNET_CACHE_READ_COST
-            + response.usage.cache_creation_tokens * _SONNET_CACHE_WRITE_COST
-        )
+        total_cost_usd += _estimate_lite_review_cost(response.usage, _LITE_REVIEW_MODEL)
 
     response.usage.cost_usd = total_cost_usd
 
     # Surface killed/timed-out reviewer sessions instead of letting them
     # collapse silently into "0 findings" — both in the rendered markdown
     # (not schema-frozen, safe to append to) and in the logs.
-    timed_out_labels = timed_out_reviewer_labels(findings_models)
-    if timed_out_labels:
+    failed_labels = failed_reviewer_labels(findings_models)
+    if failed_labels:
         logger.warning(
-            "Degraded coverage: %d reviewer session(s) timed out and reported 0 findings: %s",
-            len(timed_out_labels),
-            ", ".join(timed_out_labels),
+            "Degraded coverage: %d reviewer session(s) did not complete and reported 0 findings: %s",
+            len(failed_labels),
+            ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
         )
         response.review_comment = append_degraded_coverage_section(
-            response.review_comment, timed_out_labels
+            response.review_comment, failed_labels
         )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
@@ -2778,6 +2875,7 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
                         files_explored=run_data.files_explored,
                         finding_count=run_data.finding_count,
                         result_text_length=run_data.result_text_length,
+                        failure_reason=run_data.failure_reason,
                     )
                 )
             await backend.insert_agent_runs(code_review_id=code_review_id, runs=runs_in)
@@ -2790,6 +2888,39 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
             # ModuleNotFoundError = a missing dependency — surface loudly
             # instead of treating like a transient storage failure.
             raise
+        except (ProgrammingError, sqlite3.OperationalError) as exc:
+            # Both exception classes are much broader than "missing column"
+            # (bad SQL, wrong bind-param count, disk I/O, lock contention,
+            # busy-timeout, ...), so branch on the message shape a missing
+            # migration actually produces rather than the exception type
+            # alone -- otherwise a transient/unrelated error would get the
+            # same misleading "check your migrations" alert.
+            if _looks_like_missing_schema_object(exc):
+                # The actual effect of a missing migration is every
+                # agent_runs row for every review being silently dropped for
+                # the entire deploy window, not a one-off transient blip.
+                # Loud and explicit so it surfaces immediately instead of as
+                # a slow analytics blackout.
+                logger.error(
+                    "Failed to insert %d agent_runs for code_review %s -- schema error, "
+                    "check whether a pending schema/*.sql migration has not been applied",
+                    len(runs_in),
+                    code_review_id,
+                    exc_info=True,
+                )
+            else:
+                # A DB error that isn't schema-shaped (lock contention,
+                # permission denied, constraint violation, ...) -- still
+                # worth naming the exception class and row count so it's
+                # distinguishable from a random AttributeError, even though
+                # it doesn't warrant the "check your migrations" alert.
+                logger.warning(
+                    "Failed to insert %d agent_runs (non-fatal, %s) for code_review %s",
+                    len(runs_in),
+                    type(exc).__name__,
+                    code_review_id,
+                    exc_info=True,
+                )
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to insert agent_runs (non-fatal) for code_review %s",

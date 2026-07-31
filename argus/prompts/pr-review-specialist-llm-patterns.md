@@ -7,7 +7,7 @@ Only approved model families. Check model strings in code against this table:
 
 | Provider | Approved | Default |
 |----------|----------|---------|
-| Anthropic | claude-opus-4, claude-sonnet-4 families | claude-sonnet-4-6 |
+| Anthropic | claude-opus-4, claude-sonnet-4, claude-haiku-4 (use `CLAUDE_MINI`), claude-fable-5 (use `CLAUDE_FRONTIER`), claude-opus-5 (use `CLAUDE_OPUS`), claude-sonnet-5 (use `CLAUDE_DEFAULT`) families | claude-sonnet-5 |
 | OpenAI | gpt-5 family (gpt-5.4, gpt-5.4-mini) | gpt-5.4-mini |
 | Google | gemini-3 family | gemini-3-flash |
 
@@ -16,13 +16,12 @@ Flag any use of: o3, o1, gpt-4 family, gpt-5-mini, claude-3/3.5 family, gemini-1
 ## Check
 
 ### SDK Usage
-- Use init_chat_model() from LangChain for model instantiation (not raw SDK clients)
-- Use .with_structured_output(PydanticModel) for structured responses (not manual JSON parsing)
+- Use LiteLLM (`response_format` `json_schema`) or, for OpenAI-only calls, the OpenAI Responses API via rh-lib wrappers (`pydantic_to_response_format`) -- both are D024-compliant per docs/coding-patterns/llm-pipelines.md. Not raw SDK clients. `init_chat_model().with_structured_output()` is superseded per D024 ("No `langchain` Package") for NEW code -- flag new call sites the same as a raw-SDK call. Existing call sites remain valid until TECH-3214's rewrite completes; don't flag those.
 - Prompts stored in Opik via fetch_prompt(), not hardcoded strings
 - Cost-aware model selection: cheap models (Haiku, gpt-5.4-mini) for simple tasks, expensive models (Opus) only when reasoning quality matters
 
 ### Structured Output
-- Single call with .with_structured_output() preferred over two-phase generate-then-extract
+- Single call with LiteLLM's `response_format` `json_schema` (or the OpenAI Responses API wrapper for OpenAI-only calls) preferred over two-phase generate-then-extract
 - Pydantic models for output schemas (not raw JSON schema dicts)
 - Handle extraction failures gracefully
 

@@ -10,6 +10,7 @@ math, JSON fidelity for deeply nested payloads, and the
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from argus.storage.sql import CodeReviewRoundIn, UpsertReturnedNoRow
+from argus.storage.sql import AgentRunIn, CodeReviewRoundIn, UpsertReturnedNoRow
 from argus.storage.sqlite import DEFAULT_DB_PATH, SqliteHistoryBackend
 
 pytestmark = pytest.mark.asyncio
@@ -83,6 +84,87 @@ async def test_reopening_existing_file_preserves_data(tmp_path: Path) -> None:
         assert latest.flow_run_id == "fr-persist-1"
     finally:
         await second.aclose()
+
+
+async def test_pre_existing_file_without_failure_reason_column_self_heals(
+    tmp_path: Path,
+) -> None:
+    """A local history.db created before this column existed must not need a
+    manual migration -- opening it should add the column automatically.
+
+    CREATE TABLE IF NOT EXISTS is a no-op once the table already exists, so
+    without the self-healing ALTER TABLE in
+    ``SqliteHistoryBackend._migrate_agent_runs_failure_reason``, a
+    pre-existing local file would never pick up ``failure_reason`` at all.
+    """
+    db_path = tmp_path / "legacy.db"
+    review_id = "11111111-1111-1111-1111-111111111111"
+
+    # Build the table exactly as it looked before failure_reason existed.
+    # code_reviews only needs enough columns to satisfy agent_runs' FK --
+    # the real column_reviews shape isn't what this test is about.
+    conn = sqlite3.connect(db_path)
+    try:
+        # executescript() auto-commits its own DDL; the conn.commit() below
+        # is for the parameterized INSERT that follows, not for this script.
+        conn.executescript("""
+            CREATE TABLE code_reviews (
+                id TEXT PRIMARY KEY,
+                flow_run_id TEXT,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_runs (
+                id TEXT PRIMARY KEY,
+                code_review_id TEXT NOT NULL REFERENCES code_reviews (id) ON DELETE CASCADE,
+                agent_name TEXT NOT NULL,
+                agent_type TEXT NOT NULL,
+                model TEXT,
+                cost_usd REAL DEFAULT 0,
+                duration_seconds REAL DEFAULT 0,
+                started_at TEXT,
+                finished_at TEXT,
+                tool_call_count INTEGER DEFAULT 0,
+                tool_names TEXT,
+                context7_call_count INTEGER DEFAULT 0,
+                files_explored TEXT,
+                finding_count INTEGER DEFAULT 0,
+                result_text_length INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+        """)
+        # Parameter binding (not f-string/executescript) establishes the
+        # safe pattern even though review_id is a hardcoded literal here.
+        conn.execute(
+            "INSERT INTO code_reviews (id, repo, pr_number, created_at) VALUES (?, ?, ?, ?)",
+            (review_id, "org/repo", 1, "2026-01-01T00:00:00Z"),
+        )
+        conn.commit()
+        columns_before = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")}
+        assert "failure_reason" not in columns_before
+    finally:
+        conn.close()
+
+    backend = SqliteHistoryBackend(db_path=db_path)
+    try:
+        # Would raise sqlite3.OperationalError ("no such column") if the
+        # self-healing migration hadn't run.
+        await backend.insert_agent_runs(
+            code_review_id=review_id,
+            runs=[AgentRunIn(agent_name="system:x", agent_type="system", failure_reason="timeout")],
+        )
+    finally:
+        await backend.aclose()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        columns_after = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")}
+        assert "failure_reason" in columns_after
+        row = conn.execute("SELECT failure_reason FROM agent_runs").fetchone()
+        assert row[0] == "timeout"
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -330,3 +412,87 @@ async def test_upsert_completed_row_raises_upsert_returned_no_row_when_forced(
             )
     finally:
         await backend.aclose()
+
+
+# ---------------------------------------------------------------------------
+# ping(): connectivity probe used by validate_history_backend_connectivity
+# ---------------------------------------------------------------------------
+
+
+async def test_ping_creates_file_and_schema(tmp_path: Path) -> None:
+    """``ping()`` forces the same connect-and-bootstrap a real write would
+    trigger, just callable ahead of time to validate the configured path."""
+    db_path = tmp_path / "nested" / "history.db"
+    backend = SqliteHistoryBackend(db_path=db_path)
+
+    await backend.ping()
+
+    assert db_path.exists()
+    # Verify the bootstrap DDL actually ran, not just that the file exists.
+    conn = sqlite3.connect(db_path)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "code_reviews" in tables
+
+    await backend.aclose()
+
+
+async def test_ping_is_idempotent(tmp_path: Path) -> None:
+    """Calling ``ping()`` twice on the same backend must not re-run the
+    bootstrap DDL or open a second connection -- it's the same lazy-connect
+    path a real write would take, which is itself idempotent."""
+    backend = SqliteHistoryBackend(db_path=tmp_path / "history.db")
+
+    await backend.ping()
+    first_conn = backend._conn
+    await backend.ping()
+
+    assert backend._conn is first_conn
+    await backend.aclose()
+
+
+async def test_ping_default_path_when_none_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``db_path=None`` (the production default, used when
+    ARGUS_HISTORY_DB_PATH is unset) must resolve to DEFAULT_DB_PATH and
+    succeed, not raise on a missing path argument. Monkeypatches
+    DEFAULT_DB_PATH to a tmp dir rather than touching the real
+    ``~/.local/share/argus/history.db`` this test would otherwise create
+    as a side effect on the machine running it."""
+    import argus.storage.sqlite as sqlite_module
+
+    fake_default = tmp_path / "history.db"
+    monkeypatch.setattr(sqlite_module, "DEFAULT_DB_PATH", fake_default)
+
+    backend = SqliteHistoryBackend()
+    assert backend.db_path == str(fake_default)
+
+    await backend.ping()
+
+    assert fake_default.exists()
+    await backend.aclose()
+
+
+async def test_ping_raises_on_unwritable_parent(tmp_path: Path) -> None:
+    if hasattr(os, "getuid") and os.getuid() == 0:
+        pytest.skip("chmod has no effect as root (common in Docker-based CI)")
+    unwritable = tmp_path / "readonly"
+    unwritable.mkdir(mode=0o500)
+    backend = SqliteHistoryBackend(db_path=unwritable / "sub" / "history.db")
+
+    with pytest.raises(OSError):
+        await backend.ping()
+
+
+async def test_db_path_property_matches_constructor_arg(tmp_path: Path) -> None:
+    db_path = tmp_path / "history.db"
+    backend = SqliteHistoryBackend(db_path=db_path)
+    assert backend.db_path == str(db_path)
+
+
+async def test_db_path_property_preserves_relative_path_string() -> None:
+    """``db_path`` is a plain passthrough -- a relative path string is
+    stored and returned as-is, not resolved to an absolute path."""
+    backend = SqliteHistoryBackend(db_path="relative/history.db")
+    assert backend.db_path == "relative/history.db"

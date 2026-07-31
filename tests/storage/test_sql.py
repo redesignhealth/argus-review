@@ -359,6 +359,7 @@ async def test_insert_agent_runs_batches_with_array_binds() -> None:
             files_explored=["a.py", "b.py"],
             finding_count=1,
             result_text_length=200,
+            failure_reason="timeout",
         ),
         AgentRunIn(
             agent_name="cross_cutting:Bar",
@@ -373,6 +374,10 @@ async def test_insert_agent_runs_batches_with_array_binds() -> None:
     # First row's array binds round-trip
     assert session.calls[0].params["tool_names"] == ["read", "grep"]
     assert session.calls[0].params["files_explored"] == ["a.py", "b.py"]
+    # failure_reason must reach the persisted row -- an unpersisted field is
+    # unqueryable, defeating the whole point of adding it.
+    assert session.calls[0].params["failure_reason"] == "timeout"
+    assert session.calls[1].params["failure_reason"] is None
 
 
 @pytest.mark.asyncio
@@ -380,6 +385,26 @@ async def test_insert_agent_runs_no_op_on_empty_list() -> None:
     session = FakeSession()
     await insert_agent_runs(session, code_review_id=uuid4(), runs=[])
     assert session.calls == []
+
+
+def test_agent_run_in_rejects_invalid_failure_reason() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentRunIn(
+            agent_name="system:Foo",
+            agent_type="system",
+            failure_reason="bad_value",
+        )
+
+
+def test_agent_run_in_accepts_worker_crashed_failure_reason() -> None:
+    run = AgentRunIn(
+        agent_name="system:Foo",
+        agent_type="system",
+        failure_reason="worker_crashed",
+    )
+    assert run.failure_reason == "worker_crashed"
 
 
 # ---------------------------------------------------------------------------

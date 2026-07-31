@@ -97,7 +97,7 @@ If an LLM/AI pipeline is building execution, retry, state-tracking, or paralleli
 ### Anti-Patterns to Flag
 - asyncio.gather / asyncio.create_task for parallel LLM dispatch inside Prefect flows → use LangGraph Send() or Prefect .submit()
 - Bare except Exception returning empty results around LLM calls → let errors propagate, use Prefect retries
-- Raw anthropic.AsyncAnthropic / openai.OpenAI for structured output → use init_chat_model().with_structured_output()
+- Raw anthropic.AsyncAnthropic / openai.OpenAI, or `init_chat_model().with_structured_output()` in NEW code (superseded per D024, "No `langchain` Package"; existing call sites remain valid until TECH-3214's rewrite completes), for structured output → use LiteLLM's `response_format` `json_schema`, or for OpenAI-only calls, the OpenAI Responses API via rh-lib wrappers (`pydantic_to_response_format`) -- both are D024-compliant per docs/coding-patterns/llm-pipelines.md
 - Two-phase "generate then extract" for structured output → single call with structured output
 - Custom DB tables for pipeline execution state → use LangGraph checkpointer
 - Cost/traces/comparison tags in application DB columns → use LangSmith
@@ -106,7 +106,7 @@ If an LLM/AI pipeline is building execution, retry, state-tracking, or paralleli
 Temporary migration scaffolding requires: (1) explicitly documented as temporary, (2) concrete removal condition, (3) Linear ticket linked to condition.
 
 ### Reference
-When reviewing LLM pipeline architecture, read projects/concept-generation/docs/COLOSSEUM_RESEARCH_V2.md and docs/PLATFORM_ARCHITECTURE.md for current design decisions.
+When reviewing LLM pipeline architecture, read docs/PLATFORM_ARCHITECTURE.md for current design decisions. projects/concept-generation/docs/COLOSSEUM_RESEARCH_V2.md predates D024 and its LangChain structured-output guidance is superseded -- do not treat it as current.
 
 ### Test Coverage
 - New public functions or endpoints: grep the test directories for the function name. No test = finding.

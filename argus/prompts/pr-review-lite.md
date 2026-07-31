@@ -21,7 +21,7 @@ Review only the changed code for these issues:
 - Blocking I/O calls in async functions (e.g. `requests` instead of `httpx`)
 
 ### Model Registry
-- Hardcoded LLM model strings (e.g. `"claude-sonnet-4-6"`, `"gpt-5.4-mini"`) — must use constants from `rh_lib.llm.models` (`CLAUDE_DEFAULT`, `CLAUDE_FRONTIER`, `GPT_MINI`, etc.)
+- Hardcoded LLM model strings (e.g. `"claude-sonnet-5"`, `"gpt-5.4-mini"`) — must use constants from `argus.llm.models` (`CLAUDE_DEFAULT`, `CLAUDE_FRONTIER`, `CLAUDE_OPUS`, `CLAUDE_MINI`, `GPT_MINI`)
 
 ## Out of Scope
 Do NOT flag: security deep-dives, performance analysis, test coverage gaps, architectural concerns, code style preferences, or cross-file integration issues. Those require a full Argus review.

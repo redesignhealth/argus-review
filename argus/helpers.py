@@ -110,33 +110,42 @@ def collect_reviewed_files(results: list[SystemReviewResult]) -> set[str]:
     return reviewed
 
 
-def timed_out_reviewer_labels(results: list[SystemReviewResult]) -> list[str]:
-    """Return the ``system_group`` labels of reviewers that hit the subprocess
-    timeout, in the order they appear in ``results``.
+def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str, str]]:
+    """Return ``(system_group, failure_reason)`` pairs for reviewers that did
+    not complete normally, in the order they appear in ``results``.
 
-    Used to distinguish "a reviewer was killed by the timeout" from "a
-    reviewer ran to completion and genuinely found nothing" -- both currently
-    collapse into a 0-finding SystemReviewResult, but only the former should
-    be surfaced as degraded coverage.
+    Used to distinguish "a reviewer was killed/crashed" from "a reviewer ran
+    to completion and genuinely found nothing" -- both currently collapse into
+    a 0-finding SystemReviewResult, but only the former should be surfaced as
+    degraded coverage. Covers both failure modes (timeout and worker crash),
+    not just timeout -- a crashed worker's 0 findings is exactly as untrustworthy
+    as a timed-out one's, and the previous timeout-only check silently treated
+    a crash as a clean result.
     """
-    return [result.system_group for result in results if result.timed_out]
+    return [
+        (result.system_group, result.failure_reason)
+        for result in results
+        if result.failure_reason is not None
+    ]
 
 
-def append_degraded_coverage_section(review_comment: str, timed_out_labels: list[str]) -> str:
-    """Append a visible "Degraded coverage" section listing timed-out reviewers.
+def append_degraded_coverage_section(
+    review_comment: str, failed_labels: list[tuple[str, str]]
+) -> str:
+    """Append a visible "Degraded coverage" section listing failed reviewers.
 
-    No-op when ``timed_out_labels`` is empty. The markdown review body is not
+    No-op when ``failed_labels`` is empty. The markdown review body is not
     schema-frozen, so this is safe to append; it is purely additive to the
     rendered comment and does not change any structured field.
     """
-    if not timed_out_labels:
+    if not failed_labels:
         return review_comment
-    bullets = "\n".join(f"- {label}" for label in timed_out_labels)
+    bullets = "\n".join(f"- {label} ({reason})" for label, reason in failed_labels)
     section = (
         "\n\n---\n\n"
         "### ⚠ Degraded coverage\n\n"
-        "The following reviewer session(s) were killed after exceeding the "
-        f"subprocess timeout and reported 0 findings as a result, not because "
+        "The following reviewer session(s) did not complete (timeout or worker "
+        "crash) and reported 0 findings as a result, not because "
         "the area was clean. Treat these areas as **not reviewed** this round:\n\n"
         f"{bullets}\n"
     )

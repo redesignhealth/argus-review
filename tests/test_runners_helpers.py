@@ -14,7 +14,7 @@ from argus.helpers import (
     filter_diff_for_files,
     parse_review_result,
     sanitize_file_paths,
-    timed_out_reviewer_labels,
+    failed_reviewer_labels,
 )
 from argus.pipeline_models import RawFinding, SystemReviewResult
 
@@ -221,42 +221,42 @@ class TestCollectReviewedFiles:
 
 
 # ---------------------------------------------------------------------------
-# timed_out_reviewer_labels / append_degraded_coverage_section
+# failed_reviewer_labels / append_degraded_coverage_section
 # ---------------------------------------------------------------------------
 
 
 class TestTimedOutReviewerLabels:
-    def test_no_timeouts_returns_empty(self) -> None:
+    def test_no_failures_returns_empty(self) -> None:
         results = [
             SystemReviewResult(system_group="g1", findings=[], files_explored=[]),
             SystemReviewResult(system_group="g2", findings=[], files_explored=[]),
         ]
-        assert timed_out_reviewer_labels(results) == []
+        assert failed_reviewer_labels(results) == []
 
-    def test_collects_only_timed_out_labels_in_order(self) -> None:
+    def test_collects_only_failed_labels_in_order(self) -> None:
         results = [
             SystemReviewResult(system_group="g1", findings=[], files_explored=[]),
             SystemReviewResult(
                 system_group="specialist/orchestration::g2",
                 findings=[],
                 files_explored=[],
-                timed_out=True,
+                failure_reason="timeout",
             ),
             SystemReviewResult(system_group="g3", findings=[], files_explored=[]),
             SystemReviewResult(
                 system_group="g4",
                 findings=[],
                 files_explored=[],
-                timed_out=True,
+                failure_reason="worker_crashed",
             ),
         ]
-        assert timed_out_reviewer_labels(results) == [
-            "specialist/orchestration::g2",
-            "g4",
+        assert failed_reviewer_labels(results) == [
+            ("specialist/orchestration::g2", "timeout"),
+            ("g4", "worker_crashed"),
         ]
 
     def test_empty_results(self) -> None:
-        assert timed_out_reviewer_labels([]) == []
+        assert failed_reviewer_labels([]) == []
 
 
 class TestAppendDegradedCoverageSection:
@@ -266,14 +266,25 @@ class TestAppendDegradedCoverageSection:
 
     def test_labels_appended_as_visible_section(self) -> None:
         comment = "## Review\n\nLooks good."
-        result = append_degraded_coverage_section(comment, ["specialist/orchestration::g2"])
+        result = append_degraded_coverage_section(
+            comment, [("specialist/orchestration::g2", "timeout")]
+        )
         assert result.startswith(comment)
         assert "Degraded coverage" in result
         assert "specialist/orchestration::g2" in result
         assert "not reviewed" in result
+        # The reason itself (not just the label) must be visible, so a
+        # reader can tell a timeout apart from a worker crash.
+        assert "(timeout)" in result
 
     def test_multiple_labels_each_get_a_bullet(self) -> None:
-        result = append_degraded_coverage_section("body", ["a", "b", "c"])
+        result = append_degraded_coverage_section(
+            "body", [("a", "timeout"), ("b", "worker_crashed"), ("c", "timeout")]
+        )
         assert "- a" in result
         assert "- b" in result
         assert "- c" in result
+        # Each label's own reason must appear next to it, not just the first.
+        assert "a (timeout)" in result
+        assert "b (worker_crashed)" in result
+        assert "c (timeout)" in result

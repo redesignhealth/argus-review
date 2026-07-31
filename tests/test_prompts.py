@@ -86,6 +86,26 @@ async def test_validate_prompts_passes_for_packaged_set() -> None:
     await validate_prompts()
 
 
+def test_no_packaged_prompt_endorses_superseded_structured_output_pattern() -> None:
+    """D024 ("No `langchain` Package") supersedes init_chat_model().with_structured_output()
+    in favor of LiteLLM's response_format json_schema. Every packaged prompt that mentions
+    the superseded pattern must mark it as superseded/non-compliant, never recommend it
+    unqualified -- catches the cross-cutting-vs-sibling-prompt contradiction Argus found
+    when only pr-review-cross-cutting.md was updated for D024 and its siblings were not.
+    """
+    superseded = "init_chat_model().with_structured_output()"
+    for path in sorted((_ARGUS_PKG_DIR / "prompts").glob("*.md")):
+        content = path.read_text(encoding="utf-8")
+        if superseded not in content:
+            continue
+        for line in content.splitlines():
+            if superseded in line:
+                assert "supersed" in line.lower() or "D024" in line, (
+                    f"{path.name}: line mentions the superseded pattern without "
+                    f"flagging it as non-compliant per D024: {line!r}"
+                )
+
+
 @pytest.mark.asyncio
 async def test_fetch_prompt_missing_name_raises_with_name_in_message() -> None:
     with pytest.raises(ValueError, match="does-not-exist"):

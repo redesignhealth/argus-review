@@ -22,9 +22,9 @@ from dataclasses import dataclass, field
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_FRONTIER
+from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_OPUS
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -37,7 +37,7 @@ from claude_agent_sdk import (
 )
 from langsmith import traceable
 
-from argus.config import get_settings
+from argus.config import DEFAULT_ARGUS_SESSION_TIMEOUT_S, get_settings
 from argus.helpers import (
     filter_diff_for_files as _filter_diff_for_files,
 )
@@ -72,7 +72,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_REVIEWER_MODEL = CLAUDE_DEFAULT
-_CROSS_CUTTING_MODEL = CLAUDE_FRONTIER
+# Opus, not frontier (Fable): evals showed no measurable quality gain from
+# frontier on this stage, at ~2x the per-token cost.
+_CROSS_CUTTING_MODEL = CLAUDE_OPUS
 _MAX_TURNS = 30
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned
 # worktree has been provisioned (e.g. local dev runs, tests, subprocess
@@ -82,7 +84,9 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[4])
 # Fallback used when no Settings instance is available (e.g. direct unit
 # tests calling _run_session_in_subprocess without a settings-derived
 # timeout_s). Production call sites pass settings.ARGUS_SESSION_TIMEOUT.
-_SUBPROCESS_TIMEOUT_S = 300
+# Imports the same constant Settings.ARGUS_SESSION_TIMEOUT defaults to, so
+# the two can never drift out of sync.
+_SUBPROCESS_TIMEOUT_S = DEFAULT_ARGUS_SESSION_TIMEOUT_S
 
 
 def _resolve_repo_root(repo_root: str | None, caller: str) -> str:
@@ -133,6 +137,26 @@ You SHOULD explore unchanged files to understand context, verify claims, and \
 trace dependencies. But only REPORT findings that pass the causal test above.
 """
 
+# Shared directive steering reviewers away from full-file Reads on large
+# targets. Root cause of TECH-4643: specialists tracing execution paths into
+# a multi-thousand-line file would Read it whole, exhaust a large fraction of
+# their context budget in 1-2 tool calls, and then "autocompact thrash" for
+# the rest of the session — burning further turns compacting instead of
+# reviewing, with the specialist's own findings effectively lost. That
+# failure mode was silent: the session still exits normally (not a timeout),
+# so it doesn't set failure_reason and isn't surfaced as degraded coverage.
+_LARGE_FILE_READ_DIRECTIVE = """\
+
+## Reading Large Files
+
+Before reading any file, check its size (e.g. via a targeted Grep or a \
+quick line count). For a file beyond a few hundred lines, do not Read it in \
+one call: Grep first for the specific symbol, function, or pattern you need, \
+then use Read's `offset`/`limit` to pull just the surrounding lines. A full \
+Read of a large file can exhaust a large share of your context budget in a \
+single tool call, leaving too little to actually analyze what you read.
+"""
+
 # Context7 MCP configuration. The library ID is deployment-specific (which
 # codebase's curated docs to query) and comes from ARGUS_CONTEXT7_LIBRARY_ID;
 # when unset, Context7 attachment is skipped entirely (same graceful
@@ -153,14 +177,15 @@ class SessionResult:
     tool_names: list[str] = field(default_factory=list)
     context7_call_count: int = 0
     model: str | None = None
-    timed_out: bool = False
+    failure_reason: Literal["timeout", "worker_crashed"] | None = None
 
 
 def _empty_session_result(
     model: str | None = None,
     duration_seconds: float = 0.0,
     started_at: datetime | None = None,
-    timed_out: bool = False,
+    *,
+    failure_reason: Literal["timeout", "worker_crashed"],
 ) -> SessionResult:
     """Default SessionResult for subprocess timeout / worker failure.
 
@@ -169,9 +194,9 @@ def _empty_session_result(
     are internally consistent with the reported duration. When omitted, both
     timestamps default to now and duration is 0.
 
-    ``timed_out`` distinguishes "subprocess hit the wall-clock timeout and was
-    killed" from other empty-result paths (worker crash, no output) so callers
-    can surface a TIMED_OUT status instead of silently reporting 0 findings.
+    ``failure_reason`` is keyword-only and required (no default): every empty
+    result comes from a real failure, and a caller that forgets to pass it is
+    a bug, not something that should silently resolve to a guess.
     """
     if started_at is not None:
         finished_at = started_at + timedelta(seconds=duration_seconds)
@@ -186,7 +211,7 @@ def _empty_session_result(
         finished_at=finished_at,
         tool_call_count=0,
         model=model,
-        timed_out=timed_out,
+        failure_reason=failure_reason,
     )
 
 
@@ -298,7 +323,7 @@ def _build_agent_run(
         files_explored=files_explored,
         finding_count=finding_count,
         result_text_length=len(session.result_text),
-        timed_out=session.timed_out,
+        failure_reason=session.failure_reason,
     )
 
 
@@ -359,6 +384,7 @@ async def run_system_reviewer(
         "Use Read, Glob, and Grep to explore the surrounding codebase for context. "
         "Focus on correctness, security, and adherence to the conventions above."
         f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
     session = await _run_session_isolated(
@@ -375,7 +401,7 @@ async def run_system_reviewer(
     )
     result = _parse_review_result(session.result_text, group.name)
     result.cost_usd = session.cost_usd
-    result.timed_out = session.timed_out
+    result.failure_reason = session.failure_reason
     agent_run = _build_agent_run(
         session=session,
         agent_name=f"system:{group.name}",
@@ -445,6 +471,7 @@ async def run_specialist_reviewer(
         f"```diff\n{filtered_diff}\n```\n\n"
         "Use Read, Glob, and Grep to explore the codebase for context."
         f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
     session = await _run_session_isolated(
@@ -461,7 +488,7 @@ async def run_specialist_reviewer(
     )
     result = _parse_review_result(session.result_text, f"{group.name}::{specialist}")
     result.cost_usd = session.cost_usd
-    result.timed_out = session.timed_out
+    result.failure_reason = session.failure_reason
     agent_run = _build_agent_run(
         session=session,
         agent_name=f"specialist:{group.name}::{specialist}",
@@ -519,6 +546,7 @@ async def run_cross_cutting_reviewer(
         f"## Full PR Diff\n\n```diff\n{diff_text}\n```\n\n"
         "Use Read, Glob, and Grep to trace execution paths across files."
         f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
     session = await _run_session_isolated(
@@ -535,7 +563,7 @@ async def run_cross_cutting_reviewer(
     )
     result = _parse_review_result(session.result_text, "cross-cutting")
     result.cost_usd = session.cost_usd
-    result.timed_out = session.timed_out
+    result.failure_reason = session.failure_reason
     agent_run = _build_agent_run(
         session=session,
         agent_name="cross-cutting",
@@ -576,6 +604,7 @@ async def run_tests_and_docs_reviewer(
         f"## Full PR Diff\n\n```diff\n{diff_text}\n```\n\n"
         "Use Read, Glob, and Grep to check test directories and .cursorrules files."
         f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
     session = await _run_session_isolated(
@@ -592,7 +621,7 @@ async def run_tests_and_docs_reviewer(
     )
     result = _parse_review_result(session.result_text, "tests-and-docs")
     result.cost_usd = session.cost_usd
-    result.timed_out = session.timed_out
+    result.failure_reason = session.failure_reason
     agent_run = _build_agent_run(
         session=session,
         agent_name="tests-and-docs",
@@ -876,14 +905,16 @@ def _run_session_in_subprocess(
             "Validator subprocess [%s] timed out after %ds; killed process group", label, timeout_s
         )
         return _empty_session_result(
-            model, duration_seconds=float(timeout_s), started_at=start, timed_out=True
+            model, duration_seconds=float(timeout_s), started_at=start, failure_reason="timeout"
         )
 
     if result_pipe_recv.poll():
         return result_pipe_recv.recv()  # type: ignore[no-any-return]
 
-    logger.warning("Validator subprocess exited with code %d, no result", p.exitcode or -1)
-    return _empty_session_result(model)
+    logger.warning(
+        "Validator subprocess [%s] exited with code %d, no result", label, p.exitcode or -1
+    )
+    return _empty_session_result(model, failure_reason="worker_crashed")
 
 
 def _validator_worker(
@@ -949,10 +980,10 @@ def _validator_worker(
         result = _asyncio.run(_run())
         result_pipe.send(result)
     except Exception as e:
-        logging.getLogger(__name__).error("Validator worker failed: %s", e)
+        logging.getLogger(__name__).error("Validator worker [%s] failed: %s", label, e)
         from argus.runners import _empty_session_result as _esr
 
-        result_pipe.send(_esr(model))
+        result_pipe.send(_esr(model, failure_reason="worker_crashed"))
     finally:
         result_pipe.close()
 

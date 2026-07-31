@@ -134,9 +134,9 @@ _CODE_REVIEW_COLUMNS_SQL = ", ".join(_CODE_REVIEW_COLUMNS)
 
 # =============================================================================
 # DDL — idempotent bootstrap, mirrors schema/008 + schema/009 + schema/011 +
-# schema/015 (review_patterns from schema/010 is out of scope: it belongs to
-# the weekly feedback-loop flow, not the round-history path this module
-# serves).
+# schema/015 + schema/016 (review_patterns from schema/010 is out of scope:
+# it belongs to the weekly feedback-loop flow, not the round-history path
+# this module serves).
 # =============================================================================
 
 _BOOTSTRAP_DDL = """
@@ -189,6 +189,8 @@ CREATE TABLE IF NOT EXISTS agent_runs (
     files_explored TEXT,
     finding_count INTEGER DEFAULT 0,
     result_text_length INTEGER DEFAULT 0,
+    failure_reason TEXT
+        CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'worker_crashed')),
     created_at TEXT NOT NULL
 );
 
@@ -294,12 +296,12 @@ _INSERT_AGENT_RUN_SQL = """
         id, code_review_id, agent_name, agent_type, model,
         cost_usd, duration_seconds, started_at, finished_at,
         tool_call_count, tool_names, context7_call_count,
-        files_explored, finding_count, result_text_length, created_at
+        files_explored, finding_count, result_text_length, failure_reason, created_at
     ) VALUES (
         :id, :code_review_id, :agent_name, :agent_type, :model,
         :cost_usd, :duration_seconds, :started_at, :finished_at,
         :tool_call_count, :tool_names, :context7_call_count,
-        :files_explored, :finding_count, :result_text_length, :created_at
+        :files_explored, :finding_count, :result_text_length, :failure_reason, :created_at
     )
 """
 
@@ -354,6 +356,11 @@ class SqliteHistoryBackend:
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
 
+    @property
+    def db_path(self) -> str:
+        """The resolved file path this backend reads/writes."""
+        return self._db_path
+
     # -- connection management ------------------------------------------------
 
     def _open_and_bootstrap(self) -> sqlite3.Connection:
@@ -370,8 +377,29 @@ class SqliteHistoryBackend:
             conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.executescript(_BOOTSTRAP_DDL)
+        self._migrate_agent_runs_failure_reason(conn)
         conn.commit()
         return conn
+
+    @staticmethod
+    def _migrate_agent_runs_failure_reason(conn: sqlite3.Connection) -> None:
+        """Self-healing column add for pre-existing local ``history.db`` files.
+
+        ``CREATE TABLE IF NOT EXISTS`` in ``_BOOTSTRAP_DDL`` is a no-op once
+        the table already exists, so a ``failure_reason`` column added to
+        that DDL string would never actually reach an existing local file —
+        the same class of gap Postgres's numbered ``schema/*.sql`` migrations
+        exist to close, but this backend has no migration runner at all.
+        Checking and adding the column at connect-time is the SQLite-shaped
+        equivalent, scoped to this one column rather than a general
+        migration framework this single-user local file doesn't need.
+        """
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")}
+        if "failure_reason" not in columns:
+            conn.execute(
+                "ALTER TABLE agent_runs ADD COLUMN failure_reason TEXT "
+                "CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'worker_crashed'))"
+            )
 
     async def _connection(self) -> sqlite3.Connection:
         # Must hold self._lock across the check-and-set: without it, two
@@ -396,6 +424,19 @@ class SqliteHistoryBackend:
             conn = self._conn
             self._conn = None
             await asyncio.to_thread(conn.close)
+
+    async def ping(self) -> None:
+        """Open (or reuse) the connection, forcing the bootstrap DDL to run now.
+
+        Exists so a caller can validate the configured ``db_path`` -- parent
+        directory creatable, file writable, existing file not corrupt --
+        before starting an expensive review, rather than discovering a
+        permission or disk-full error only at the final ``upsert_completed_row``
+        call after the whole pipeline has already run. Raises whatever
+        ``sqlite3``/``OSError`` the underlying connect-and-bootstrap raises;
+        callers should catch and wrap with a clearer message.
+        """
+        await self._connection()
 
     # -- reads -----------------------------------------------------------------
 
@@ -578,6 +619,7 @@ class SqliteHistoryBackend:
                     "files_explored": json.dumps(run.files_explored),
                     "finding_count": run.finding_count,
                     "result_text_length": run.result_text_length,
+                    "failure_reason": run.failure_reason,
                     "created_at": _utcnow_iso(),
                 }
                 for run in runs

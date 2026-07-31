@@ -138,3 +138,52 @@ class TestCheckPrerequisites:
         messages = [rec.message for rec in caplog.records]
         assert any("`git` was not found on PATH" in m for m in messages)
         assert any("`claude` CLI was not found on PATH" in m for m in messages)
+
+
+class TestRunReviewConnectivityErrorExit:
+    """A bad ARGUS_DB_URL/ARGUS_HISTORY_DB_PATH must exit cleanly (like a
+    missing required secret) rather than let HistoryBackendConnectivityError
+    escape as a raw traceback -- the exact UX gap this catch exists to close."""
+
+    def test_exits_cleanly_instead_of_raising(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import argparse
+        import shutil
+        from unittest.mock import MagicMock, patch
+
+        from argus.storage.resolver import HistoryBackendConnectivityError
+
+        monkeypatch.setattr(shutil, "which", _which_stub({"git", "claude"}))
+        args = argparse.Namespace(
+            repo_positional="org/repo",
+            repo_flag=None,
+            storage_read_url=None,
+            storage_write_url=None,
+            storage_auth=None,
+            pr=42,
+            sha=None,
+            no_prompt_overrides=False,
+            base_ref=None,
+            dismiss=[],
+            post=False,
+            commit_status=False,
+            output=None,
+        )
+        parser = MagicMock()
+
+        with (
+            patch("argus.cli._start_watchdog"),
+            patch(
+                "argus.cli.run",
+                side_effect=HistoryBackendConnectivityError("bad ARGUS_DB_URL"),
+            ),
+            caplog.at_level(logging.ERROR, logger="argus_review_local"),
+        ):
+            with pytest.raises(SystemExit) as exc:
+                argus_cli._run_review(parser, args)
+
+        assert exc.value.code == 1
+        assert any("bad ARGUS_DB_URL" in rec.message for rec in caplog.records)

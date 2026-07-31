@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime  # noqa: TC003 — used at runtime by Pydantic
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID  # noqa: TC003 — used at runtime by Pydantic
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -169,6 +169,13 @@ class AgentRunIn(BaseModel):
     files_explored: list[str] = Field(default_factory=list)
     finding_count: int = 0
     result_text_length: int = 0
+    failure_reason: Literal["timeout", "worker_crashed"] | None = Field(
+        default=None,
+        description=(
+            "'timeout' or 'worker_crashed' when this run produced no real result; "
+            "None for a run that completed normally."
+        ),
+    )
 
 
 # =============================================================================
@@ -281,12 +288,12 @@ _INSERT_AGENT_RUN_SQL = """
         code_review_id, agent_name, agent_type, model,
         cost_usd, duration_seconds, started_at, finished_at,
         tool_call_count, tool_names, context7_call_count,
-        files_explored, finding_count, result_text_length
+        files_explored, finding_count, result_text_length, failure_reason
     ) VALUES (
         :code_review_id, :agent_name, :agent_type, :model,
         :cost_usd, :duration_seconds, :started_at, :finished_at,
         :tool_call_count, :tool_names, :context7_call_count,
-        :files_explored, :finding_count, :result_text_length
+        :files_explored, :finding_count, :result_text_length, :failure_reason
     )
 """
 
@@ -482,6 +489,7 @@ async def insert_agent_runs(
             "files_explored": run.files_explored,
             "finding_count": run.finding_count,
             "result_text_length": run.result_text_length,
+            "failure_reason": run.failure_reason,
         }
         for run in runs
     ]

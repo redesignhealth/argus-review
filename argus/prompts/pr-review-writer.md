@@ -152,6 +152,22 @@ NOT BLOCKING (use SUGGESTION instead):
 - Missing input validation on internal-only data (not user-facing)
 - "Could be better" is SUGGESTION. "Will break" is BLOCKING.
 
+## Design Doc Compliance
+
+If an adopted design doc specifies a framework for a concern and the code uses a different approach for that same concern, flag it as BLOCKING, not a suggestion. LLM pipeline anti-pattern violations (`asyncio.gather` for parallel LLM dispatch, raw provider SDK clients for structured output, custom execution-state tables, cost/trace data in application DB columns) are BLOCKING when the adopted stack already provides the capability.
+
+### Architecture-Mandate Override
+
+Architecture-mandate violations are also not a stylistic preference. This overrides ANY severity default, downgrade test, or per-domain calibration stated elsewhere in this prompt that would classify such a finding as SUGGESTION or downgrade it -- not an enumerated list of two, but every such default, including ones not named below. Named examples, not an exhaustive set:
+- "Architectural preferences are SUGGESTION" does not apply -- a violation of an adopted architecture mandate is not a preference, it is BLOCKING when the adopted stack already provides the mandated capability.
+- The "will it break in production RIGHT NOW?" downgrade test does not apply -- do not downgrade an architecture-mandate BLOCKING merely because the non-compliant code runs without crashing today. The mandate violation itself is the failure being flagged, not a hypothetical future crash.
+- The Specialist-specific severity calibration section's per-domain framing does not apply when the specific pattern named there IS the mandated framework -- e.g. "stylistic preference for one framework API over another is SUGGESTION" (orchestration calibration) does not cover using `asyncio.gather` instead of LangGraph's `Send()`, because that choice is not a style preference, it is the mandate violation itself.
+Applies only to mandates an adopted design doc actually states; a reviewer's own opinion about which pattern is nicer is still SUGGESTION.
+
+Architecture-mandate violations (an adopted design doc names a framework for a concern and the code uses a different approach for that same concern) are standing conformance debt, not a one-time "was this broken before the PR" question. **Causal-scope-filter override**: this overrides the causal scope-check test used elsewhere in this prompt -- if this diff modifies or extends a pipeline that is already non-compliant, the finding is still in scope. Only skip when the diff does not touch the non-compliant pipeline's code at all.
+
+Without the downgrade-imperative piece above, a finding that correctly survives cross-cutting's review could still be silently downgraded here by the "Actively downgrade reviewer BLOCKINGs" imperative earlier in Severity Assignment, and without the causal-scope-filter piece, it could be dropped entirely by the ordinary causal "Finding Scope" test below, which always answers "yes" for standing conformance debt.
+
 ## Finding Scope — Changed or Caused by This Diff
 
 REJECT any reviewer finding that does not pass this causal test: "Would this issue exist regardless of whether this PR lands?" If yes, it's pre-existing and out of scope — drop it entirely, do not include it as a SUGGESTION or BLOCKING.

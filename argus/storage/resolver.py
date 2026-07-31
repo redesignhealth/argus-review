@@ -37,6 +37,7 @@ regardless of history-backend kind).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Literal, Protocol
 from uuid import UUID
@@ -48,7 +49,7 @@ from argus.storage.http import (
     is_http_storage_enabled,
 )
 from argus.storage.models import CodeReviewRound
-from argus.storage.session import get_async_session_factory
+from argus.storage.session import get_async_engine, get_async_session_factory
 from argus.storage.sql import (
     AgentRunIn,
     CodeReviewRoundIn,
@@ -63,12 +64,14 @@ HistoryBackendKind = Literal["postgres", "http", "sqlite"]
 
 __all__ = [
     "HistoryBackend",
+    "HistoryBackendConnectivityError",
     "HistoryBackendKind",
     "HttpHistoryBackend",
     "HttpStorageError",
     "PostgresHistoryBackend",
     "get_history_backend",
     "resolve_history_backend_kind",
+    "validate_history_backend_connectivity",
 ]
 
 
@@ -377,3 +380,81 @@ def get_history_backend() -> HistoryBackend:
     settings = get_settings()
     db_path = settings.ARGUS_HISTORY_DB_PATH
     return SqliteHistoryBackend(db_path=db_path) if db_path else SqliteHistoryBackend()
+
+
+class HistoryBackendConnectivityError(RuntimeError):
+    """Raised by :func:`validate_history_backend_connectivity` on a bad
+    ``ARGUS_DB_URL``/``ARGUS_HISTORY_DB_PATH`` -- a clear, upfront message in
+    place of whatever raw driver exception (``OperationalError``, ``OSError``,
+    a DNS failure) the underlying connect attempt raised."""
+
+
+async def validate_history_backend_connectivity(*, timeout_s: float = 10.0) -> None:
+    """Fail fast on a bad history-backend DB path/URL, before the pipeline runs.
+
+    Both ``PostgresHistoryBackend`` and ``SqliteHistoryBackend`` connect
+    lazily, on first use -- for a local/CLI run (no ``flow_run_id``), that
+    first use is ``upsert_completed_row`` at the very end of ``run_review``,
+    after the entire review (all LLM cost) has already completed. A bad
+    ``ARGUS_DB_URL`` (unreachable host, bad credentials, wrong port) or a bad
+    ``ARGUS_HISTORY_DB_PATH`` (unwritable directory, disk full) then surfaces
+    only as a failure at that final write, discarding the whole run's cost.
+    Calling this once, up front, forces the same connect attempt immediately
+    instead. The HTTP-shim backend is intentionally not checked here -- it's
+    not a "db path" the caller configured, and its own request/response
+    cycle each round already surfaces connectivity failures directly.
+    """
+    kind = resolve_history_backend_kind()
+    if kind == "postgres":
+        from sqlalchemy import text
+
+        engine = get_async_engine()
+        try:
+            async with asyncio.timeout(timeout_s):
+                async with engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+        except TimeoutError as exc:
+            raise HistoryBackendConnectivityError(
+                f"Could not reach the configured ARGUS_DB_URL within {timeout_s}s. "
+                "Check the host/port are correct and reachable from this machine."
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 -- wrap any driver-specific error
+            raise HistoryBackendConnectivityError(
+                f"Could not connect using the configured ARGUS_DB_URL: {exc}"
+            ) from exc
+    elif kind == "sqlite":
+        # This backend instance is scoped to this probe only -- graph.py's
+        # finalize step calls get_history_backend() again later and gets a
+        # fresh instance, so closing this one has no effect on the real
+        # write path. Without it, the sqlite3.Connection ping() opens would
+        # sit open until GC (non-deterministic timing), holding a WAL lock.
+        #
+        # Known accepted gap: if the timeout fires in the narrow window
+        # after ping()'s background thread (asyncio.to_thread doesn't
+        # support cancellation) finishes connecting but before this task
+        # resumes, that connection is still leaked to GC -- the `finally`
+        # below only runs if `backend.ping()` itself returns or raises,
+        # not if the enclosing asyncio.timeout cancels it first. Not fixed
+        # here: doing so needs either cancelling the underlying OS-level
+        # connect (sqlite3 offers no hook for that) or restructuring this
+        # into a two-phase connect-then-bootstrap so the connection handle
+        # is reachable for cleanup before bootstrap can time out -- more
+        # complexity than a sub-100ms local file open (against a 10s
+        # default budget) currently justifies.
+        backend = get_history_backend()
+        assert isinstance(backend, SqliteHistoryBackend)  # kind == "sqlite" guarantees this
+        try:
+            async with asyncio.timeout(timeout_s):
+                await backend.ping()
+        except TimeoutError as exc:
+            raise HistoryBackendConnectivityError(
+                f"Opening the local history database timed out after {timeout_s}s "
+                f"(path: {backend.db_path})."
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 -- wrap any sqlite3/OSError
+            raise HistoryBackendConnectivityError(
+                f"Could not open the local history database at {backend.db_path!r} "
+                f"(set via ARGUS_HISTORY_DB_PATH, or the default path): {exc}"
+            ) from exc
+        finally:
+            await backend.aclose()
