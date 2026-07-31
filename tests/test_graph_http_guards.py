@@ -9,7 +9,7 @@ whole LangGraph machinery — just patch ``is_http_storage_enabled`` and
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -35,6 +35,16 @@ async def test_run_review_raises_when_http_enabled_but_client_missing(
     with (
         patch("argus.storage.resolver.is_http_storage_enabled", return_value=True),
         patch("argus.storage.resolver.get_http_storage", return_value=None),
+        # validate_history_backend_connectivity() currently no-ops for the
+        # "http" backend kind without calling get_history_backend() at all,
+        # so this passes without the patch today -- pinned explicitly so a
+        # future refactor that starts calling it unconditionally doesn't
+        # make this test hit the same "client missing" RuntimeError for
+        # the wrong reason (the preflight check, not the guard under test).
+        patch(
+            "argus.graph.validate_history_backend_connectivity",
+            new_callable=AsyncMock,
+        ),
     ):
         from argus.graph import run_review
 

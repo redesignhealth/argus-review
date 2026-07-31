@@ -119,12 +119,13 @@ class SystemReviewResult(BaseModel):
         default_factory=list, description="Files the reviewer actually read"
     )
     cost_usd: float = Field(default=0.0, description="Agent session cost in USD")
-    timed_out: bool = Field(
-        default=False,
+    failure_reason: Literal["timeout", "worker_crashed"] | None = Field(
+        default=None,
         description=(
-            "True when the reviewer's subprocess hit the wall-clock timeout and was "
-            "killed. Additive field: absent/False for all pre-existing rows means "
-            "'not known to have timed out', not 'confirmed completed'."
+            "'timeout' or 'worker_crashed' when this reviewer's subprocess did not "
+            "complete normally; None for a run that completed (even with 0 findings). "
+            "Additive field: absent/None for all pre-existing rows means 'not known "
+            "to have failed', not 'confirmed completed'."
         ),
     )
 
@@ -277,9 +278,16 @@ class AgentRunData(BaseModel):
     files_explored: list[str] = Field(default_factory=list)
     finding_count: int = Field(default=0)
     result_text_length: int = Field(default=0)
-    timed_out: bool = Field(
-        default=False,
-        description="True when the underlying subprocess hit the wall-clock timeout.",
+    failure_reason: Literal["timeout", "worker_crashed"] | None = Field(
+        default=None,
+        description=(
+            "'timeout' or 'worker_crashed' when this run produced no real result; "
+            "None for a run that completed normally. Additive field: absent/None "
+            "for all pre-existing rows means 'not known to have failed', not "
+            "'confirmed completed' -- relevant because this model is reconstructed "
+            "from persisted rows via model_validate(), so a pre-migration NULL "
+            "flows through here too."
+        ),
     )
 
     @field_validator("started_at", "finished_at", mode="before")

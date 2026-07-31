@@ -23,7 +23,7 @@ Before accepting any custom pipeline code, verify via Context7:
 - State persistence: AsyncPostgresSaver checkpointer, NOT custom DB tables
 - Timeouts: step_timeout config, NOT manual timeout wrappers
 - Routing: Command and conditional edges, NOT if/else chains in application code
-- Structured output: init_chat_model().with_structured_output(), NOT raw SDK + JSON parsing
+- Structured output: LiteLLM's `response_format` `json_schema`, or the OpenAI Responses API via rh-lib wrappers (`pydantic_to_response_format`, OpenAI-only) -- both are D024-compliant per docs/coding-patterns/llm-pipelines.md, do not flag either. NOT raw SDK + JSON parsing and NOT `init_chat_model().with_structured_output()` in NEW code (superseded per D024; existing call sites remain valid until TECH-3214's rewrite completes)
 - Human-in-the-loop: interrupt(), NOT custom polling/webhook patterns
 - Subgraph composition: nested graphs, NOT manual orchestration between graphs
 - Error recovery: checkpointer resume from last successful node, NOT custom restart logic
@@ -55,7 +55,7 @@ Flag any case where application code extends LangGraph in ways the framework alr
 - docs/PLATFORM_ARCHITECTURE.md
 - docs/operations/PREFECT_RUNBOOK.md
 - docs/features/AGENTIC_JOBS.md
-- projects/concept-generation/docs/COLOSSEUM_RESEARCH_V2.md
+- projects/concept-generation/docs/COLOSSEUM_RESEARCH_V2.md (predates D024; its LangChain structured-output guidance is superseded -- do not cite it for that)
 
 ## Output
 Return findings as JSON: system_group, findings [{file, line, description, context}], files_explored.

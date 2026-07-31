@@ -4,73 +4,49 @@ Single source of truth for which concrete LLM each logical alias resolves to.
 To upgrade a model family across the codebase (e.g. GPT-5.4 -> GPT-5.5), edit
 ``ALIAS_MAP`` below and nothing else.
 
-Call sites should import the resolved constants (``GPT_FRONTIER``, ``GPT_MINI``,
+Call sites should import the resolved constants (``GPT_MINI``,
 ``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings like
 ``"gpt-5.5-mini"``.
 
+Only aliases this package actually calls are registered here -- this is a
+standalone, isolated package, not the larger monorepo it was extracted from,
+so there's no value in carrying registry entries (gpt-frontier, gpt-nano, the
+Gemini family) with no real call site. Add an alias back if a future call
+site actually needs it.
+
 Tier semantics:
     *frontier* -- best reasoning available in the family; slow / expensive.
+    *opus*     -- next tier down from frontier -- strong reasoning at roughly
+                  half frontier's per-token cost. Introduced for call sites
+                  (e.g. the cross-cutting reviewer) where evals showed no
+                  measurable quality gain from frontier, so the cost isn't
+                  justified.
     *default*  -- workhorse balance of cost and capability.
     *mini*     -- fast and cheap; suitable for high-volume, low-stakes calls.
-    *nano*     -- smallest / cheapest tier (OpenAI only).
-
-Validation: a live integration test (``tests/integration/test_alias_live.py``)
-hits each provider with the resolved name and confirms the model is recognized.
-Run it after editing ``ALIAS_MAP``.
 """
 
 from typing import Any, Final
 
 ALIAS_MAP: Final[dict[str, str]] = {
     # OpenAI -- gpt-5 family
-    "gpt-frontier": "gpt-5.5",
     "gpt-mini": "gpt-5.4-mini",  # bump to gpt-5.5-mini once OpenAI ships it
-    "gpt-nano": "gpt-5-nano",
-    # Anthropic -- claude-4 family
-    "claude-frontier": "claude-opus-4-7",
-    "claude-default": "claude-sonnet-4-6",
+    # Anthropic
+    "claude-frontier": "claude-fable-5",
+    "claude-opus": "claude-opus-5",
+    "claude-default": "claude-sonnet-5",
     "claude-mini": "claude-haiku-4-5",
-    # Google -- gemini-3 family
-    # NOTE: gemini-3-pro-preview was deprecated by Google (404 as of 2026-06).
-    # gemini-3.1-pro-preview is the current working successor; confirmed live
-    # in prod via slides-to-text (EXPERIMENTAL_MODELS). The integration test
-    # will catch if these names stop resolving.
-    # TODO: upgrade to stable gemini-3.1-pro (non-preview) when GA;
-    # re-eval by 2026-09-01.
-    "gemini-frontier": "gemini-3.1-pro-preview",
-    "gemini-mini": "gemini-3-flash-preview",
 }
-
-EMBEDDING_SMALL: Final[str] = "text-embedding-3-small"
-EMBEDDING_LARGE: Final[str] = "text-embedding-3-large"
-
-# Native output dim for each embedding model. Keep in lockstep with the
-# pgvector column declarations in any model that uses them
-# (e.g. ``Concept.embedding``). text-embedding-3-large supports OpenAI's
-# matryoshka truncation via the ``dimensions=`` parameter, so callers can
-# choose a smaller output if storage / index limits demand it; the
-# defaults below are the **native** dims you get without truncation.
-EMBEDDING_SMALL_DIM: Final[int] = 1536
-EMBEDDING_LARGE_DIM: Final[int] = 3072
 
 # Short-lived pins for evals / preview models. Anything in here is a known
-# escape hatch from the alias system -- add a comment with the ticket and
-# expected removal date. The check_model_strings lint allows these names.
-EXPERIMENTAL_MODELS: Final[dict[str, str]] = {
-    # claude-fable-5 confirmed in Anthropic usage API as of 2026-06-30.
-    # Pricing: $10/$50 input/output per M tokens (same as claude-fable-5 GA tier).
-    # TODO: promote to ALIAS_MAP["claude-frontier"] once team adopts for inference.
-    "claude-fable-5": "claude-fable-5",
-}
+# escape hatch from the alias system -- add a comment with the tracking
+# issue/PR and expected removal date.
+EXPERIMENTAL_MODELS: Final[dict[str, str]] = {}
 
-GPT_FRONTIER: Final[str] = ALIAS_MAP["gpt-frontier"]
 GPT_MINI: Final[str] = ALIAS_MAP["gpt-mini"]
-GPT_NANO: Final[str] = ALIAS_MAP["gpt-nano"]
 CLAUDE_FRONTIER: Final[str] = ALIAS_MAP["claude-frontier"]
+CLAUDE_OPUS: Final[str] = ALIAS_MAP["claude-opus"]
 CLAUDE_DEFAULT: Final[str] = ALIAS_MAP["claude-default"]
 CLAUDE_MINI: Final[str] = ALIAS_MAP["claude-mini"]
-GEMINI_FRONTIER: Final[str] = ALIAS_MAP["gemini-frontier"]
-GEMINI_MINI: Final[str] = ALIAS_MAP["gemini-mini"]
 
 
 def resolve(alias: str) -> str:
@@ -93,7 +69,7 @@ _PROVIDER_BY_FAMILY: Final[dict[str, str]] = {
 def infer_provider(alias_or_model: str) -> str:
     """Return the LangChain provider name for an alias or concrete model id.
 
-    Works for both registry aliases (``claude-default``, ``gpt-frontier``)
+    Works for both registry aliases (``claude-default``, ``gpt-mini``)
     and concrete model strings (``claude-sonnet-4-6``, ``gpt-5.5-mini``) by
     matching on the family prefix before the first ``-``.
 

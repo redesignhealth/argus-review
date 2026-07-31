@@ -524,8 +524,18 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 
     _start_watchdog(repo, args.pr)
 
+    from argus.storage.resolver import HistoryBackendConnectivityError
+
     start = time.monotonic()
-    response = asyncio.run(run(request))
+    try:
+        response = asyncio.run(run(request))
+    except HistoryBackendConnectivityError as exc:
+        # Same clean-exit treatment as _check_settings' missing-secrets
+        # case -- a bad ARGUS_DB_URL/ARGUS_HISTORY_DB_PATH is a config
+        # problem the user can fix, not a bug that should print a
+        # traceback.
+        logger.error("%s", exc)
+        sys.exit(1)
 
     elapsed = time.monotonic() - start
 

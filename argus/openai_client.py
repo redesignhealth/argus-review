@@ -122,7 +122,7 @@ class OpenAIClientSync:
 
         Args:
             input: String prompt or list of message dicts with 'role' and 'content'.
-            model: Model identifier (e.g. ``GPT_MINI``, ``GPT_FRONTIER``).
+            model: Model identifier (e.g. ``GPT_MINI``).
             instructions: System-level instructions (like system message).
             text_format: Structured output format for text.format parameter.
                 Example: {"type": "json_schema", "name": "output", "schema": {...}}

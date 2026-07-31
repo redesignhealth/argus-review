@@ -70,12 +70,16 @@ The canonical schema is in `schema/*.sql` in this repo. Apply them in order:
 - `schema/015_create_agent_runs.sql` — creates `agent_runs`, one row per
   sub-agent per review round, foreign-keyed to `code_reviews.id` with
   `ON DELETE CASCADE`.
+- `schema/016_add_agent_runs_failure_reason.sql` — adds a nullable
+  `failure_reason` column (`'timeout'` / `'worker_crashed'` / `NULL`) so a
+  reviewer subprocess that timed out or crashed is durably distinguishable
+  from one that completed and genuinely found nothing.
 
-The numbering (008-011, 015) is not a typo or a sign of missing
+The numbering (008-011, 015-016) is not a typo or a sign of missing
 prerequisites — these files are extracted from a longer internal migration
 sequence, and `008_add_code_reviews.sql` creates the `review_service` schema
 from scratch, so nothing before it in that original sequence is needed
-here. Apply the five files above, in order, and you have the complete
+here. Apply the six files above, in order, and you have the complete
 Postgres schema this pipeline needs.
 
 The write path is idempotent on `flow_run_id` via the partial unique index
@@ -166,7 +170,7 @@ operations as the Postgres path (`select_latest_completed_round`,
 `select_recent_rounds`, `select_recent_lite_rounds`, `upsert_running_row`,
 `upsert_completed_row`, `insert_agent_runs`, `select_status_by_flow_run`)
 against a single SQLite file, bootstrapped on first use from DDL that
-mirrors `schema/008` + `schema/009` + `schema/011` + `schema/015` (the
+mirrors `schema/008` + `schema/009` + `schema/011` + `schema/015` + `schema/016` (the
 `review_patterns` table from `schema/010` is out of scope — see the note
 above). JSONB columns become `TEXT` holding JSON-encoded strings, `TEXT[]`
 array columns likewise, and the Postgres partial unique index

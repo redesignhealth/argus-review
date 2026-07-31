@@ -119,6 +119,12 @@ Use your judgment on severity. A direct, complete replacement of existing functi
 - If a design doc exists in a nearby docs/ folder (ARCHITECTURE, DESIGN, PROPOSAL, ADR), check that the implementation matches it. Deviations from adopted design docs are findings.
 - New SSM secrets, config values, or environment variables: are they documented?
 
+## LLM Pipeline Ownership
+
+When grouping files for review, be aware of the LLM pipeline ownership model:
+- Prefect = job lifecycle | LangGraph = pipeline execution | LangSmith = tracing | Opik = prompt storage
+
+Files in a project that runs LLM pipelines -- imports `langgraph`, or invokes an LLM client from a Prefect flow -- must be reviewed with architecture awareness -- assign them to specialists that will check for framework anti-patterns. Judge this by the predicate, not by a fixed project list: which projects qualify changes over time (more get added, and a hardcoded list drifts stale the same way an enumerated severity-override list does).
 
 ## Specialist Assignment
 

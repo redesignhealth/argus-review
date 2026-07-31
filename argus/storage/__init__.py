@@ -26,11 +26,13 @@ from argus.storage.models import (
 )
 from argus.storage.resolver import (
     HistoryBackend,
+    HistoryBackendConnectivityError,
     HistoryBackendKind,
     HttpHistoryBackend,
     PostgresHistoryBackend,
     get_history_backend,
     resolve_history_backend_kind,
+    validate_history_backend_connectivity,
 )
 from argus.storage.sqlite import SqliteHistoryBackend
 
@@ -38,6 +40,7 @@ __all__ = [
     "CodeReviewRound",
     "CodeReviewRoundRecord",
     "HistoryBackend",
+    "HistoryBackendConnectivityError",
     "HistoryBackendKind",
     "HttpHistoryBackend",
     "HttpStorageClient",
@@ -48,4 +51,5 @@ __all__ = [
     "install_http_storage",
     "is_http_storage_enabled",
     "resolve_history_backend_kind",
+    "validate_history_backend_connectivity",
 ]

@@ -16,6 +16,7 @@ Route **full** for everything else. When in doubt, route full. Changes that need
 - Auth, security, or infrastructure changes
 - Changes to shared rh-lib code
 - Anything that could break production
+- Any change to an LLM/AI pipeline's EXECUTION code (multi-step LLM calls, an agent loop, or structured-output generation), even a small one -- only the full review's cross-cutting reviewer checks Architecture Compliance (BLOCKING); `pr-review-lite` explicitly does not check architectural concerns, so a small edit inside an already-non-compliant pipeline would otherwise never get flagged on its first pass. This does NOT include a prompt-content-only edit to a file under `argus/prompts/` with no execution-code change.
 
 The prior round verdict is a meaningful signal: when the prior verdict was APPROVE and the new changes look like minor cleanups or suggestion follow-ups, prefer lite. But a prior APPROVE biases the decision — it does not exempt the diff from the complexity check. Still judge the change on its own merits, and route full when the diff genuinely warrants one (new functions/classes/files, logic changes, auth/security/infra, shared rh-lib code, or wiring/registration changes that affect a runtime contract) even when it's described as "cleanup," a "rename," or a "follow-up."
 

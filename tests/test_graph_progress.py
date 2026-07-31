@@ -82,6 +82,10 @@ class TestRunReviewThreadId:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -97,6 +101,29 @@ class TestRunReviewThreadId:
         call_kwargs = mock_graph.ainvoke.call_args
         config = call_kwargs[1].get("config") or call_kwargs[0][1]
         assert config["configurable"]["thread_id"] == "flow-abc-123"
+
+
+class TestRunReviewConnectivityPreflight:
+    """run_review's connectivity check is stated as a propagation contract
+    in a comment (HistoryBackendConnectivityError should reach the caller
+    unmodified) -- every other test in this file patches it to a no-op, so
+    nothing actually proves that contract holds without this test."""
+
+    @pytest.mark.asyncio
+    async def test_connectivity_error_propagates_out_of_run_review(self) -> None:
+        from argus.graph import run_review
+        from argus.models import ReviewRequest
+        from argus.storage.resolver import HistoryBackendConnectivityError
+
+        request = ReviewRequest(repo="org/repo", pr_number=42)
+
+        with patch(
+            f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+            new_callable=AsyncMock,
+            side_effect=HistoryBackendConnectivityError("bad db"),
+        ):
+            with pytest.raises(HistoryBackendConnectivityError, match="bad db"):
+                await run_review(request, flow_run_id=None)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +178,10 @@ class TestRunReviewWorktreeThreading:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -178,6 +209,10 @@ class TestRunReviewWorktreeThreading:
 
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
+            patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
             patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
@@ -251,6 +286,10 @@ class TestRunReviewFinalization:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -293,6 +332,10 @@ class TestRunReviewFinalization:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -321,6 +364,10 @@ class TestRunReviewFinalization:
 
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
+            patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
             patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
@@ -351,6 +398,10 @@ class TestRunReviewFinalization:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -365,6 +416,96 @@ class TestRunReviewFinalization:
         # The state dict (first arg to ainvoke) should not contain flow_run_id
         state_dict = mock_graph.ainvoke.call_args[0][0]
         assert "flow_run_id" not in state_dict
+
+
+# ---------------------------------------------------------------------------
+# _looks_like_missing_schema_object
+# ---------------------------------------------------------------------------
+
+
+class TestLooksLikeMissingSchemaObject:
+    def test_postgres_missing_column(self) -> None:
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception('column "failure_reason" of relation "agent_runs" does not exist')
+        assert _looks_like_missing_schema_object(exc) is True
+
+    def test_postgres_missing_relation(self) -> None:
+        """Strictly worse than a missing column (schema/015 itself was never
+        applied) and lacks the word "column" entirely -- must still match."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception('relation "review_service.agent_runs" does not exist')
+        assert _looks_like_missing_schema_object(exc) is True
+
+    def test_sqlite_missing_column_on_insert(self) -> None:
+        """SQLite's actual INSERT-path phrasing is "has no column named",
+        NOT "no such column" (that's the SELECT/WHERE-path phrasing)."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception("table agent_runs has no column named failure_reason")
+        assert _looks_like_missing_schema_object(exc) is True
+
+    def test_sqlite_missing_column_on_select(self) -> None:
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception("no such column: failure_reason")
+        assert _looks_like_missing_schema_object(exc) is True
+
+    def test_unrelated_error_does_not_match(self) -> None:
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception("database is locked")
+        assert _looks_like_missing_schema_object(exc) is False
+
+    def test_checks_cause_when_message_lives_there(self) -> None:
+        """With asyncpg, the real Postgres message sometimes lives on
+        __cause__ rather than inline in str(exc)."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        cause = Exception('column "failure_reason" does not exist')
+        exc = Exception("generic wrapper message")
+        exc.__cause__ = cause
+        assert _looks_like_missing_schema_object(exc) is True
+
+    def test_checks_cause_for_missing_relation_too(self) -> None:
+        """The __cause__ path isn't specific to the missing-column shape --
+        a missing-table message living on __cause__ must match too."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        cause = Exception('relation "review_service.agent_runs" does not exist')
+        exc = Exception("asyncpg wrapper")
+        exc.__cause__ = cause
+        assert _looks_like_missing_schema_object(exc) is True
+
+    def test_permission_denied_does_not_match_missing_relation(self) -> None:
+        """'relation' appears in plenty of non-migration errors too --
+        without the 'does not exist' guard, a permission error would
+        misleadingly route through the migration-alert path."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception("permission denied for relation agent_runs")
+        assert _looks_like_missing_schema_object(exc) is False
+
+    def test_unrelated_cause_does_not_match(self) -> None:
+        """A __cause__ that itself doesn't match must not produce a false
+        positive just because __cause__ traversal happened."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception("insert failed")
+        exc.__cause__ = Exception("connection timeout")
+        assert _looks_like_missing_schema_object(exc) is False
+
+    def test_split_tokens_across_message_and_cause_do_not_false_positive(self) -> None:
+        """Regression guard: str(exc) and str(exc.__cause__) must be checked
+        independently, not joined into one string -- joining would let
+        'column' in one and 'does not exist' in the other combine into a
+        false positive even though neither message alone matches."""
+        from argus.graph import _looks_like_missing_schema_object
+
+        exc = Exception("something mentions a column")
+        exc.__cause__ = Exception("an unrelated timeout does not exist... in this sentence")
+        assert _looks_like_missing_schema_object(exc) is False
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +626,10 @@ class TestRunReviewAgentRuns:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -520,6 +665,10 @@ class TestRunReviewAgentRuns:
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
             patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,
             ),
@@ -535,6 +684,106 @@ class TestRunReviewAgentRuns:
         assert result.verdict == Verdict.APPROVE
         # Agent session should never have been used
         mock_agent_session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_agent_runs_missing_column_logs_error_with_count(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A schema-mismatch error (e.g. an unapplied migration) must log at
+        ERROR with the dropped-row count, not the generic non-fatal WARNING
+        -- silently losing every agent_runs row for a whole deploy window is
+        not a one-off transient blip."""
+        from sqlalchemy.exc import ProgrammingError
+
+        from argus.graph import run_review
+        from argus.models import ReviewRequest, Verdict
+
+        request = ReviewRequest(repo="org/repo", pr_number=99)
+        mock_graph, mock_session_factory, mock_core_session, mock_agent_session = self._make_mocks()
+
+        mock_agent_session.execute.side_effect = ProgrammingError(
+            "INSERT INTO review_service.agent_runs ...",
+            {},
+            Exception('column "failure_reason" does not exist'),
+        )
+
+        with (
+            patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
+            patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "argus.storage.resolver.get_async_session_factory",
+                return_value=mock_session_factory,
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=_mock_gh_client()),
+            patch(_PROVISIONED_WORKTREE, return_value=_mock_provisioned_worktree()),
+            caplog.at_level("WARNING", logger="argus.graph"),
+        ):
+            mock_build.return_value.__aenter__ = AsyncMock(return_value=mock_graph)
+            mock_build.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            result = await run_review(request, flow_run_id="flow-schema-error")
+
+        assert result.verdict == Verdict.APPROVE  # error is swallowed, not propagated
+        error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(error_records) == 1
+        assert "1 agent_runs" in error_records[0].message
+        assert "schema/*.sql migration" in error_records[0].message
+
+    @pytest.mark.asyncio
+    async def test_agent_runs_unrelated_db_error_logs_warning_not_error(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A ProgrammingError NOT shaped like a missing column (e.g. a bad
+        bind-parameter count) must stay at the generic non-fatal WARNING --
+        the schema-error ERROR message would be misleading for an unrelated
+        SQL bug."""
+        from sqlalchemy.exc import ProgrammingError
+
+        from argus.graph import run_review
+        from argus.models import ReviewRequest, Verdict
+
+        request = ReviewRequest(repo="org/repo", pr_number=99)
+        mock_graph, mock_session_factory, mock_core_session, mock_agent_session = self._make_mocks()
+
+        mock_agent_session.execute.side_effect = ProgrammingError(
+            "INSERT INTO review_service.agent_runs ...",
+            {},
+            Exception("syntax error at or near ..."),
+        )
+
+        with (
+            patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
+            patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "argus.storage.resolver.get_async_session_factory",
+                return_value=mock_session_factory,
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=_mock_gh_client()),
+            patch(_PROVISIONED_WORKTREE, return_value=_mock_provisioned_worktree()),
+            caplog.at_level("WARNING", logger="argus.graph"),
+        ):
+            mock_build.return_value.__aenter__ = AsyncMock(return_value=mock_graph)
+            mock_build.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            result = await run_review(request, flow_run_id="flow-unrelated-error")
+
+        assert result.verdict == Verdict.APPROVE
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        warning_records = [
+            r for r in caplog.records if r.levelname == "WARNING" and "agent_runs" in r.message
+        ]
+        assert len(warning_records) == 1
+        # Pin the actual formatted content, not just that a WARNING fired --
+        # a format bug (wrong arg count, swapped args) would still pass a
+        # bare "one WARNING record exists" assertion.
+        assert "1 agent_runs" in warning_records[0].message
+        assert "ProgrammingError" in warning_records[0].message
 
 
 # ---------------------------------------------------------------------------
@@ -653,6 +902,10 @@ class TestRunReviewMaxConcurrency:
 
         with (
             patch(f"{_GRAPH_MODULE}.build_pipeline") as mock_build,
+            patch(
+                f"{_GRAPH_MODULE}.validate_history_backend_connectivity",
+                new_callable=AsyncMock,
+            ),
             patch(
                 "argus.storage.resolver.get_async_session_factory",
                 return_value=mock_session_factory,

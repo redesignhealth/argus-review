@@ -24,7 +24,7 @@ named prompt (adapted from the pipeline description in
 | `pr-review-specialist-security` | Specialist (parallel, when triggered) | Deep pass on injection, auth bypass, secrets exposure, session management |
 | `pr-review-specialist-sql` | Specialist (parallel, when triggered) | Deep pass on migration safety, query patterns, ORM alignment, batch operations |
 | `pr-review-specialist-infra` | Specialist (parallel, when triggered) | Deep pass on Terraform/IAM, deployment configuration, CI/CD workflows, secret paths |
-| `pr-review-cross-cutting` | Cross-cutting reviewer (parallel with all of the above) | Multi-file data flow, deployment ordering, session/connection lifecycle, IAM tracing, contract verification, model-registry compliance |
+| `pr-review-cross-cutting` | Cross-cutting reviewer (parallel with all of the above) | Multi-file data flow, deployment ordering, session/connection lifecycle, IAM tracing, contract verification, architecture-doc compliance, model-registry compliance |
 | `pr-review-tests-and-docs` | Parallel with the above | Dedicated test-coverage and documentation-compliance pass across the whole diff |
 | `pr-review-prior-art` | Injected into system/specialist/cross-cutting reviewers | Checks for re-invented internal utilities and re-implemented public libraries |
 | `pr-review-coverage-check` | Coverage check | Verifies every changed file was examined by at least one reviewer; returns gaps if not |
