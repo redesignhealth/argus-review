@@ -54,6 +54,14 @@ class Settings(BaseSettings):
         ARGUS_REPO_CACHE: Mirror-clone cache directory.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
+        ARGUS_CONTEXT7_BASE_URL: Override for Context7's MCP endpoint
+            (defaults to the real ``https://mcp.context7.com/mcp`` when
+            unset). Needed by callers that proxy the Context7 key through an
+            intermediary (e.g. the argus-review-loop skill's rh-mcp
+            credential proxy, TECH-4736) rather than passing the real key
+            directly -- pointing at the real host with a proxy-issued
+            credential the real host doesn't recognize would fail every
+            Context7 call.
         ARGUS_SESSION_TIMEOUT: Wall-clock seconds a reviewer subprocess is
             allowed to run before it is killed and reported as a failure.
             Defaults to 600 (10 minutes) — first raised from 300 to 420 after
@@ -88,6 +96,7 @@ class Settings(BaseSettings):
 
     CONTEXT7_API_KEY: str | None = None
     ARGUS_CONTEXT7_LIBRARY_ID: str | None = None
+    ARGUS_CONTEXT7_BASE_URL: str | None = None
 
     ARGUS_SESSION_TIMEOUT: int = DEFAULT_ARGUS_SESSION_TIMEOUT_S
 

@@ -147,12 +147,14 @@ def test_optional_fields_default_to_none(monkeypatch: pytest.MonkeyPatch) -> Non
         "LANGSMITH_PROJECT",
         "CONTEXT7_API_KEY",
         "ARGUS_CONTEXT7_LIBRARY_ID",
+        "ARGUS_CONTEXT7_BASE_URL",
     ):
         monkeypatch.delenv(var, raising=False)
 
     settings = get_settings()
     assert settings.CONTEXT7_API_KEY is None
     assert settings.ARGUS_CONTEXT7_LIBRARY_ID is None
+    assert settings.ARGUS_CONTEXT7_BASE_URL is None
     assert settings.ARGUS_PROMPTS_DIR is None
 
 
