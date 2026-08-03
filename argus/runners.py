@@ -33,7 +33,9 @@ from claude_agent_sdk import (
     TaskStartedMessage,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 from langsmith import traceable
 
@@ -162,6 +164,34 @@ single tool call, leaving too little to actually analyze what you read.
 # when unset, Context7 attachment is skipped entirely (same graceful
 # degradation as a missing CONTEXT7_API_KEY).
 _CONTEXT7_MCP_URL = "https://mcp.context7.com/mcp"
+
+# Context-usage threshold for a WARNING-level log (TECH-4734/TECH-4732).
+# ~170k is the pre-1M-beta autocompact-thrashing floor observed in production
+# (sessions compacting at ~177-189k preTokens); crossing it is still a useful
+# "this session is unusually large" signal now that the 1M-context beta has
+# removed autocompact as an implicit ceiling, not just a historical artifact.
+_CONTEXT_WARNING_THRESHOLD_TOKENS = 170_000
+
+
+def _tool_result_size(content: str | list[dict[str, Any]] | None) -> int:
+    """Return a size-in-chars estimate for a ToolResultBlock's content.
+
+    ``content`` can be a plain string or a list of content-block dicts
+    (``claude_agent_sdk.ToolResultBlock.content: str | list[dict] | None``).
+    ``len(str(content))`` on the list form measures a Python repr, not the
+    actual content size, and its str() conversion briefly materializes any
+    embedded text in memory -- summing per-block text lengths instead avoids
+    both problems.
+    """
+    if content is None:
+        return 0
+    if isinstance(content, str):
+        return len(content)
+    total = 0
+    for part in content:
+        text = part.get("text") if isinstance(part, dict) else None
+        total += len(text) if isinstance(text, str) else len(str(part))
+    return total
 
 
 @dataclass
@@ -395,6 +425,7 @@ async def run_system_reviewer(
         anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
+        context7_base_url=getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label=f"system:{group.name}",
@@ -482,6 +513,7 @@ async def run_specialist_reviewer(
         anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
+        context7_base_url=getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label=f"specialist:{group.name}::{specialist}",
@@ -557,6 +589,7 @@ async def run_cross_cutting_reviewer(
         anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
+        context7_base_url=getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="cross-cutting",
@@ -615,6 +648,7 @@ async def run_tests_and_docs_reviewer(
         anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
+        context7_base_url=getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="tests-and-docs",
@@ -684,6 +718,7 @@ async def run_feedback_verifier(
         anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
+        context7_base_url=getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="feedback-verifier",
@@ -812,6 +847,7 @@ async def run_blocking_validator(
         anthropic_auth_token=settings.ANTHROPIC_AUTH_TOKEN,
         context7_key=getattr(settings, "CONTEXT7_API_KEY", None),
         context7_library_id=getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None),
+        context7_base_url=getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None),
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="blocking-validator",
@@ -862,6 +898,7 @@ def _run_session_in_subprocess(
     anthropic_auth_token: str | None = None,
     context7_key: str | None,
     context7_library_id: str | None = None,
+    context7_base_url: str | None = None,
     cwd: str,
     label: str,
     timeout_s: int = _SUBPROCESS_TIMEOUT_S,
@@ -888,6 +925,7 @@ def _run_session_in_subprocess(
             anthropic_auth_token,
             context7_key,
             context7_library_id,
+            context7_base_url,
             cwd,
             label,
         ),
@@ -926,6 +964,7 @@ def _validator_worker(
     anthropic_auth_token: str | None,
     context7_key: str | None,
     context7_library_id: str | None,
+    context7_base_url: str | None,
     cwd: str,
     label: str,
 ) -> None:
@@ -960,6 +999,11 @@ def _validator_worker(
     # instructs the agent to call it.
     if context7_library_id:
         os.environ["ARGUS_CONTEXT7_LIBRARY_ID"] = context7_library_id
+    # Same reasoning as ARGUS_CONTEXT7_LIBRARY_ID above: must be forwarded
+    # explicitly so a fresh get_settings() in this subprocess sees it even
+    # when the parent only had it via .env, not os.environ.
+    if context7_base_url:
+        os.environ["ARGUS_CONTEXT7_BASE_URL"] = context7_base_url
 
     async def _run() -> "SessionResult":
         # Import fresh in the subprocess — no shared state with parent
@@ -1102,12 +1146,13 @@ async def _run_claude_session(
     # gracefully to no Context7 access.
     context7_api_key: str | None = getattr(settings, "CONTEXT7_API_KEY", None)
     context7_library_id: str | None = getattr(settings, "ARGUS_CONTEXT7_LIBRARY_ID", None)
+    context7_base_url: str = getattr(settings, "ARGUS_CONTEXT7_BASE_URL", None) or _CONTEXT7_MCP_URL
     mcp_servers: dict[str, Any] = {}
     context7_tools: list[str] = []
     if context7_api_key and context7_library_id:
         mcp_servers["context7"] = {
             "type": "http",
-            "url": _CONTEXT7_MCP_URL,
+            "url": context7_base_url,
             "headers": {"CONTEXT7_API_KEY": context7_api_key},
         }
         context7_tools = [
@@ -1123,51 +1168,206 @@ async def _run_claude_session(
     def _stderr_handler(line: str) -> None:
         logger.warning("[cli-stderr:%s] %s", label, line[:300])
 
+    # TECH-4732 / TECH-4643: strict_mcp_config removes the disease, the 1M
+    # beta raises the ceiling for what's left. Deliberately paired.
+    #
+    # Disease: reviewer sessions carry a huge fixed prefix that autocompact
+    # can never shrink (it only compresses *conversation*), so sessions
+    # compacted 2-3x per run for zero benefit ("autocompact thrashing",
+    # TECH-4643) and lost findings along the way. Root cause, verified live
+    # through Argus's real code path via a request-capture sink 2026-07-31:
+    # the CLI inherits every MCP server from the *operator's own* Claude Code
+    # config -- `allowed_tools` above only gates invocation permission, not
+    # which schemas get sent on the wire. The captured request carried 334
+    # tool schemas (~419KB, ~105k tokens). `strict_mcp_config=True` makes the
+    # CLI ignore that inherited config (project .mcp.json, user/global
+    # settings, plugin-provided servers) and send only the 25 built-in tool
+    # schemas (~82KB, ~20k tokens) plus whatever is passed explicitly via the
+    # `mcp_servers=` option below -- i.e. Argus's own Context7 attachment,
+    # when configured, is unaffected. See the strict_mcp_config docstring in
+    # claude_agent_sdk/types.py (~line 1621). Net: total request dropped from
+    # ~121k to ~36k tokens (~85k/request saved), taking the ~180k
+    # session-start context that sat right at the 200k autocompact threshold
+    # down to ~95k.
+    #
+    # Remaining ceiling: reviewer sessions carry a ~155k-token fixed prefix
+    # measured before this fix (334 tools/~105k tokens, TECH-4734
+    # investigation 2026-07-31) -- see above for why strict_mcp_config cuts
+    # that down. For reviews that are still genuinely large even at the
+    # reduced ~95k floor, the default 200k window remains tight. The
+    # Anthropic 1M-context beta moves that ceiling far above any fixed
+    # prefix, so autocompact stops firing on it.
+    #
+    # Verified end-to-end 2026-07-31 through the deployed prod rh-mcp Argus
+    # proxy (the path the argus-review-loop skill uses), with the same
+    # ANTHROPIC_AUTH_TOKEN bearer-credential mode this function actually runs
+    # with in production (not ANTHROPIC_API_KEY): an ~860k-token probe request
+    # WITHOUT this beta was rejected with "Prompt is too long"; the identical
+    # probe WITH betas=["context-1m-2025-08-07"] was accepted and metered
+    # ctx=860,253 tokens. This is an empirical, not just structural,
+    # confirmation that the proxy forwards the anthropic-beta header for
+    # bearer-token auth specifically -- a live probe, not a read of the
+    # proxy's own header-allowlist (which lives in a different repo, rh-mcp's
+    # main.py, and could drift independently of this comment).
+    #
+    # Only applied for _SYSTEM_REVIEWER_MODEL (sonnet), not
+    # _CROSS_CUTTING_MODEL (opus): sonnet reviewer sessions are the ones
+    # observed thrashing at the ~155-180k fixed-prefix floor (TECH-4734
+    # investigation 2026-07-31); cross-cutting/opus sessions have never come
+    # close to the 200k ceiling in any production round measured so far
+    # (peaked 57k-91k across every real review this fix has been validated
+    # against). Applying an unverified-for-opus beta there would add
+    # long-context-premium billing risk for zero observed benefit -- verify
+    # empirically before ever widening this beyond sonnet.
+    #
+    # Cost note: tokens beyond 200k bill at the long-context premium; that's
+    # acceptable against the status quo of thrashing sessions that cost
+    # $1.5-2.2 each and produce zero findings.
+    betas: list[Literal["context-1m-2025-08-07"]] = (
+        ["context-1m-2025-08-07"] if model == _SYSTEM_REVIEWER_MODEL else []
+    )
     options = ClaudeAgentOptions(
         cwd=effective_root,
         allowed_tools=["Read", "Glob", "Grep"] + context7_tools,
         mcp_servers=mcp_servers,
+        strict_mcp_config=True,
         permission_mode="default",
         model=model,
         system_prompt=system_prompt,
         max_turns=_MAX_TURNS,
         env=dict([settings.anthropic_credential]),
         stderr=_stderr_handler,
+        betas=betas,
     )
 
     started_at = datetime.now(timezone.utc)
+    # TECH-4734: context-usage instrumentation.
+    #
+    # Specialist reviewer sessions have been observed autocompacting 2-3x per
+    # session at ~177-189k preTokens, then refilling within ~3 turns
+    # ("autocompact thrashing"). Local transcript forensics (tool-result
+    # sizes, thinking-block sizes) cannot account for that context size --
+    # one session had ~1KB of visible tool-result content total yet still
+    # compacted 3 times at ~181k. That means ~170k/request of context is
+    # invisible to any artifact we currently persist, and there is no way to
+    # tell which request or which component (system prompt, a specific tool
+    # result, cache churn) is responsible.
+    #
+    # The API reports true usage (input_tokens, cache_read_input_tokens,
+    # cache_creation_input_tokens, output_tokens) on every response, and the
+    # message loop below already iterates every message -- it just never
+    # looked at usage. This block adds observability only: it logs sizes and
+    # counts (never prompt/response content, which may include untrusted
+    # diff content or credentials) and does not change what tools are
+    # allowed, what options are set, or how the session runs.
+    peak_context_tokens: int | None = None
+    tool_use_names: dict[str, str] = {}  # tool_use_id -> tool name, for correlating results
     async with ClaudeSDKClient(options=options) as client:
         await client.query(user_message)
         result_text = ""
         cost_usd = 0.0
         tool_calls: list[str] = []
+        message_index = 0
         async for message in client.receive_response():
             if isinstance(message, TaskStartedMessage):
                 logger.info("Agent session started: %s model=%s", label or "unlabeled", model)
             elif isinstance(message, AssistantMessage):
+                message_index += 1
                 for block in message.content:
                     if isinstance(block, ToolUseBlock):
                         tool_calls.append(f"{block.name}({json.dumps(block.input)[:100]})")
+                        tool_use_names[block.id] = block.name
                     elif isinstance(block, ThinkingBlock):
                         logger.debug("Agent thinking: %s...", (block.thinking or "")[:200])
                     elif isinstance(block, TextBlock):
                         logger.debug("Agent text: %s...", (block.text or "")[:200])
+                usage = getattr(message, "usage", None) or {}
+                input_tokens = usage.get("input_tokens")
+                cache_read_tokens = usage.get("cache_read_input_tokens")
+                cache_creation_tokens = usage.get("cache_creation_input_tokens")
+                output_tokens = usage.get("output_tokens")
+                context_total: int | None = None
+                if isinstance(input_tokens, int):
+                    context_total = (
+                        input_tokens
+                        + (cache_read_tokens if isinstance(cache_read_tokens, int) else 0)
+                        + (cache_creation_tokens if isinstance(cache_creation_tokens, int) else 0)
+                    )
+                    peak_context_tokens = max(peak_context_tokens or 0, context_total)
+                logger.info(
+                    "Agent usage [%s] msg=%d input=%s cache_read=%s cache_creation=%s "
+                    "output=%s context_total=%s",
+                    label or "unlabeled",
+                    message_index,
+                    input_tokens,
+                    cache_read_tokens,
+                    cache_creation_tokens,
+                    output_tokens,
+                    context_total,
+                )
+            elif isinstance(message, UserMessage):
+                content = message.content
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, ToolResultBlock):
+                            tool_name = tool_use_names.get(block.tool_use_id, "unknown")
+                            result_size = _tool_result_size(block.content)
+                            logger.info(
+                                "Agent tool result [%s] msg=%d tool=%s size_chars=%d is_error=%s",
+                                label or "unlabeled",
+                                message_index,
+                                tool_name,
+                                result_size,
+                                bool(block.is_error),
+                            )
             elif isinstance(message, ResultMessage):
                 result_text = message.result or ""
                 cost_usd = getattr(message, "total_cost_usd", 0.0) or 0.0
+                logger.info(
+                    "Agent result usage [%s] usage=%s model_usage=%s",
+                    label or "unlabeled",
+                    getattr(message, "usage", None),
+                    getattr(message, "model_usage", None),
+                )
     finished_at = datetime.now(timezone.utc)
 
     tool_names = [tc.split("(")[0] for tc in tool_calls]
     unique_tool_names = sorted(set(tool_names))
     context7_calls = [t for t in tool_names if "context7" in t.lower() or "mcp" in t.lower()]
 
+    # Unconditional summary, unlike the `if tool_calls:` block below: a
+    # text-only session (no tool calls at all) is exactly the profile
+    # implicated in autocompact thrashing, and previously got no session-level
+    # peak_context_tokens summary at all -- only scattered per-message
+    # "Agent usage" lines.
+    logger.info(
+        "Agent done [%s]: %d tool calls, cost=$%.4f, peak_context_tokens=%s",
+        label or "unlabeled",
+        len(tool_calls),
+        cost_usd,
+        peak_context_tokens if peak_context_tokens is not None else "unknown",
+    )
+    if peak_context_tokens is not None and peak_context_tokens >= _CONTEXT_WARNING_THRESHOLD_TOKENS:
+        beta_note = (
+            "the 1M-context beta means this no longer autocompacts, so this "
+            "is the only signal for an unusually large session"
+            if betas
+            else "this session did NOT get the 1M-context beta (opus is not "
+            "gated on), so it may also be autocompacting -- check for thrashing"
+        )
+        logger.warning(
+            "Agent [%s] peak_context_tokens=%d crossed warning threshold %d (%s)",
+            label or "unlabeled",
+            peak_context_tokens,
+            _CONTEXT_WARNING_THRESHOLD_TOKENS,
+            beta_note,
+        )
+
     if tool_calls:
         logger.info(
-            "Agent done [%s]: %d tool calls (tools: %s), cost=$%.4f",
+            "Agent done [%s]: tools used: %s",
             label or "unlabeled",
-            len(tool_calls),
             ", ".join(unique_tool_names),
-            cost_usd,
         )
         if context7_calls:
             logger.info("Context7 calls: %s", context7_calls)

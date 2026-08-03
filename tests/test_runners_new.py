@@ -599,6 +599,7 @@ class TestValidatorWorker:
                 anthropic_auth_token=None,
                 context7_key=None,
                 context7_library_id=None,
+                context7_base_url=None,
                 cwd="/tmp/repo",
                 label="test",
             )
