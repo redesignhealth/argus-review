@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-03
+
+### Added
+
+- Per-message and per-tool-result context-usage logging (TECH-4734),
+  making an autocompact-thrashing pattern in long reviewer sessions
+  (context repeatedly refilling to the limit within a few turns,
+  starving the reviewer of any real progress) directly visible in logs
+  for the first time instead of surfacing only as an empty/garbled
+  finding.
+- `ARGUS_CONTEXT7_BASE_URL` override (TECH-4736), so a caller proxying
+  `CONTEXT7_API_KEY` through an intermediary (e.g. the
+  `argus-review-loop` skill's rh-mcp credential proxy) can point
+  Context7 MCP calls at the proxy instead of the real host.
+
+## [0.1.2] - 2026-07-31
+
 ### Fixed
 
 - `ANTHROPIC_AUTH_TOKEN` (the standard bearer/gateway-proxy credential
@@ -42,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/redesignhealth/argus-review/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/redesignhealth/argus-review/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/redesignhealth/argus-review/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/redesignhealth/argus-review/commits/v0.1.0
