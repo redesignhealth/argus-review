@@ -23,7 +23,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from argus.precheck.engine import run_semgrep_sarif
+from argus.precheck.engine import run_semgrep_sarif, semgrep_available
 from argus.precheck.sarif import SarifResult
 from argus.repo_provision import provisioned_worktree
 
@@ -81,11 +81,33 @@ async def run_shadow_review(
     Each corpus entry is checked out into its own worktree (reusing the
     exact same provisioning path a live review uses, via
     ``repo_provision.provisioned_worktree``) and scanned in isolation. A
-    failure on one entry (bad SHA, transient clone error) is recorded in
+    failure on one entry (bad SHA, transient clone error, or semgrep
+    itself failing to run against that entry) is recorded in
     ``entries_failed`` and skipped rather than aborting the whole run --
     a corpus of dozens-to-hundreds of historical PRs should tolerate a
-    handful of unreachable entries.
+    handful of unreachable entries. Failed entries are never counted
+    toward ``entries_scanned``/``entries_matched``: see
+    ``run_semgrep_sarif``'s docstring for why collapsing "semgrep didn't
+    run" into "ran, found nothing" would corrupt the harness's whole
+    purpose (a malformed candidate rule that fails to execute on every
+    corpus entry must not look like strong zero-occurrence evidence).
+
+    Raises:
+        RuntimeError: If semgrep isn't installed at all -- a single clear
+            failure up front, rather than every corpus entry independently
+            landing in ``entries_failed`` after paying for a full clone
+            each, indistinguishable from unrelated per-entry flakiness.
+        FileNotFoundError: If ``rule_path`` doesn't exist -- checked before
+            any corpus entry is cloned, for the same reason.
     """
+    if not semgrep_available():
+        raise RuntimeError(
+            "semgrep not on PATH (argus[prechecks] extra not installed) — "
+            "cannot run a shadow review"
+        )
+    if not rule_path.exists():
+        raise FileNotFoundError(f"Shadow review rule path does not exist: {rule_path}")
+
     result = ShadowReviewResult()
     for entry in corpus:
         try:
@@ -96,6 +118,17 @@ async def run_shadow_review(
         except Exception:  # noqa: BLE001 — one bad corpus entry must not abort the run
             logger.warning(
                 "Shadow review: failed on %s@%s", entry.repo, entry.head_sha[:12], exc_info=True
+            )
+            result.entries_failed.append(entry)
+            continue
+
+        if sarif_results is None:
+            # semgrep didn't run to completion on this entry (timeout, its
+            # own execution error) -- infra flakiness, not "zero hits."
+            logger.warning(
+                "Shadow review: semgrep did not complete on %s@%s",
+                entry.repo,
+                entry.head_sha[:12],
             )
             result.entries_failed.append(entry)
             continue

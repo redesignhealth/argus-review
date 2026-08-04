@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -12,6 +13,7 @@ from argus.precheck.engine import (
     _has_rule_files,
     resolve_rules_dir,
     run_precheck,
+    run_semgrep_sarif,
     semgrep_available,
 )
 
@@ -335,3 +337,84 @@ async def test_run_precheck_strips_realpath_resolved_prefix(
         result = await run_precheck(worktree)
 
     assert result.candidate_findings[0].file == "src/app.py"
+
+
+# ---------------------------------------------------------------------------
+# run_semgrep_sarif: direct tests (used by both run_precheck and
+# argus.precheck.shadow, which needs to tell "didn't run" (None) apart
+# from "ran, no hits" ([]) -- see its own docstring).
+# ---------------------------------------------------------------------------
+
+
+async def test_run_semgrep_sarif_returns_none_when_semgrep_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    result = await run_semgrep_sarif("/tmp/worktree", Path("/tmp/rules"))
+    assert result is None
+
+
+async def test_run_semgrep_sarif_returns_none_on_timeout(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine._SEMGREP_TIMEOUT_S", 0.01)
+
+    proc = AsyncMock()
+
+    async def _never_returns(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
+        import asyncio
+
+        await asyncio.sleep(10)
+        return (b"", b"")
+
+    proc.communicate.side_effect = _never_returns
+    proc.kill = lambda: None
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result is None
+
+
+async def test_run_semgrep_sarif_returns_none_on_nonzero_exit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    proc = _mock_subprocess(b"", returncode=2)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result is None
+
+
+async def test_run_semgrep_sarif_returns_empty_list_for_genuine_no_hits(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    proc = _mock_subprocess(_sarif_bytes())  # no rule_ids -> empty results list
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result == []
+
+
+async def test_run_semgrep_sarif_accepts_a_single_rule_file_as_config_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    rule_file = tmp_path / "one-rule.yml"
+    rule_file.write_text("rules: []\n")
+    proc = _mock_subprocess(_sarif_bytes("r1"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        result = await run_semgrep_sarif("/tmp/worktree", rule_file)
+
+    assert result is not None
+    assert [r.rule_id for r in result] == ["r1"]
+    # Confirms the single-file path (not a directory) is passed through
+    # verbatim to semgrep's --config, which accepts either.
+    assert mock_exec.await_args is not None
+    assert str(rule_file) in mock_exec.await_args.args
