@@ -10,6 +10,7 @@ import pytest
 
 from argus.precheck.engine import (
     PrecheckResult,
+    _find_duplicate_rule_ids,
     _has_rule_files,
     resolve_rules_dir,
     run_precheck,
@@ -511,3 +512,85 @@ async def test_run_semgrep_sarif_kills_and_reaps_on_non_timeout_exception(
     assert result is None
     proc.kill.assert_called_once()
     assert proc.communicate.await_count == 2  # the failing call, then the post-kill drain
+
+
+async def test_run_semgrep_sarif_suppresses_process_lookup_error_on_kill(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Covers _kill_and_reap's other suppress branch: the child can already
+    # have exited on its own (race) by the time kill() is called.
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    proc = AsyncMock()
+    proc.communicate.side_effect = [OSError("pipe broke"), (b"", b"")]
+    proc.kill = MagicMock(side_effect=ProcessLookupError)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result is None
+    proc.kill.assert_called_once()
+    assert proc.communicate.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# _find_duplicate_rule_ids
+# ---------------------------------------------------------------------------
+
+
+def test_find_duplicate_rule_ids_returns_empty_for_unique_ids(tmp_path) -> None:
+    (tmp_path / "a.yml").write_text("rules:\n  - id: rule-a\n")
+    (tmp_path / "b.yml").write_text("rules:\n  - id: rule-b\n")
+
+    assert _find_duplicate_rule_ids(tmp_path) == {}
+
+
+def test_find_duplicate_rule_ids_detects_collision_across_files(tmp_path) -> None:
+    (tmp_path / "a.yml").write_text("rules:\n  - id: shared-id\n")
+    sub = tmp_path / "security"
+    sub.mkdir()
+    (sub / "b.yml").write_text("rules:\n  - id: shared-id\n")
+
+    duplicates = _find_duplicate_rule_ids(tmp_path)
+
+    assert set(duplicates.keys()) == {"shared-id"}
+    assert set(duplicates["shared-id"]) == {tmp_path / "a.yml", sub / "b.yml"}
+
+
+def test_find_duplicate_rule_ids_detects_collision_within_one_file(tmp_path) -> None:
+    (tmp_path / "a.yml").write_text("rules:\n  - id: shared-id\n  - id: shared-id\n")
+
+    duplicates = _find_duplicate_rule_ids(tmp_path)
+
+    assert list(duplicates.keys()) == ["shared-id"]
+    assert duplicates["shared-id"] == [tmp_path / "a.yml", tmp_path / "a.yml"]
+
+
+def test_find_duplicate_rule_ids_skips_unparseable_files(tmp_path) -> None:
+    (tmp_path / "bad.yml").write_text(": not: valid: yaml: [")
+    (tmp_path / "good.yml").write_text("rules:\n  - id: fine\n")
+
+    assert _find_duplicate_rule_ids(tmp_path) == {}
+
+
+def test_find_duplicate_rule_ids_skips_non_dict_rule_entries(tmp_path) -> None:
+    (tmp_path / "a.yml").write_text("rules:\n  - id: fine\n  - just-a-string\n")
+
+    assert _find_duplicate_rule_ids(tmp_path) == {}
+
+
+async def test_run_precheck_logs_warning_on_duplicate_rule_ids(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+    (tmp_path / "a.yml").write_text("rules:\n  - id: shared-id\n")
+    (tmp_path / "b.yml").write_text("rules:\n  - id: shared-id\n")
+    proc = _mock_subprocess(_sarif_bytes())
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        caplog.at_level("WARNING", logger="argus.precheck.engine"),
+    ):
+        await run_precheck("/tmp/worktree")
+
+    assert any("Duplicate precheck rule id" in record.message for record in caplog.records)

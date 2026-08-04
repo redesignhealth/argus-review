@@ -19,6 +19,8 @@ from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
+import yaml
+
 from argus.config import get_settings
 from argus.precheck.sarif import SarifResult, parse_semgrep_sarif
 from argus.storage.precheck import select_rule_statuses
@@ -102,6 +104,35 @@ def _has_rule_files(rules_dir: Path) -> bool:
     return any(rules_dir.rglob("*.yml")) or any(rules_dir.rglob("*.yaml"))
 
 
+def _find_duplicate_rule_ids(rules_dir: Path) -> dict[str, list[Path]]:
+    """Load-time lint: which ``id:`` values appear in more than one rule file.
+
+    Security-relevant, not just a lint nit: ``--no-rewrite-rule-ids`` (see
+    ``run_semgrep_sarif``) means ``select_rule_statuses`` keys purely off the
+    bare ``id:`` string in one flat table (see
+    ``argus/precheck/rules/README.md``'s id-uniqueness note) -- two rule
+    files sharing an ``id:`` are indistinguishable to that lookup, so a new
+    rule accidentally reusing an already-``verified`` id would inherit
+    fast-fail status immediately, skipping shadow-review/triage entirely.
+    Best-effort: a rule file that fails to parse as YAML, or doesn't have
+    the expected top-level ``rules: [...]`` shape, is silently skipped here
+    rather than raising -- this is advisory tooling on top of the fail-open
+    precheck gate, not itself something that should ever block a review.
+    """
+    ids_to_files: dict[str, list[Path]] = {}
+    for path in (*rules_dir.rglob("*.yml"), *rules_dir.rglob("*.yaml")):
+        try:
+            content = yaml.safe_load(path.read_text())
+        except (yaml.YAMLError, OSError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        for rule in content.get("rules", []):
+            if isinstance(rule, dict) and isinstance(rule.get("id"), str):
+                ids_to_files.setdefault(rule["id"], []).append(path)
+    return {rule_id: files for rule_id, files in ids_to_files.items() if len(files) > 1}
+
+
 def semgrep_available() -> bool:
     """True if the ``prechecks`` extra's semgrep binary is on PATH."""
     return shutil.which("semgrep") is not None
@@ -150,19 +181,44 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
         return None
 
 
+_KILL_DRAIN_TIMEOUT_S = 5
+
+
 async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
-    """Best-effort kill + drain of a still-live subprocess.
+    """Best-effort kill + bounded drain of a still-live subprocess.
 
     ``kill()`` itself can raise ``ProcessLookupError`` if the process already
-    exited on its own between the caller noticing a problem and this call;
-    the post-kill ``communicate()`` drain is unbounded (no timeout) since
-    it's just reaping an already-killed/exiting process, not waiting on a
-    live one, and any failure there is likewise not worth surfacing.
+    exited on its own between the caller noticing a problem and this call.
+
+    The post-kill ``communicate()`` drain is bounded, NOT unbounded --
+    verified empirically that semgrep spawns its own worker subprocesses
+    (``semgrep-core``); ``proc.kill()`` only SIGKILLs the direct child, not
+    the process group, so a grandchild that inherited the piped stdout/
+    stderr file descriptors can keep them open after the direct child
+    exits. An earlier version of this function assumed the drain would
+    return quickly once killed and left it unbounded -- but this function
+    runs on the per-PR review's critical path (``graph._node_precheck_rules``)
+    with no LangGraph-level timeout/retry policy backstopping it, so an
+    unbounded hang here would stall the whole review indefinitely instead
+    of failing open, which is the opposite of this module's entire
+    fail-open design intent. ``suppress(Exception)`` below also catches the
+    ``TimeoutError``/``asyncio.TimeoutError`` this bound itself can raise --
+    a cleanup step timing out is not worth surfacing any more than any
+    other cleanup failure here.
+
+    Edge case, not handled: ``contextlib.suppress(Exception)`` doesn't
+    suppress ``asyncio.CancelledError`` (a ``BaseException``, not an
+    ``Exception``). If a *second* cancellation arrives while this drain is
+    in flight, that new ``CancelledError`` propagates out of this function
+    and replaces whatever exception the caller's own ``except BaseException:
+    ... raise`` was in the middle of propagating -- silently discarding it.
+    Low-likelihood (requires cancellation during cleanup of an already-
+    cancelled/failed call), not handled specially here.
     """
     with contextlib.suppress(ProcessLookupError):
         proc.kill()
     with contextlib.suppress(Exception):
-        await proc.communicate()
+        await asyncio.wait_for(proc.communicate(), timeout=_KILL_DRAIN_TIMEOUT_S)
 
 
 async def _run_semgrep_sarif_unguarded(
@@ -177,6 +233,19 @@ async def _run_semgrep_sarif_unguarded(
     unguarded despite the module's fail-open contract and this function's
     own docstring claiming it "never raises".
     """
+    # Converts a silent contract violation into a loud, immediately-
+    # diagnosable one: a relative worktree_path would otherwise make the
+    # SARIF path-stripping below silently no-op (the prefixes just wouldn't
+    # match), leaking an absolute temp path into the fast-fail PR comment
+    # and writer context with no error signal. Every current caller passes
+    # an absolute path via repo_provision.py's tempfile.mkdtemp-based
+    # worktree, so this is a caller-contract check, not a real-world case
+    # this function needs to handle gracefully -- an AssertionError here is
+    # caught by run_semgrep_sarif's own outer except and fails open like
+    # everything else in this module, it just also gets logged loudly via
+    # exc_info=True there instead of silently misreporting paths.
+    assert os.path.isabs(worktree_path), f"worktree_path must be absolute, got {worktree_path!r}"
+
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
         "--config",
@@ -243,13 +312,10 @@ async def _run_semgrep_sarif_unguarded(
         return []
 
     # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
-    # with -- every current caller passes an absolute temp path as
-    # worktree_path (verified empirically that semgrep echoes it back
-    # as-given), which would otherwise leak into the fast-fail PR comment
-    # and writer context. This is a caller contract, not something this
-    # function itself enforces or normalizes (see this function's docstring);
-    # a caller passing a relative path would see stripping silently no-op
-    # rather than fail, since the prefixes below just wouldn't match.
+    # with -- since this function asserts worktree_path is absolute above,
+    # that's always an absolute temp path here (verified empirically that
+    # semgrep echoes it back as-given), which would otherwise leak into the
+    # fast-fail PR comment and writer context.
     # Strip it down to a path relative to the worktree, matching how every
     # other finding in this pipeline reports file paths. Two candidate
     # prefixes, not one: os.path.realpath's resolved form in addition to
@@ -299,6 +365,21 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     rules_dir = resolve_rules_dir()
     if rules_dir is None or not _has_rule_files(rules_dir):
         return PrecheckResult()
+
+    # Advisory only -- logged loudly, never blocks the run itself. See
+    # _find_duplicate_rule_ids' docstring for why a collision is
+    # security-relevant (a new rule can silently inherit an existing
+    # verified rule's fast-fail status), not merely a style nit.
+    duplicates = _find_duplicate_rule_ids(rules_dir)
+    for rule_id, files in duplicates.items():
+        logger.warning(
+            "Duplicate precheck rule id %r found in multiple files: %s -- "
+            "select_rule_statuses cannot distinguish these; a new rule "
+            "reusing an existing verified rule's id would silently inherit "
+            "fast-fail status",
+            rule_id,
+            ", ".join(str(f) for f in files),
+        )
 
     # None (semgrep didn't run) and [] (ran, no hits) are both "nothing to
     # gate or attach" for the live pipeline -- see run_semgrep_sarif's

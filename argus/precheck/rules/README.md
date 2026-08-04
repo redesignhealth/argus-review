@@ -20,9 +20,14 @@ work correctly; see `argus/precheck/engine.py`), which also means two rules
 in different subdirectories that happen to share an `id:` are
 indistinguishable to the status lookup. A new rule that accidentally reuses
 an already-`verified` rule's id would inherit `verified` (fast-fail) status
-immediately, skipping the shadow-review/triage process entirely. Enforcing
-this is a normal code-review responsibility today (every rule file change
-goes through review before merging); it isn't mechanically checked.
+immediately, skipping the shadow-review/triage process entirely.
+`argus.precheck.engine.run_precheck` runs a load-time lint on every
+invocation (`_find_duplicate_rule_ids`) that logs a loud `WARNING` listing
+every colliding `id:` and the files it appears in -- advisory only (it
+never blocks a review, matching this whole module's fail-open design), so
+normal code review before merging a rule file change is still the actual
+enforcement mechanism; the lint is a backstop for catching a collision a
+reviewer missed, not a substitute for review.
 
 Status:
 
