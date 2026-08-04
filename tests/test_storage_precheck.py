@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from argus.config import clear_cache
-from argus.storage.precheck import log_candidate_firing, select_rule_statuses
+from argus.storage.precheck import CandidateFiring, log_candidate_firings, select_rule_statuses
 
 
 def _no_db(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,14 +33,23 @@ async def test_select_rule_statuses_no_db_configured_returns_empty(
     assert await select_rule_statuses(["rule-a"]) == {}
 
 
-async def test_log_candidate_firing_no_db_configured_is_silent_noop(
+async def test_log_candidate_firings_no_db_configured_is_silent_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _no_db(monkeypatch)
     # Must not raise even though no DB is configured.
-    await log_candidate_firing(
-        rule_id="rule-a", repo="o/r", pr_number=1, head_sha="a" * 40, finding={}
+    await log_candidate_firings(
+        repo="o/r",
+        pr_number=1,
+        head_sha="a" * 40,
+        firings=[CandidateFiring(rule_id="rule-a", finding={})],
     )
+
+
+async def test_log_candidate_firings_empty_list_short_circuits() -> None:
+    # Must not raise, and must not touch the DB at all (no session factory
+    # patched here — a real attempt would raise ValueError: no DB URL).
+    await log_candidate_firings(repo="o/r", pr_number=1, head_sha="a" * 40, firings=[])
 
 
 def _mock_session_ctx(mock_session: AsyncMock) -> MagicMock:
@@ -79,7 +88,7 @@ async def test_select_rule_statuses_db_error_returns_empty_not_raise() -> None:
         assert await select_rule_statuses(["rule-a"]) == {}
 
 
-async def test_log_candidate_firing_ensures_rule_row_then_inserts_and_commits() -> None:
+async def test_log_candidate_firings_ensures_rule_rows_then_inserts_and_commits() -> None:
     mock_session = AsyncMock()
     session_ctx = _mock_session_ctx(mock_session)
 
@@ -87,19 +96,23 @@ async def test_log_candidate_firing_ensures_rule_row_then_inserts_and_commits() 
         "argus.storage.precheck.get_async_session_factory",
         return_value=lambda: session_ctx,
     ):
-        await log_candidate_firing(
-            rule_id="rule-a",
+        await log_candidate_firings(
             repo="o/r",
             pr_number=7,
             head_sha="b" * 40,
-            finding={"rule_id": "rule-a", "message": "m"},
+            firings=[
+                CandidateFiring(rule_id="rule-a", finding={"rule_id": "rule-a", "message": "m"}),
+                CandidateFiring(rule_id="rule-b", finding={"rule_id": "rule-b", "message": "n"}),
+            ],
         )
 
+    # One batched ensure-rows call + one batched insert call, regardless of
+    # how many firings were in the batch -- not one pair per firing.
     assert mock_session.execute.await_count == 2
     mock_session.commit.assert_awaited_once()
 
 
-async def test_log_candidate_firing_db_error_is_swallowed() -> None:
+async def test_log_candidate_firings_db_error_is_swallowed() -> None:
     mock_session = AsyncMock()
     mock_session.execute.side_effect = RuntimeError("boom")
     session_ctx = _mock_session_ctx(mock_session)
@@ -109,6 +122,9 @@ async def test_log_candidate_firing_db_error_is_swallowed() -> None:
         return_value=lambda: session_ctx,
     ):
         # Must not raise.
-        await log_candidate_firing(
-            rule_id="rule-a", repo="o/r", pr_number=1, head_sha="c" * 40, finding={}
+        await log_candidate_firings(
+            repo="o/r",
+            pr_number=1,
+            head_sha="c" * 40,
+            firings=[CandidateFiring(rule_id="rule-a", finding={})],
         )

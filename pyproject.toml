@@ -80,6 +80,18 @@ dev = [
 prechecks = [
     "semgrep>=1.90.0",
 ]
+# semgrep pins mcp==1.23.3 exactly, so uv's single flat resolution (which
+# must satisfy every extra combination at once) locks mcp -- and its own
+# transitives jsonschema/importlib-metadata/pywin32 -- to that version for
+# EVERY install of this package, not just prechecks users. This is provably
+# safe, not a functional regression: claude-agent-sdk (core, always
+# installed) only requires mcp>=1.19.0, and 1.23.3 satisfies that floor, so
+# nothing here depends on an mcp feature added after 1.23.3. Investigated
+# uv's `conflicts` mechanism (declaring dev/prechecks mutually exclusive) as
+# a way to fork the resolution and keep the newer mcp for non-prechecks
+# installs -- it has no effect here, because 1.23.3 already satisfies both
+# constraints simultaneously; there's no genuine incompatibility for uv to
+# fork around, just a tighter shared pin.
 
 [project.scripts]
 argus = "argus.cli:main"

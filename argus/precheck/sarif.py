@@ -17,6 +17,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Semgrep rules can interpolate matched source into their message text, so
+# a crafted PR could otherwise put an arbitrarily long string in front of
+# the LLM writer (via as_finding_dict) or in a fast-fail PR comment. Full
+# diff content already reaches the LLM elsewhere in this pipeline, so this
+# isn't a new attack surface -- just hygiene against an unnecessarily long
+# single finding.
+_MAX_MESSAGE_LENGTH = 500
+
 
 @dataclass(frozen=True)
 class SarifResult:
@@ -71,6 +79,8 @@ def parse_semgrep_sarif(raw: bytes | str) -> list[SarifResult]:
             if not rule_id:
                 continue
             message = item.get("message", {}).get("text", "")
+            if len(message) > _MAX_MESSAGE_LENGTH:
+                message = message[:_MAX_MESSAGE_LENGTH] + "… (truncated)"
             level = item.get("level", "warning")
             file: str | None = None
             line: int | None = None

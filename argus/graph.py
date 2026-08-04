@@ -1222,7 +1222,7 @@ async def run_preflight_check(
         {"role": "system", "content": prompt},
         {
             "role": "user",
-            "content": f"{prior_context}\n{checks_context}\n\n## Diff\n\n```diff\n{diff}\n```",
+            "content": f"{prior_context}\n\n{checks_context}\n\n## Diff\n\n```diff\n{diff}\n```",
         },
     ]
     return cast(PreflightResult, await llm.ainvoke(messages))
@@ -1304,71 +1304,96 @@ async def run_lite_review(
 # ---------------------------------------------------------------------------
 
 
-async def _node_precheck(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
-    """Deterministic, non-LLM precheck gate — runs before any LLM step.
+_CHECKS_SIGNAL_ATTEMPTS = 2
 
-    Two independent things, both fail-open (an error here must never block
-    or crash a PR review, same philosophy as ``_node_preflight``'s own
-    except-and-fall-through):
 
-    1. Reads the target repo's own CI status for ``head_sha`` from the
-       GitHub Checks API. Stored as ``checks_signal`` and consumed by
-       ``run_preflight_check`` as one more routing input — never a hard
-       gate (see that function's docstring for why).
-    2. Runs ``argus.precheck.engine.run_precheck`` (custom semgrep rules,
-       not generic linting) against the already-provisioned worktree.
-       A ``verified``-status hit is returned as ``precheck_fast_fail``,
-       which ``_edge_precheck_decision`` routes straight to a synthesized
-       BLOCKING response — zero LLM spend. A ``candidate``-status hit is
-       stored as ``precheck_findings``, attached later as non-blocking
-       writer context by ``_node_write_review``. Every candidate hit is
-       also logged for later, out-of-band triage (``log_candidate_firing``)
-       — best-effort, never raises into this node.
+async def _node_precheck_checks(state: ReviewState) -> dict[str, Any]:
+    """Read the target repo's own CI status for ``head_sha`` — a routing signal.
+
+    Fail-open (an error here must never block or crash a PR review, same
+    philosophy as ``_node_preflight``'s own except-and-fall-through):
+    stored as ``checks_signal`` and consumed by ``run_preflight_check`` as
+    one more routing input, never a hard gate (see that function's
+    docstring for why). Retries once on a transient failure before falling
+    back to "unknown" — cheap insurance since this is a single GET, and the
+    fallback (no signal either way) is a worse routing input than the real
+    answer would have been for a blip that a second attempt clears.
+
+    Runs in parallel with ``_node_precheck_rules`` (both edge from
+    ``fetch_diff``, fan in at ``precheck_join``): this is an independent
+    GitHub API read with no dependency on the worktree the other node
+    scans, so sequencing them in one node body would only add latency.
     """
     from argus.github_client import GitHubClient
-    from argus.precheck.engine import run_precheck
-    from argus.storage.precheck import log_candidate_firing
 
     req = ReviewRequest.model_validate(state["request"])
     head_sha = state["head_sha"]
     settings = get_settings()
+    gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
 
-    checks_signal = "unknown"
-    try:
-        gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
-        checks_signal = await asyncio.to_thread(gh.get_checks_signal, req.repo, head_sha)
-    except Exception:  # noqa: BLE001 — a Checks API hiccup is not a review failure
-        logger.warning("Failed to read CI checks signal", exc_info=True)
+    for attempt in range(_CHECKS_SIGNAL_ATTEMPTS):
+        try:
+            checks_signal = await asyncio.to_thread(gh.get_checks_signal, req.repo, head_sha)
+            return {"checks_signal": checks_signal}
+        except Exception:  # noqa: BLE001 — a Checks API hiccup is not a review failure
+            logger.warning(
+                "Failed to read CI checks signal (attempt %d/%d)",
+                attempt + 1,
+                _CHECKS_SIGNAL_ATTEMPTS,
+                exc_info=True,
+            )
+    return {"checks_signal": "unknown"}
 
-    update: dict[str, Any] = {"checks_signal": checks_signal}
+
+async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
+    """Run custom semgrep rules against the worktree — not generic linting.
+
+    Fail-open, same philosophy as ``_node_precheck_checks``. A ``verified``-
+    status hit is returned as ``precheck_fast_fail``, which
+    ``_edge_precheck_decision`` routes straight to a synthesized BLOCKING
+    response — zero LLM spend. A ``candidate``-status hit is stored as
+    ``precheck_findings``, attached later as non-blocking writer context by
+    ``_node_write_review``. Every candidate hit is also logged, batched in
+    one write, for later out-of-band triage (``log_candidate_firings``) —
+    best-effort, never raises into this node.
+
+    Runs in parallel with ``_node_precheck_checks``: see that node's
+    docstring for why they're split rather than sequenced in one body.
+    """
+    from argus.precheck.engine import run_precheck
+    from argus.storage.precheck import CandidateFiring, log_candidate_firings
 
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
     if worktree_path is None:
-        return update
+        return {}
 
     try:
         result = await run_precheck(worktree_path)
     except Exception:  # noqa: BLE001 — precheck engine failure is not a review failure
         logger.warning("Deterministic precheck failed — proceeding without it", exc_info=True)
-        return update
+        return {}
 
-    for hit in result.candidate_findings:
-        await log_candidate_firing(
-            rule_id=hit.rule_id,
+    if result.candidate_findings:
+        req = ReviewRequest.model_validate(state["request"])
+        await log_candidate_firings(
             repo=req.repo,
             pr_number=req.pr_number,
-            head_sha=head_sha,
-            finding=hit.as_storage_dict(),
+            head_sha=state["head_sha"],
+            firings=[
+                CandidateFiring(rule_id=f.rule_id, finding=f.as_storage_dict())
+                for f in result.candidate_findings
+            ],
         )
 
+    update: dict[str, Any] = {}
     if result.candidate_findings:
         update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
     if result.verified_findings:
         logger.info(
             "Precheck fast-fail: %d verified-rule hit(s) on %s@%s",
             len(result.verified_findings),
-            req.repo,
-            head_sha[:12],
+            state["request"].get("repo"),
+            state["head_sha"][:12],
         )
         update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
     return update
@@ -1406,9 +1431,12 @@ async def _node_precheck_fail(state: ReviewState) -> dict[str, Any]:
         + "\n".join(f"- **{f.file}:{f.line}** — {f.description}" for f in findings)
     )
 
-    # Preserve round numbering on round 2+ (matches _node_lite_review's own
-    # handling) so a fast-fail on a later round doesn't misreport as round 1
-    # in stored history.
+    # Preserve round/prior_review_id numbering on round 2+, same fields
+    # _node_lite_review sets from the same prior_review state, so a fast-
+    # fail on a later round doesn't misreport as round 1 in stored history.
+    # Not full comment-shape parity: this node routes before early_verifier
+    # ever runs, so unlike _node_lite_review it has no state["verification"]
+    # to build a prior-feedback resolution table from.
     prior_data = state.get("prior_review", {})
     prior = PriorReviewContext.model_validate(prior_data) if prior_data else None
 
@@ -2432,18 +2460,23 @@ def _build_review_graph() -> StateGraph[ReviewState]:
     Node topology::
 
         All rounds:
-          fetch_diff -> precheck -> (precheck_fail | early_verifier) -> preflight
+          fetch_diff -> (precheck_checks, precheck_rules) -> precheck_join
+             -> (precheck_fail | early_verifier) -> preflight
           -> lite_review (lite path)
           -> plan -> fan_out[run_reviewer...] -> collect_findings
              -> check_coverage -> (fill_gaps | write_review)
              fill_gaps -> [run_gap_reviewer...] -> write_review
 
-        precheck is the deterministic (non-LLM) gate: it reads the target
-        repo's own CI status as a preflight-routing signal, and runs custom
-        semgrep rules against the worktree. A verified-rule hit routes to
+        precheck_checks and precheck_rules are the deterministic (non-LLM)
+        gate, run in parallel (independent work: a GitHub API read vs. a
+        worktree scan) and fanned in at precheck_join before the routing
+        decision. precheck_checks reads the target repo's own CI status as
+        a preflight-routing signal; precheck_rules runs custom semgrep
+        rules against the worktree. A verified-rule hit routes to
         precheck_fail, a terminal node that synthesizes a BLOCKING response
         with zero LLM spend; everything else falls through to early_verifier
-        exactly as before precheck existed. See _node_precheck's docstring.
+        exactly as before this gate existed. See _node_precheck_checks' and
+        _node_precheck_rules' docstrings.
 
         early_verifier is a no-op on round 1 (no prior review).
         On round 2+, it runs the feedback verifier before preflight so
@@ -2454,7 +2487,11 @@ def _build_review_graph() -> StateGraph[ReviewState]:
 
     # Add nodes
     graph.add_node("fetch_diff", _node_fetch_diff)
-    graph.add_node("precheck", _node_precheck)
+    graph.add_node("precheck_checks", _node_precheck_checks)
+    graph.add_node("precheck_rules", _node_precheck_rules)
+    graph.add_node(
+        "precheck_join", lambda state: {}
+    )  # passthrough; fans in the parallel pair above
     graph.add_node("precheck_fail", _node_precheck_fail)
     graph.add_node("early_verifier", _node_early_verifier)
     graph.add_node("preflight", _node_preflight)
@@ -2487,9 +2524,12 @@ def _build_review_graph() -> StateGraph[ReviewState]:
 
     # Edges
     graph.add_edge(START, "fetch_diff")
-    graph.add_edge("fetch_diff", "precheck")
+    graph.add_edge("fetch_diff", "precheck_checks")
+    graph.add_edge("fetch_diff", "precheck_rules")
+    graph.add_edge("precheck_checks", "precheck_join")
+    graph.add_edge("precheck_rules", "precheck_join")
     graph.add_conditional_edges(
-        "precheck", _edge_precheck_decision, ["precheck_fail", "early_verifier"]
+        "precheck_join", _edge_precheck_decision, ["precheck_fail", "early_verifier"]
     )
     graph.add_edge("precheck_fail", END)
     graph.add_edge("early_verifier", "preflight")

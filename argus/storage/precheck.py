@@ -8,7 +8,7 @@ triage job also reads and writes -- there is no HTTP-shim or local-sqlite
 equivalent. When no ``ARGUS_DB_URL``/``SUPABASE_DB_URL`` is configured,
 every function here no-ops safely: ``select_rule_statuses`` returns an empty
 mapping (every rule is treated as its safe default, 'candidate' -- see
-``argus.precheck.engine``) and ``log_candidate_firing`` is a silent no-op.
+``argus.precheck.engine``) and ``log_candidate_firings`` is a silent no-op.
 A precheck DB hiccup must never fail or block a PR review.
 """
 
@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import ARRAY, Integer, TEXT, bindparam, text
 
 from argus.config import get_settings
 from argus.storage.session import get_async_session_factory
@@ -31,16 +32,18 @@ _SELECT_STATUSES_SQL = """
     WHERE rule_id = ANY(:rule_ids)
 """
 
-_ENSURE_RULE_ROW_SQL = """
+_ENSURE_RULE_ROWS_SQL = """
     INSERT INTO review_service.precheck_rules (rule_id)
-    VALUES (:rule_id)
+    SELECT unnest(:rule_ids)
     ON CONFLICT (rule_id) DO NOTHING
 """
 
-_INSERT_FIRING_SQL = """
+_INSERT_FIRINGS_SQL = """
     INSERT INTO review_service.precheck_candidate_firings
         (rule_id, repo, pr_number, head_sha, finding)
-    VALUES (:rule_id, :repo, :pr_number, :head_sha, CAST(:finding AS JSONB))
+    SELECT rule_id, repo, pr_number, head_sha, finding::jsonb
+    FROM unnest(:rule_ids, :repos, :pr_numbers, :head_shas, :findings)
+        AS t(rule_id, repo, pr_number, head_sha, finding)
 """
 
 
@@ -56,41 +59,72 @@ async def select_rule_statuses(rule_ids: list[str]) -> dict[str, str]:
     try:
         session_factory = get_async_session_factory()
         async with session_factory() as session:
-            result = await session.execute(text(_SELECT_STATUSES_SQL), {"rule_ids": rule_ids})
+            stmt = text(_SELECT_STATUSES_SQL).bindparams(bindparam("rule_ids", type_=ARRAY(TEXT)))
+            result = await session.execute(stmt, {"rule_ids": rule_ids})
             return {row.rule_id: row.status for row in result}
     except Exception:  # noqa: BLE001 — a precheck DB hiccup must never block a PR
         logger.warning("Failed to read precheck rule statuses", exc_info=True)
         return {}
 
 
-async def log_candidate_firing(
-    *, rule_id: str, repo: str, pr_number: int, head_sha: str, finding: dict[str, Any]
-) -> None:
-    """Queue a candidate-rule firing for later, out-of-band triage.
+@dataclass(frozen=True)
+class CandidateFiring:
+    """One candidate-rule hit to queue for later, out-of-band triage."""
 
-    Best-effort: swallows and logs every failure rather than raising, since
-    this is called from the synchronous per-PR pipeline path and must never
-    slow down or fail a review over a logging write. Auto-creates the
-    ``precheck_rules`` row (default status 'candidate') on first firing of a
-    rule that hasn't been seen before, so the firing insert's foreign key
-    always has somewhere to point.
+    rule_id: str
+    finding: dict[str, Any]
+
+
+async def log_candidate_firings(
+    *, repo: str, pr_number: int, head_sha: str, firings: list[CandidateFiring]
+) -> None:
+    """Queue candidate-rule firings for later, out-of-band triage.
+
+    Batched into a single multi-row INSERT (via ``unnest``) rather than one
+    round-trip + commit per firing: this runs on the synchronous per-PR
+    pipeline path before any LLM step, so its cost is fully on the critical
+    path regardless of how many candidate rules fired this round.
+    Best-effort: swallows and logs every failure rather than raising. Auto-
+    creates each ``precheck_rules`` row (default status 'candidate') for any
+    rule_id not seen before, so the firing inserts' foreign key always has
+    somewhere to point -- deduped across the batch via a single ``unnest``
+    into the ``ON CONFLICT DO NOTHING`` upsert, same reasoning as the firings
+    insert itself.
     """
-    if not get_settings().db_url:
+    if not firings or not get_settings().db_url:
         return
     try:
         session_factory = get_async_session_factory()
         async with session_factory() as session:
-            await session.execute(text(_ENSURE_RULE_ROW_SQL), {"rule_id": rule_id})
+            rule_ids = [f.rule_id for f in firings]
+            ensure_stmt = text(_ENSURE_RULE_ROWS_SQL).bindparams(
+                bindparam("rule_ids", type_=ARRAY(TEXT))
+            )
+            await session.execute(ensure_stmt, {"rule_ids": rule_ids})
+
+            insert_stmt = text(_INSERT_FIRINGS_SQL).bindparams(
+                bindparam("rule_ids", type_=ARRAY(TEXT)),
+                bindparam("repos", type_=ARRAY(TEXT)),
+                bindparam("pr_numbers", type_=ARRAY(Integer)),
+                bindparam("head_shas", type_=ARRAY(TEXT)),
+                bindparam("findings", type_=ARRAY(TEXT)),
+            )
             await session.execute(
-                text(_INSERT_FIRING_SQL),
+                insert_stmt,
                 {
-                    "rule_id": rule_id,
-                    "repo": repo,
-                    "pr_number": pr_number,
-                    "head_sha": head_sha,
-                    "finding": json.dumps(finding),
+                    "rule_ids": rule_ids,
+                    "repos": [repo] * len(firings),
+                    "pr_numbers": [pr_number] * len(firings),
+                    "head_shas": [head_sha] * len(firings),
+                    "findings": [json.dumps(f.finding) for f in firings],
                 },
             )
             await session.commit()
     except Exception:  # noqa: BLE001 — see docstring
-        logger.warning("Failed to log candidate-rule firing for %s", rule_id, exc_info=True)
+        logger.warning(
+            "Failed to log %d candidate-rule firing(s) for %s#%s",
+            len(firings),
+            repo,
+            pr_number,
+            exc_info=True,
+        )

@@ -39,6 +39,19 @@ LangGraph for step coordination and true parallel fan-out (via LangGraph's
          │  fetch_diff      │ GitHub API + prior-round lookup from storage
          └────────┬─────────┘
                   │
+         ┌────────┴────────┐
+         ▼                 ▼
+┌──────────────────┐ ┌──────────────────┐
+│ precheck_checks  │ │ precheck_rules   │  Deterministic, non-LLM (parallel):
+│ GitHub Checks API│ │ semgrep vs.      │  CI-status signal + custom-rule scan.
+│ status (signal)  │ │ worktree         │  See docs/PRECHECKS.md.
+└────────┬─────────┘ └────────┬─────────┘
+         └────────┬───────────┘
+         ┌────────▼─────────┐        ┌───────────────────┐
+         │  precheck_join   │──FAIL──▶│  precheck_fail    │ Verified-rule hit:
+         │  (fan-in)        │        │  BLOCKING, no LLM  │ synthesized response,
+         └────────┬─────────┘        └───────────────────┘ routes straight to END.
+                  │ (no verified hit)
          ┌────────▼─────────┐
          │  early_verifier  │ Sonnet agent — round 2+ only, no-op on round 1
          │  (sequential)    │ Verifies prior BLOCKINGs before routing decision

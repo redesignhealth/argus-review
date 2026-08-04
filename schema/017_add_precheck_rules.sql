@@ -18,9 +18,12 @@
 -- in the rule file itself in sync with this table.
 --
 -- The out-of-band job that judges candidate firings and flips status here
--- is not part of this toolkit -- same split as schema/010's review_patterns
--- (schema ships in the OSS package, the job that populates/updates it does
--- not). See docs/STORAGE.md for what actually ships here.
+-- is not part of this toolkit -- a narrower split than schema/010's
+-- review_patterns, not the same one: review_patterns is read/written only
+-- by its external job (the core pipeline never touches it), whereas the
+-- core pipeline reads and writes THESE two tables directly every round --
+-- only the status-transition logic and the rule-mining job are external.
+-- See docs/STORAGE.md for the exact boundary.
 
 CREATE TABLE IF NOT EXISTS review_service.precheck_rules (
     rule_id TEXT PRIMARY KEY,        -- matches the rule file's own `id:` field
@@ -60,5 +63,12 @@ CREATE INDEX IF NOT EXISTS idx_precheck_firings_unjudged
 -- even though rule_id is already the primary key (belt-and-suspenders for
 -- the common "status = 'verified'" filtered scan some callers may prefer
 -- over a per-id lookup, e.g. loading the full verified allowlist at once).
+-- Not queried by anything in this PR (select_rule_statuses looks up by
+-- rule_id, already PK-covered) -- exists for the out-of-scope triage job's
+-- status-scan queries (e.g. "load every verified rule"), same category of
+-- forward-looking index as review_patterns' own out-of-scope-job support.
 CREATE INDEX IF NOT EXISTS idx_precheck_rules_status
     ON review_service.precheck_rules (status);
+
+GRANT SELECT, INSERT, UPDATE ON review_service.precheck_rules TO service_role;
+GRANT SELECT, INSERT ON review_service.precheck_candidate_firings TO service_role;

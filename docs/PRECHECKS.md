@@ -43,6 +43,12 @@ looked up by a fixed name, so there's nothing to merge across locations):
 2. The packaged `argus/precheck/rules/` directory — **empty by default**.
    See `argus/precheck/rules/README.md` for an example rule.
 
+**Footgun:** these two steps are not a fallback chain past step 1 — a
+*set-but-invalid* `ARGUS_RULES_DIR` (pointing at a path that isn't a
+directory) returns `None` outright and disables the gate for that run
+entirely; it does not fall through to the packaged rules. Explicitly
+setting the override always wins, even when it's wrong.
+
 ## Rule status lifecycle
 
 A rule's `id:` field is the key used to look up its status in
@@ -59,19 +65,33 @@ pattern content:
 
 **What graduates a rule from `candidate` to `verified` (or flips it to
 `suspended`) is RH-internal infrastructure, not part of this package** —
-same split as `schema/010_add_review_patterns.sql`'s weekly job (see
-[`docs/STORAGE.md`](STORAGE.md)). In short: an out-of-band job clusters
+a narrower split than `schema/010_add_review_patterns.sql`'s weekly job,
+not the same one: the read/write path itself (`select_rule_statuses`,
+`log_candidate_firings`) ships and runs in-package every round; only the
+status-transition logic and the rule-mining job are external (see
+[`docs/STORAGE.md`](STORAGE.md) for the exact boundary). In short: an
+out-of-band job clusters
 recurring Argus findings into candidate rule drafts (human-approved before
 they ship), and a separate async job judges each candidate firing's
 true/false-positive rate over time, graduating or suspending rules based on
 a measured precision bound rather than a human re-reviewing every hit.
 
+Nothing in this package ever touches `updated_at` on `precheck_rules`
+after row creation (the ensure-row insert is `ON CONFLICT DO NOTHING`) —
+that column is owned entirely by the out-of-band triage job described
+above, for the future implementer of that job to update on every status
+transition.
+
 ## Pipeline placement
 
 ```
-fetch_diff -> precheck -> (precheck_fail | early_verifier) -> preflight -> ...
+fetch_diff -> (precheck_checks, precheck_rules) -> precheck_join
+    -> (precheck_fail | early_verifier) -> preflight -> ...
 ```
 
-`precheck` runs against the same worktree already checked out for the
-review (no extra provisioning). See `argus.graph._node_precheck`'s
-docstring for the full node contract.
+`precheck_checks` (GitHub Checks API) and `precheck_rules` (semgrep vs.
+the worktree) run in parallel — independent work, no reason to sequence
+them — and fan in at `precheck_join` before the routing decision.
+`precheck_rules` runs against the same worktree already checked out for
+the review (no extra provisioning). See `argus.graph._node_precheck_checks`
+and `_node_precheck_rules`'s docstrings for the full node contracts.

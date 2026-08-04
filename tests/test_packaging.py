@@ -73,6 +73,18 @@ def test_wheel_contains_all_prompt_files(built_wheel_path: Path) -> None:
 
 
 @pytest.mark.packaging
+def test_wheel_contains_precheck_rules_readme(built_wheel_path: Path) -> None:
+    """argus/precheck/engine.py's resolve_rules_dir() packaged-fallback path
+
+    depends on argus/precheck/rules/ actually shipping in the wheel (empty
+    of *.yml/*.yaml by design, but the directory itself — via its README —
+    must be present for importlib.resources.files() to find it).
+    """
+    with zipfile.ZipFile(built_wheel_path) as z:
+        assert "argus/precheck/rules/README.md" in z.namelist()
+
+
+@pytest.mark.packaging
 def test_wheel_does_not_contain_schema_sql(built_wheel_path: Path) -> None:
     """schema/*.sql ships in the repo/sdist only, not the installable wheel.
 

@@ -3,9 +3,11 @@
 Covers:
   - _edge_precheck_decision routes to precheck_fail iff a verified hit exists
   - _node_precheck_fail synthesizes a BLOCKING response with zero LLM calls
-  - _node_precheck: checks-signal read, worktree-absent short-circuit,
-    candidate findings attached to state, verified findings trigger
-    precheck_fast_fail, and a run_precheck exception is swallowed
+  - _node_precheck_checks: checks-signal read, retry-then-unknown on
+    repeated failure
+  - _node_precheck_rules: worktree-absent short-circuit, candidate findings
+    attached to state, verified findings trigger precheck_fast_fail, and a
+    run_precheck exception is swallowed
   - _node_write_review attaches precheck_findings as extra writer context
     without polluting state["findings"] (collect_findings' accounting)
 """
@@ -17,8 +19,9 @@ from unittest.mock import AsyncMock, patch
 
 from argus.graph import (
     _edge_precheck_decision,
-    _node_precheck,
+    _node_precheck_checks,
     _node_precheck_fail,
+    _node_precheck_rules,
     _node_write_review,
 )
 from argus.models import ReviewResponse, RiskLevel, Verdict
@@ -98,7 +101,7 @@ async def test_precheck_fail_preserves_round_number_from_prior_review() -> None:
 
 
 # ---------------------------------------------------------------------------
-# _node_precheck
+# _node_precheck_checks
 # ---------------------------------------------------------------------------
 
 
@@ -108,75 +111,109 @@ def _mock_gh_client(signal: str = "passing") -> AsyncMock:
     return client
 
 
-async def test_precheck_no_worktree_still_reads_checks_signal() -> None:
+async def test_precheck_checks_reads_signal() -> None:
     with patch(_GH_CLIENT_CLASS, return_value=_mock_gh_client("failing")):
-        result = await _node_precheck(_make_state(), {"configurable": {}})
+        result = await _node_precheck_checks(_make_state())
     assert result == {"checks_signal": "failing"}
 
 
-async def test_precheck_checks_api_error_falls_back_to_unknown() -> None:
-    def _raise(*_args: object, **_kwargs: object) -> str:
+async def test_precheck_checks_retries_once_before_falling_back_to_unknown() -> None:
+    calls = {"n": 0}
+
+    def _flaky(*_args: object, **_kwargs: object) -> str:
+        calls["n"] += 1
         raise RuntimeError("boom")
 
     client = AsyncMock()
-    client.get_checks_signal = _raise
+    client.get_checks_signal = _flaky
     with patch(_GH_CLIENT_CLASS, return_value=client):
-        result = await _node_precheck(_make_state(), {"configurable": {}})
+        result = await _node_precheck_checks(_make_state())
     assert result == {"checks_signal": "unknown"}
+    assert calls["n"] == 2  # _CHECKS_SIGNAL_ATTEMPTS
 
 
-async def test_precheck_candidate_findings_attached_and_logged() -> None:
+async def test_precheck_checks_succeeds_on_second_attempt() -> None:
+    calls = {"n": 0}
+
+    def _flaky_then_ok(*_args: object, **_kwargs: object) -> str:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return "passing"
+
+    client = AsyncMock()
+    client.get_checks_signal = _flaky_then_ok
+    with patch(_GH_CLIENT_CLASS, return_value=client):
+        result = await _node_precheck_checks(_make_state())
+    assert result == {"checks_signal": "passing"}
+
+
+# ---------------------------------------------------------------------------
+# _node_precheck_rules
+# ---------------------------------------------------------------------------
+
+
+async def test_precheck_rules_no_worktree_is_noop() -> None:
+    result = await _node_precheck_rules(_make_state(), {"configurable": {}})
+    assert result == {}
+
+
+async def test_precheck_rules_candidate_findings_attached_and_logged() -> None:
     from argus.precheck.engine import PrecheckResult
     from argus.precheck.sarif import SarifResult
 
     candidate_hit = SarifResult(rule_id="r1", level="warning", message="m", file="a.py", line=1)
 
     with (
-        patch(_GH_CLIENT_CLASS, return_value=_mock_gh_client("passing")),
         patch(
             "argus.precheck.engine.run_precheck",
             new=AsyncMock(return_value=PrecheckResult(candidate_findings=[candidate_hit])),
         ),
-        patch("argus.storage.precheck.log_candidate_firing", new=AsyncMock()) as mock_log,
+        patch("argus.storage.precheck.log_candidate_firings", new=AsyncMock()) as mock_log,
     ):
-        result = await _node_precheck(_make_state(), {"configurable": {"worktree_path": "/tmp/wt"}})
+        result = await _node_precheck_rules(
+            _make_state(), {"configurable": {"worktree_path": "/tmp/wt"}}
+        )
 
-    assert result["checks_signal"] == "passing"
     assert result["precheck_findings"] == [candidate_hit.as_finding_dict()]
     assert "precheck_fast_fail" not in result
     mock_log.assert_awaited_once()
+    # Batched: one call carrying the whole list, not one call per finding.
+    assert len(mock_log.await_args.kwargs["firings"]) == 1
 
 
-async def test_precheck_verified_findings_set_fast_fail() -> None:
+async def test_precheck_rules_verified_findings_set_fast_fail() -> None:
     from argus.precheck.engine import PrecheckResult
     from argus.precheck.sarif import SarifResult
 
     verified_hit = SarifResult(rule_id="r2", level="error", message="m", file="b.py", line=2)
 
     with (
-        patch(_GH_CLIENT_CLASS, return_value=_mock_gh_client("unknown")),
         patch(
             "argus.precheck.engine.run_precheck",
             new=AsyncMock(return_value=PrecheckResult(verified_findings=[verified_hit])),
         ),
-        patch("argus.storage.precheck.log_candidate_firing", new=AsyncMock()),
+        patch("argus.storage.precheck.log_candidate_firings", new=AsyncMock()) as mock_log,
     ):
-        result = await _node_precheck(_make_state(), {"configurable": {"worktree_path": "/tmp/wt"}})
+        result = await _node_precheck_rules(
+            _make_state(), {"configurable": {"worktree_path": "/tmp/wt"}}
+        )
 
     assert result["precheck_fast_fail"] == [verified_hit.as_storage_dict()]
+    # No candidate findings in this case — nothing to log.
+    mock_log.assert_not_awaited()
 
 
-async def test_precheck_engine_exception_is_swallowed() -> None:
-    with (
-        patch(_GH_CLIENT_CLASS, return_value=_mock_gh_client("passing")),
-        patch(
-            "argus.precheck.engine.run_precheck",
-            new=AsyncMock(side_effect=RuntimeError("boom")),
-        ),
+async def test_precheck_rules_engine_exception_is_swallowed() -> None:
+    with patch(
+        "argus.precheck.engine.run_precheck",
+        new=AsyncMock(side_effect=RuntimeError("boom")),
     ):
-        result = await _node_precheck(_make_state(), {"configurable": {"worktree_path": "/tmp/wt"}})
+        result = await _node_precheck_rules(
+            _make_state(), {"configurable": {"worktree_path": "/tmp/wt"}}
+        )
 
-    assert result == {"checks_signal": "passing"}
+    assert result == {}
 
 
 # ---------------------------------------------------------------------------

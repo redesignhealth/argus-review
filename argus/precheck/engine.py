@@ -14,7 +14,7 @@ import asyncio
 import contextlib
 import logging
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
@@ -50,17 +50,45 @@ def resolve_rules_dir() -> Path | None:
     override = get_settings().ARGUS_RULES_DIR
     if override:
         path = Path(override)
-        return path if path.is_dir() else None
+        if path.is_dir():
+            return path
+        logger.warning(
+            "ARGUS_RULES_DIR=%r is not a directory — precheck rules disabled "
+            "for this run (no fallback to packaged rules once an explicit "
+            "override is set)",
+            override,
+        )
+        return None
     try:
+        # str(...) + is_dir() rather than importlib.resources.as_file(...):
+        # as_file() is a context manager whose extracted path is only valid
+        # inside the `with` block, but callers need this path well after
+        # this function returns (semgrep runs later, against the path
+        # returned here) — holding that context manager open across the
+        # whole run_precheck call would be a much larger restructure for a
+        # case (a zip-installed wheel) that pip/uv don't produce for pure-
+        # Python packages by default. Logging on failure, below, at least
+        # makes that theoretical gap observable instead of silent.
         packaged = resources.files("argus.precheck") / "rules"
         path = Path(str(packaged))
-        return path if path.is_dir() else None
+        if path.is_dir():
+            return path
+        logger.warning(
+            "Packaged rules directory not found at %r (zip-installed package? "
+            "see resolve_rules_dir's docstring) — precheck rules disabled",
+            path,
+        )
+        return None
     except (ModuleNotFoundError, FileNotFoundError):
+        logger.warning("Could not resolve argus.precheck package resources", exc_info=True)
         return None
 
 
 def _has_rule_files(rules_dir: Path) -> bool:
-    return any(rules_dir.glob("*.yml")) or any(rules_dir.glob("*.yaml"))
+    # Recursive (rglob), matching semgrep's own `--config <dir>` behavior,
+    # which scans subdirectories -- a non-recursive check here would treat
+    # a rules dir organized into subfolders as empty and skip a real run.
+    return any(rules_dir.rglob("*.yml")) or any(rules_dir.rglob("*.yaml"))
 
 
 def semgrep_available() -> bool:
@@ -91,6 +119,7 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
         str(rules_dir),
         "--sarif",
         "--quiet",
+        "--metrics=off",
         worktree_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
@@ -104,6 +133,12 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
         logger.warning("semgrep precheck timed out after %ds", _SEMGREP_TIMEOUT_S)
         return PrecheckResult()
 
+    # Verified empirically (no --error flag passed above): semgrep exits 0
+    # whether or not it produced findings, and only exits non-zero on its
+    # own execution errors (e.g. exit 7 on an invalid rule file). So a
+    # non-zero exit here is never "verified-rule hits got silently
+    # dropped" -- it's semgrep itself failing to run, and returning an
+    # empty result is the correct fail-open response, not a lossy one.
     if proc.returncode != 0:
         logger.warning(
             "semgrep precheck exited %d — skipping precheck for this run.\nstderr: %s",
@@ -115,6 +150,20 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     results = parse_semgrep_sarif(stdout)
     if not results:
         return PrecheckResult()
+
+    # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
+    # with -- since we pass the absolute worktree_path as the scan target,
+    # that's an absolute temp path (verified empirically), which would
+    # otherwise leak into the fast-fail PR comment and writer context.
+    # Strip it down to a path relative to the worktree, matching how every
+    # other finding in this pipeline reports file paths.
+    prefix = worktree_path.rstrip("/") + "/"
+    results = [
+        r
+        if r.file is None or not r.file.startswith(prefix)
+        else replace(r, file=r.file[len(prefix) :])
+        for r in results
+    ]
 
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)
