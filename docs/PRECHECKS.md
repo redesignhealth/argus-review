@@ -84,6 +84,49 @@ that column is owned entirely by the out-of-band triage job described
 above, for the future implementer of that job to update on every status
 transition.
 
+### Shadow-review harness
+
+Before a candidate rule draft is allowed to fire on any live PR at all,
+`argus.precheck.shadow.run_shadow_review` can validate it against a
+corpus of historical PRs — entirely offline and out-of-band, not a node
+in the live per-PR graph (`argus/graph.py` has no reference to it). It
+checks out each corpus entry into its own worktree (reusing
+`repo_provision.provisioned_worktree`), runs the rule via the same
+`argus.precheck.engine.run_semgrep_sarif` the live gate uses, and returns
+raw occurrence evidence:
+
+- `entries_scanned` — corpus entries semgrep actually completed a scan on.
+- `entries_matched` — of those, how many had at least one hit.
+- `hits` — every individual match, attributed back to its corpus entry.
+- `entries_failed` — entries where semgrep didn't run to completion on
+  that entry (timeout, its own execution error) or the corpus entry
+  itself couldn't be provisioned (bad SHA, clone error). This is
+  corpus/infra flakiness, not rule-precision evidence — it's deliberately
+  excluded from `entries_scanned`/`entries_matched` so a malformed
+  candidate rule that fails to execute on every entry can't produce a
+  confident-looking zero-occurrence result that reads as "this rule is
+  safe" when it never actually ran. A missing semgrep binary is *not* one
+  of these per-entry cases: `run_shadow_review` checks for it once before
+  touching the corpus at all and raises immediately, since that's a
+  systemic setup problem, not something worth diagnosing per entry after
+  paying for a full clone each.
+
+It does **not** judge true/false positive itself, and does not consult
+`precheck_rules`' DB status at all (a draft has no row yet, and shadow
+review isn't the live gate). That judgment — human approval of the
+draft, and later the RH-internal async triage loop — is a separate,
+external step built on top of this harness's output. Same
+OSS-ships-the-mechanism / RH-internal-owns-the-decision split as
+everything else here.
+
+Reuses `repo_provision`'s bare-mirror cache the same way the live gate
+does, which is a deliberate tradeoff worth knowing about here: the live
+gate only ever touches one repo per review, but a shadow-review corpus
+spanning many distinct repos will accumulate one full bare mirror per
+distinct repo with no automatic cleanup. Fine for occasional use; worth
+revisiting with explicit cache management if shadow review becomes a
+routine, large-multi-repo workflow.
+
 ## Pipeline placement
 
 ```

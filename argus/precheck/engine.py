@@ -107,27 +107,38 @@ def semgrep_available() -> bool:
     return shutil.which("semgrep") is not None
 
 
-async def run_precheck(worktree_path: str) -> PrecheckResult:
-    """Run custom rules against ``worktree_path``; classify hits by DB status.
+async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[SarifResult] | None:
+    """Run semgrep with ``config_path`` (a rules directory or a single rule
+    file -- semgrep accepts either) against ``worktree_path``; return
+    stripped, unclassified SARIF results.
 
-    The caller (``graph._node_precheck_rules``) owns logging candidate
-    firings for later triage and short-circuiting the pipeline on verified
-    findings — this function only runs semgrep and classifies the results.
+    Shared by :func:`run_precheck` (live per-PR gate, classifies against
+    ``argus.storage.precheck``'s DB-backed rule statuses) and
+    :mod:`argus.precheck.shadow` (offline corpus validation of a candidate
+    rule that has no DB row yet, and doesn't want one consulted -- shadow
+    review cares about raw occurrence counts, not the live candidate/
+    verified split).
+
+    Returns ``None`` -- distinct from ``[]`` -- when semgrep did not
+    actually run to completion (missing binary, timeout, semgrep's own
+    execution error): ``[]`` means "ran successfully, zero hits," which is
+    real evidence; ``None`` means "no evidence was produced at all." The
+    two callers use that distinction differently: ``run_precheck`` treats
+    both the same way (empty `PrecheckResult`, since either way there's
+    nothing to gate or attach), but ``run_shadow_review`` must not count a
+    `None` as "the rule matched nothing" -- an unvetted candidate rule
+    that fails to execute on every corpus entry would otherwise produce a
+    confident-looking zero-occurrence result that looks like strong
+    evidence the rule is safe, when it never actually ran.
     """
     if not semgrep_available():
-        logger.info(
-            "semgrep not on PATH (argus[prechecks] extra not installed) — skipping precheck"
-        )
-        return PrecheckResult()
-
-    rules_dir = resolve_rules_dir()
-    if rules_dir is None or not _has_rule_files(rules_dir):
-        return PrecheckResult()
+        logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
+        return None
 
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
         "--config",
-        str(rules_dir),
+        str(config_path),
         "--sarif",
         "--quiet",
         "--metrics=off",
@@ -141,26 +152,27 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
         proc.kill()
         with contextlib.suppress(Exception):
             await proc.communicate()
-        logger.warning("semgrep precheck timed out after %ds", _SEMGREP_TIMEOUT_S)
-        return PrecheckResult()
+        logger.warning("semgrep timed out after %ds scanning %s", _SEMGREP_TIMEOUT_S, worktree_path)
+        return None
 
     # Verified empirically (no --error flag passed above): semgrep exits 0
     # whether or not it produced findings, and only exits non-zero on its
     # own execution errors (e.g. exit 7 on an invalid rule file). So a
     # non-zero exit here is never "verified-rule hits got silently
-    # dropped" -- it's semgrep itself failing to run, and returning an
-    # empty result is the correct fail-open response, not a lossy one.
+    # dropped" -- it's semgrep itself failing to run, and None (rather
+    # than the misleadingly-successful-looking []) is the correct signal.
     if proc.returncode != 0:
         logger.warning(
-            "semgrep precheck exited %d — skipping precheck for this run.\nstderr: %s",
+            "semgrep exited %d scanning %s.\nstderr: %s",
             proc.returncode,
+            worktree_path,
             stderr.decode(errors="replace")[:500],
         )
-        return PrecheckResult()
+        return None
 
     results = parse_semgrep_sarif(stdout)
     if not results:
-        return PrecheckResult()
+        return []
 
     # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
     # with -- since we pass the absolute worktree_path as the scan target,
@@ -191,7 +203,37 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
                 return replace(r, file=r.file[len(prefix) :])
         return r
 
-    results = [_strip(r) for r in results]
+    return [_strip(r) for r in results]
+
+
+async def run_precheck(worktree_path: str) -> PrecheckResult:
+    """Run custom rules against ``worktree_path``; classify hits by DB status.
+
+    The caller (``graph._node_precheck_rules``) owns logging candidate
+    firings for later triage and short-circuiting the pipeline on verified
+    findings — this function only runs semgrep and classifies the results.
+    """
+    # Redundant with run_semgrep_sarif's own check below -- kept here purely
+    # as an optimization to skip resolving/scanning the rules directory
+    # entirely when semgrep isn't installed, not for correctness (that
+    # correctness now lives in run_semgrep_sarif itself, shared by every
+    # caller including argus.precheck.shadow).
+    if not semgrep_available():
+        logger.info(
+            "semgrep not on PATH (argus[prechecks] extra not installed) — skipping precheck"
+        )
+        return PrecheckResult()
+
+    rules_dir = resolve_rules_dir()
+    if rules_dir is None or not _has_rule_files(rules_dir):
+        return PrecheckResult()
+
+    # None (semgrep didn't run) and [] (ran, no hits) are both "nothing to
+    # gate or attach" for the live pipeline -- see run_semgrep_sarif's
+    # docstring for why run_shadow_review can't collapse these the same way.
+    results = await run_semgrep_sarif(worktree_path, rules_dir)
+    if not results:
+        return PrecheckResult()
 
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)
