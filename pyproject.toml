@@ -109,7 +109,8 @@ testpaths = ["tests"]
 # --strict-markers turns unregistered @pytest.mark.<name> typos into errors.
 addopts = ["-m", "not integration", "--strict-markers"]
 markers = [
-    "integration: marks tests as integration tests (require live DB; skipped locally)",
+    "integration: marks tests as integration tests (require a live external resource -- DB, network, or a real binary; skipped by default)",
+    "needs_real_github_token: marks integration tests that need a real GITHUB_TOKEN_RO in the environment, unstubbed by tests/conftest.py's autouse fixture",
     "packaging: marks tests that build the wheel via `uv build` (slow; shells out)",
 ]
 

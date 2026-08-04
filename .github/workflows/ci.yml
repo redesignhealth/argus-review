@@ -119,3 +119,14 @@ jobs:
         run: uv sync --all-extras
       - name: pytest
         run: uv run pytest
+      - name: Verify semgrep is installed
+        # Fails loudly rather than letting the next step pass vacuously: the
+        # engine integration test itself pytest.skip()s (not fails) when
+        # semgrep is missing from PATH, so without this explicit guard, a
+        # future restructure of the `prechecks` extra dropping semgrep from
+        # `uv sync --all-extras` would silently stop exercising the real
+        # subprocess path this test tier exists to cover, and CI would stay
+        # green throughout.
+        run: uv run semgrep --version
+      - name: pytest (precheck engine integration -- real semgrep, no network/credentials)
+        run: uv run pytest -m integration tests/test_precheck_engine_integration.py

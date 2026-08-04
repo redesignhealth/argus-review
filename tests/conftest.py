@@ -54,13 +54,28 @@ def _disable_live_langsmith_tracing() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure tests never use real credentials.
 
     Uses the field names (uppercase) from ``argus.config.Settings``.
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
+
+    # Unconditional for every test EXCEPT ones explicitly opted out via the
+    # dedicated `needs_real_github_token` marker -- deliberately narrower
+    # than gating on the generic `integration` marker (an earlier version of
+    # this fixture did that and broke tests/storage/test_backend_contract.py's
+    # `[postgres]` param: that test is *also* integration-marked, doesn't
+    # check GITHUB_TOKEN_RO itself, and still needs Settings() to construct
+    # successfully, which requires this stub). Only
+    # tests/test_precheck_shadow_integration.py carries the narrower marker
+    # today, since it's the only test that needs to see whatever the
+    # invoking shell actually exported (or nothing) rather than this stub.
+    # Presence-in-environment gating (an even earlier version) isn't right
+    # either: it broke isolation for the whole unit suite whenever a
+    # developer happened to have a real token exported for unrelated reasons.
+    if not request.node.get_closest_marker("needs_real_github_token"):
+        monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     # Default the history-backend/checkpointer resolution to "postgres" so
@@ -84,3 +99,26 @@ def _mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
     clear_cache()
     clear_engine_cache()
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Enforce that ``needs_real_github_token`` always implies ``integration``.
+
+    Without this, a future test carrying only ``needs_real_github_token``
+    (no ``integration``) would run in the *default* suite -- `_mock_settings`
+    above would skip stubbing `GITHUB_TOKEN_RO` for it, so it'd see whatever
+    real token happens to be in a developer's shell, contradicting both this
+    fixture's own docstring and CONTRIBUTING.md's "no credentials required"
+    claim. Making the pairing a collection-time error means a missing
+    `integration` marker fails loudly and immediately, rather than only
+    being caught by a reviewer noticing the omission.
+    """
+    for item in items:
+        if item.get_closest_marker("needs_real_github_token") and not item.get_closest_marker(
+            "integration"
+        ):
+            raise pytest.UsageError(
+                f"{item.nodeid}: `needs_real_github_token` must always be paired with "
+                "`integration` -- otherwise this test would run in the default suite "
+                "against a real token from the developer's shell."
+            )

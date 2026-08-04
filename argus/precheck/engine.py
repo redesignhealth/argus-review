@@ -130,21 +130,68 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
     that fails to execute on every corpus entry would otherwise produce a
     confident-looking zero-occurrence result that looks like strong
     evidence the rule is safe, when it never actually ran.
+
+    ``worktree_path`` is resolved to an absolute path (relative to this
+    process's own cwd, not semgrep's) before use: semgrep runs with ``cwd``
+    set to ``config_path``'s own directory (see below), so an unresolved
+    relative ``worktree_path`` would otherwise resolve against that
+    directory instead of the caller's, silently scanning the wrong tree.
     """
     if not semgrep_available():
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
+    # Always normalize (not just when relative): os.path.abspath also applies
+    # normpath, collapsing "..", ".", and duplicate slashes even in an
+    # already-absolute input -- an unconditional call preserves that for
+    # every caller, matching the normalization this line replaced. The
+    # isabs check below only decides whether to log, so normalization
+    # behavior for already-absolute-but-unnormalized paths doesn't regress.
+    if not os.path.isabs(worktree_path):
+        logger.warning(
+            "run_semgrep_sarif received a relative worktree_path (%r); "
+            "resolving against this process's cwd, not semgrep's",
+            worktree_path,
+        )
+    worktree_path = os.path.abspath(worktree_path)
+
+    # Verified empirically: semgrep namespaces each rule's reported ruleId
+    # with the config path we hand it -- e.g. a config of "/tmp/x/rules"
+    # turns rule id "foo" into ruleId "tmp.x.rules.foo" -- UNLESS that path
+    # is just a bare name/"." relative to semgrep's own cwd, in which case
+    # the id passes through unmodified. Since `select_rule_statuses` looks
+    # up the raw rule_id a rule author wrote in `id:`, running with cwd set
+    # to config_path's own directory (and passing a same-directory-relative
+    # config arg) is required for DB status lookups to ever match -- passing
+    # config_path directly, from an unrelated cwd, would silently namespace
+    # every rule id and permanently misclassify verified rules as candidate.
+    if config_path.is_dir():
+        semgrep_cwd, config_arg = config_path, "."
+    else:
+        semgrep_cwd, config_arg = config_path.parent, config_path.name
+
+    # Both current callers validate config_path exists before calling (see
+    # run_precheck's _has_rule_files check and shadow.py's rule_path.exists()
+    # guard), so this isn't reachable today -- but create_subprocess_exec's
+    # cwd= would otherwise raise FileNotFoundError/NotADirectoryError on a
+    # missing directory, breaking this module's fail-open contract (and the
+    # "run_semgrep_sarif itself never raises" invariant shadow.py's docstring
+    # depends on) for any future caller that doesn't pre-validate.
+    if not semgrep_cwd.is_dir():
+        logger.warning("semgrep config directory does not exist: %s", semgrep_cwd)
+        return None
+
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
         "--config",
-        str(config_path),
+        config_arg,
         "--sarif",
         "--quiet",
         "--metrics=off",
         worktree_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=semgrep_cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SEMGREP_TIMEOUT_S)

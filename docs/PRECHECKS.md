@@ -84,6 +84,41 @@ that column is owned entirely by the out-of-band triage job described
 above, for the future implementer of that job to update on every status
 transition.
 
+**Operator note:** an earlier version of `run_semgrep_sarif` passed
+semgrep's `--config` an absolute directory path from an unrelated `cwd`,
+which causes semgrep to namespace-prefix every rule's reported `ruleId`
+with that path (e.g. `foo` became `tmp.x.rules.foo`) — this meant
+`select_rule_statuses`'s DB lookup by `rule_id` could never match, so no
+rule could ever functionally reach `verified` status. `log_candidate_firings`
+auto-creates a `precheck_rules` row (via its `ON CONFLICT DO NOTHING`
+ensure-row insert) under whatever `rule_id` a firing reports on *every*
+candidate firing, not only on rules a human happened to manually triage —
+so any repo that ran this feature before the fix likely already has rows
+keyed by one of these namespaced ids. Those rows are orphaned going
+forward: the bare id the fixed code now reports is a different row that
+starts back at `candidate`. Given `verified` was unreachable anyway, this
+is a one-time acceptable reset rather than a migration to write; find any
+such rows with:
+
+```sql
+SELECT rule_id FROM review_service.precheck_rules WHERE rule_id LIKE '%.%';
+```
+
+**This is a starting point for manual inspection, not a safe-to-delete
+filter on its own:** semgrep registry-style rules commonly use dotted ids
+by convention (e.g. `python.lang.security.audit.something`), so a match
+here isn't automatically a namespaced-by-the-bug id. Cross-reference each
+match's `rule_id` against the actual `id:` values in your rule files
+before deleting anything — only rows whose `rule_id` doesn't match any
+current rule file's own `id:` are candidates for cleanup.
+
+**Correction:** an earlier revision of this note called any dotted
+`rule_id` match "safe to delete." That was wrong for the reason above --
+if you already acted on that guidance, re-verify your `precheck_rules`
+table against your rule files' actual `id:` values, since a legitimate
+registry-style rule's row could have been deleted, silently demoting it
+back to `candidate`.
+
 ### Shadow-review harness
 
 Before a candidate rule draft is allowed to fire on any live PR at all,
@@ -126,6 +161,15 @@ spanning many distinct repos will accumulate one full bare mirror per
 distinct repo with no automatic cleanup. Fine for occasional use; worth
 revisiting with explicit cache management if shadow review becomes a
 routine, large-multi-repo workflow.
+
+`tests/test_precheck_shadow_integration.py` exercises this harness for
+real (a real clone, real semgrep) rather than mocking `provisioned_worktree`
+the way `tests/test_precheck_shadow.py` does. It's `pytest.mark.integration`
+plus a dedicated `pytest.mark.needs_real_github_token` marker, and is
+deliberately **not** wired into CI (see `CONTRIBUTING.md`) since it needs a
+real `GITHUB_TOKEN_RO`, not the fixed stub `tests/conftest.py` sets for
+every other test. Run it locally with
+`GITHUB_TOKEN_RO=$(gh auth token) uv run pytest -m integration tests/test_precheck_shadow_integration.py`.
 
 ## Pipeline placement
 
