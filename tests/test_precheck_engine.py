@@ -425,7 +425,12 @@ async def test_run_semgrep_sarif_accepts_a_single_rule_file_as_config_path(
 
     assert result is not None
     assert [r.rule_id for r in result] == ["r1"]
-    # Confirms the single-file path (not a directory) is passed through
-    # verbatim to semgrep's --config, which accepts either.
+    # A single rule file is run with cwd set to its own parent directory and
+    # --config given the bare filename, not the full path -- verified
+    # empirically that passing the full path (from an unrelated cwd) makes
+    # semgrep namespace-prefix every rule's reported ruleId with that path,
+    # which would break select_rule_statuses' DB lookup by rule_id.
     assert mock_exec.await_args is not None
-    assert str(rule_file) in mock_exec.await_args.args
+    assert rule_file.name in mock_exec.await_args.args
+    assert str(rule_file) not in mock_exec.await_args.args
+    assert mock_exec.await_args.kwargs["cwd"] == rule_file.parent

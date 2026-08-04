@@ -135,16 +135,32 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
+    # Verified empirically: semgrep namespaces each rule's reported ruleId
+    # with the config path we hand it -- e.g. a config of "/tmp/x/rules"
+    # turns rule id "foo" into ruleId "tmp.x.rules.foo" -- UNLESS that path
+    # is just a bare name/"." relative to semgrep's own cwd, in which case
+    # the id passes through unmodified. Since `select_rule_statuses` looks
+    # up the raw rule_id a rule author wrote in `id:`, running with cwd set
+    # to config_path's own directory (and passing a same-directory-relative
+    # config arg) is required for DB status lookups to ever match -- passing
+    # config_path directly, from an unrelated cwd, would silently namespace
+    # every rule id and permanently misclassify verified rules as candidate.
+    if config_path.is_dir():
+        semgrep_cwd, config_arg = config_path, "."
+    else:
+        semgrep_cwd, config_arg = config_path.parent, config_path.name
+
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
         "--config",
-        str(config_path),
+        config_arg,
         "--sarif",
         "--quiet",
         "--metrics=off",
         worktree_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        cwd=semgrep_cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SEMGREP_TIMEOUT_S)
