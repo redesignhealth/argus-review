@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,6 +13,7 @@ from argus.precheck.engine import (
     PrecheckResult,
     _find_duplicate_rule_ids,
     _has_rule_files,
+    _kill_and_reap,
     resolve_rules_dir,
     run_precheck,
     run_semgrep_sarif,
@@ -99,6 +101,14 @@ def _mock_subprocess(stdout: bytes, returncode: int = 0) -> AsyncMock:
     proc = AsyncMock()
     proc.communicate.return_value = (stdout, b"")
     proc.returncode = returncode
+    # _kill_and_reap's transport-close path (see engine.py) does
+    # `getattr(proc, "_transport", None)` -- on a bare AsyncMock, that
+    # auto-vivifies as another AsyncMock, whose .close() call returns an
+    # unawaited coroutine (a real transport's close() is synchronous).
+    # None matches every real Process that never needed this cleanup path
+    # exercised, avoiding a spurious "coroutine was never awaited" warning
+    # on every test that happens to hit a _kill_and_reap call.
+    proc._transport = None
     return proc
 
 
@@ -168,6 +178,7 @@ async def test_run_precheck_timeout_returns_empty(
     monkeypatch.setattr("argus.precheck.engine._SEMGREP_TIMEOUT_S", 0.01)
 
     proc = AsyncMock()
+    proc._transport = None  # see _mock_subprocess's comment on this
 
     async def _never_returns(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
         import asyncio
@@ -362,6 +373,7 @@ async def test_run_semgrep_sarif_returns_none_on_timeout(
     monkeypatch.setattr("argus.precheck.engine._SEMGREP_TIMEOUT_S", 0.01)
 
     proc = AsyncMock()
+    proc._transport = None  # see _mock_subprocess's comment on this
     call_count = {"n": 0}
 
     async def _communicate(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
@@ -369,12 +381,12 @@ async def test_run_semgrep_sarif_returns_none_on_timeout(
 
         # Only the FIRST call needs to actually sleep past the patched
         # timeout -- that's the one asyncio.wait_for wraps, and it needs a
-        # real slow awaitable to genuinely trigger TimeoutError. The
-        # SECOND call is the production code's post-kill drain
-        # (`with contextlib.suppress(Exception): await proc.communicate()`
-        # in engine.py), which isn't bounded by the timeout at all -- an
-        # unconditionally sleeping mock would block this test for the
-        # real 10s on that call too, instead of the intended ~0.01s.
+        # real slow awaitable to genuinely trigger TimeoutError. The SECOND
+        # call is the production code's post-kill drain in _kill_and_reap,
+        # which IS bounded (by _KILL_DRAIN_TIMEOUT_S, separately from this
+        # test's patched _SEMGREP_TIMEOUT_S) -- but an unconditionally
+        # sleeping mock would still block this test for the real 10s on
+        # that call too if it also slept, instead of the intended ~0.01s.
         call_count["n"] += 1
         if call_count["n"] == 1:
             await asyncio.sleep(10)
@@ -503,6 +515,7 @@ async def test_run_semgrep_sarif_kills_and_reaps_on_non_timeout_exception(
     # process is orphaned rather than merely "the scan failed."
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
     proc = AsyncMock()
+    proc._transport = None  # see _mock_subprocess's comment on this
     proc.communicate.side_effect = [OSError("pipe broke"), (b"", b"")]
     proc.kill = MagicMock()
 
@@ -521,6 +534,7 @@ async def test_run_semgrep_sarif_suppresses_process_lookup_error_on_kill(
     # have exited on its own (race) by the time kill() is called.
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
     proc = AsyncMock()
+    proc._transport = None  # see _mock_subprocess's comment on this
     proc.communicate.side_effect = [OSError("pipe broke"), (b"", b"")]
     proc.kill = MagicMock(side_effect=ProcessLookupError)
 
@@ -576,6 +590,60 @@ def test_find_duplicate_rule_ids_skips_non_dict_rule_entries(tmp_path) -> None:
     (tmp_path / "a.yml").write_text("rules:\n  - id: fine\n  - just-a-string\n")
 
     assert _find_duplicate_rule_ids(tmp_path) == {}
+
+
+def test_find_duplicate_rule_ids_skips_non_list_rules_value(tmp_path) -> None:
+    # A `rules:` key that isn't a list (e.g. a typo'd dict/string) must be
+    # skipped, not raise or misbehave.
+    (tmp_path / "a.yml").write_text("rules: not-a-list\n")
+
+    assert _find_duplicate_rule_ids(tmp_path) == {}
+
+
+def test_find_duplicate_rule_ids_detects_collision_across_yml_and_yaml_extensions(
+    tmp_path,
+) -> None:
+    (tmp_path / "a.yml").write_text("rules:\n  - id: shared-id\n")
+    (tmp_path / "b.yaml").write_text("rules:\n  - id: shared-id\n")
+
+    duplicates = _find_duplicate_rule_ids(tmp_path)
+
+    assert set(duplicates.keys()) == {"shared-id"}
+    assert set(duplicates["shared-id"]) == {tmp_path / "a.yml", tmp_path / "b.yaml"}
+
+
+async def test_run_semgrep_sarif_returns_none_for_relative_worktree_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The isabs check (a raised ValueError, not a bare assert -- see the
+    # comment at its call site for why) must fail open via
+    # run_semgrep_sarif's own outer except, not propagate.
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+
+    result = await run_semgrep_sarif("relative/worktree", tmp_path)
+
+    assert result is None
+
+
+async def test_kill_and_reap_closes_transport_when_drain_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine._KILL_DRAIN_TIMEOUT_S", 0.01)
+    proc = AsyncMock()
+    proc.kill = MagicMock()
+
+    async def _hangs_forever(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
+        await asyncio.sleep(10)
+        return (b"", b"")
+
+    proc.communicate.side_effect = _hangs_forever
+    transport = MagicMock()
+    proc._transport = transport
+
+    await _kill_and_reap(proc)
+
+    proc.kill.assert_called_once()
+    transport.close.assert_called_once()
 
 
 async def test_run_precheck_logs_warning_on_duplicate_rule_ids(

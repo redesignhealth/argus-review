@@ -19,8 +19,6 @@ from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
-import yaml
-
 from argus.config import get_settings
 from argus.precheck.sarif import SarifResult, parse_semgrep_sarif
 from argus.storage.precheck import select_rule_statuses
@@ -114,20 +112,43 @@ def _find_duplicate_rule_ids(rules_dir: Path) -> dict[str, list[Path]]:
     files sharing an ``id:`` are indistinguishable to that lookup, so a new
     rule accidentally reusing an already-``verified`` id would inherit
     fast-fail status immediately, skipping shadow-review/triage entirely.
-    Best-effort: a rule file that fails to parse as YAML, or doesn't have
-    the expected top-level ``rules: [...]`` shape, is silently skipped here
-    rather than raising -- this is advisory tooling on top of the fail-open
-    precheck gate, not itself something that should ever block a review.
+    A rule file that fails to parse as YAML, or doesn't have the expected
+    top-level ``rules: [...]`` shape, is skipped here rather than raising --
+    this is advisory tooling on top of the fail-open precheck gate, not
+    itself something that should ever block a review -- but logged at
+    DEBUG (not silently), since a file this lint can't read is also a file
+    it can't check for a collision, which is exactly the security-relevant
+    condition this whole function exists to catch.
+
+    Synchronous, deliberately: called via ``asyncio.to_thread`` from
+    :func:`run_precheck` rather than made ``async`` itself, so it stays
+    directly unit-testable without an event loop.
+
+    Imports ``yaml`` lazily rather than at module level: ``pyyaml`` is
+    declared in the ``prechecks`` extra, not core ``dependencies`` --
+    unconditionally importing it at module level would make
+    ``argus.precheck.engine`` itself fail to import without that extra
+    installed, and ``graph._node_precheck_rules`` imports this module
+    outside its own fail-open try block, so that ``ImportError`` would
+    crash the whole review rather than no-op. (Latent today only because
+    other dependencies happen to pull pyyaml in transitively -- not a
+    contract this module should rely on.)
     """
+    import yaml
+
     ids_to_files: dict[str, list[Path]] = {}
     for path in (*rules_dir.rglob("*.yml"), *rules_dir.rglob("*.yaml")):
         try:
             content = yaml.safe_load(path.read_text())
         except (yaml.YAMLError, OSError):
+            logger.debug("Could not parse %s while checking for duplicate rule ids", path)
             continue
         if not isinstance(content, dict):
             continue
-        for rule in content.get("rules", []):
+        rules = content.get("rules", [])
+        if not isinstance(rules, list):
+            continue
+        for rule in rules:
             if isinstance(rule, dict) and isinstance(rule.get("id"), str):
                 ids_to_files.setdefault(rule["id"], []).append(path)
     return {rule_id: files for rule_id, files in ids_to_files.items() if len(files) > 1}
@@ -201,10 +222,13 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
     with no LangGraph-level timeout/retry policy backstopping it, so an
     unbounded hang here would stall the whole review indefinitely instead
     of failing open, which is the opposite of this module's entire
-    fail-open design intent. ``suppress(Exception)`` below also catches the
-    ``TimeoutError``/``asyncio.TimeoutError`` this bound itself can raise --
-    a cleanup step timing out is not worth surfacing any more than any
-    other cleanup failure here.
+    fail-open design intent. A timeout here also triggers an explicit
+    transport-close attempt below, since the timeout alone only stops
+    *this process* from hanging -- it doesn't release the pipe file
+    descriptors on our side. Any exception from the drain (including the
+    ``TimeoutError``/``asyncio.TimeoutError`` this bound itself can raise)
+    is swallowed -- a cleanup step failing is not worth surfacing any more
+    than any other cleanup failure here.
 
     Edge case, not handled: ``contextlib.suppress(Exception)`` doesn't
     suppress ``asyncio.CancelledError`` (a ``BaseException``, not an
@@ -217,8 +241,24 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
     """
     with contextlib.suppress(ProcessLookupError):
         proc.kill()
-    with contextlib.suppress(Exception):
+    try:
         await asyncio.wait_for(proc.communicate(), timeout=_KILL_DRAIN_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 -- see docstring: any cleanup failure is swallowed
+        # The timeout bound above stops *this process* from hanging on a
+        # grandchild that's still holding the pipe FDs open -- it doesn't
+        # release those FDs on our side. Explicitly closing the transport
+        # does: it closes our end of the pipes regardless of whether a
+        # semgrep-core grandchild still holds its own copy open, so this
+        # process doesn't accumulate leaked FDs across many precheck runs
+        # even though it can't force the grandchild to release its own.
+        # `_transport` is a private asyncio.subprocess.Process attribute
+        # (no public equivalent exists for this); best-effort, so any
+        # failure here (including it simply not existing on some backend)
+        # is swallowed like every other cleanup step in this function.
+        with contextlib.suppress(Exception):
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                transport.close()
 
 
 async def _run_semgrep_sarif_unguarded(
@@ -240,11 +280,16 @@ async def _run_semgrep_sarif_unguarded(
     # and writer context with no error signal. Every current caller passes
     # an absolute path via repo_provision.py's tempfile.mkdtemp-based
     # worktree, so this is a caller-contract check, not a real-world case
-    # this function needs to handle gracefully -- an AssertionError here is
-    # caught by run_semgrep_sarif's own outer except and fails open like
+    # this function needs to handle gracefully -- a raised ValueError here
+    # is caught by run_semgrep_sarif's own outer except and fails open like
     # everything else in this module, it just also gets logged loudly via
-    # exc_info=True there instead of silently misreporting paths.
-    assert os.path.isabs(worktree_path), f"worktree_path must be absolute, got {worktree_path!r}"
+    # exc_info=True there instead of silently misreporting paths. A bare
+    # `assert` (an earlier version of this check used one) strips under
+    # `python -O`/`PYTHONOPTIMIZE`, silently reverting to the leaky
+    # behavior this check exists to prevent -- see the identical rationale
+    # at `argus/storage/precheck.py`'s own length-mismatch guard.
+    if not os.path.isabs(worktree_path):
+        raise ValueError(f"worktree_path must be absolute, got {worktree_path!r}")
 
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
@@ -370,7 +415,10 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     # _find_duplicate_rule_ids' docstring for why a collision is
     # security-relevant (a new rule can silently inherit an existing
     # verified rule's fast-fail status), not merely a style nit.
-    duplicates = _find_duplicate_rule_ids(rules_dir)
+    # to_thread: the function itself does blocking I/O (rglob, read_text,
+    # yaml.safe_load) and stays synchronous/directly-testable rather than
+    # becoming async -- see its own docstring.
+    duplicates = await asyncio.to_thread(_find_duplicate_rule_ids, rules_dir)
     for rule_id, files in duplicates.items():
         logger.warning(
             "Duplicate precheck rule id %r found in multiple files: %s -- "
