@@ -27,9 +27,14 @@ logger = logging.getLogger(__name__)
 
 _SEMGREP_TIMEOUT_S = 120
 
-# Caps the aggregate size of what reaches the LLM writer context or a
-# fast-fail PR comment -- per-message truncation (sarif._MAX_MESSAGE_LENGTH)
-# bounds one finding, this bounds the count.
+# Caps the aggregate size of candidate_findings only -- what reaches the
+# LLM writer context. Deliberately NOT applied to verified_findings (see
+# run_precheck's classify-before-cap comment below): a verified hit gates
+# the PR regardless of count, so it must never be truncated away here.
+# graph._node_precheck_fail applies its own separate, display-only cap to
+# verified findings, for the different reason of bounding PR-comment size
+# without ever affecting the gate decision itself. Per-message truncation
+# (sarif._MAX_MESSAGE_LENGTH) bounds one finding's size; this bounds count.
 _MAX_RESULTS = 50
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from argus.graph import (
     _edge_precheck_decision,
@@ -99,6 +100,29 @@ async def test_precheck_fail_preserves_round_number_from_prior_review() -> None:
     result = await _node_precheck_fail(state)
     assert result["response"]["review_round"] == 3
     assert result["response"]["prior_review_id"] == "rev-1"
+
+
+async def test_precheck_fail_caps_displayed_hits_without_dropping_the_gate() -> None:
+    # Regression test: an earlier version had no bound at all on how many
+    # verified hits get rendered into the comment body, risking exceeding
+    # GitHub's per-comment size limit for a broad rule matching many
+    # locations -- the exact scenario this gate exists to catch. The cap
+    # must be display-only: the verdict/findings-list length is capped,
+    # but nothing here should ever make the gate decision itself go away.
+    from argus.graph import _MAX_DISPLAYED_FAST_FAIL_HITS
+
+    many_hits = [
+        {"rule_id": "r1", "message": f"hit {i}", "file": f"f{i}.py", "line": i}
+        for i in range(_MAX_DISPLAYED_FAST_FAIL_HITS + 10)
+    ]
+    state = _make_state(precheck_fast_fail=many_hits)
+
+    result = await _node_precheck_fail(state)
+    response = result["response"]
+
+    assert response["verdict"] == Verdict.BLOCKING.value
+    assert len(response["findings"]) == _MAX_DISPLAYED_FAST_FAIL_HITS
+    assert "10 more hit(s)" in response["review_comment"]
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +295,17 @@ async def test_precheck_rules_malformed_state_propagates_not_swallowed() -> None
     del state["head_sha"]
 
     with pytest.raises(KeyError):
+        await _node_precheck_rules(state, {"configurable": {"worktree_path": "/tmp/wt"}})
+
+
+async def test_precheck_rules_malformed_request_propagates_not_swallowed() -> None:
+    # Same boundary as the head_sha case above, for state["request"]:
+    # ReviewRequest.model_validate happens outside every try in this node,
+    # not inside the narrow candidate-logging try, so a malformed request
+    # must still raise rather than being swallowed as a logging failure.
+    state = _make_state(request={"not": "a valid request"})
+
+    with pytest.raises(ValidationError):
         await _node_precheck_rules(state, {"configurable": {"worktree_path": "/tmp/wt"}})
 
 

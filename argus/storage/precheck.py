@@ -111,16 +111,26 @@ async def log_candidate_firings(
             findings_json = [json.dumps(f.finding) for f in firings]
             # unnest() zips positionally and pads short arrays with NULL on
             # a length mismatch rather than erroring -- a silent, hard-to-
-            # notice data-corruption mode. Not guarded by an explicit check:
-            # all five lists are provably the same length here (each is
-            # `len(firings)` elements, built from `firings`/`repo`/
-            # `pr_number`/`head_sha` directly above, not from independent
-            # sources), and any check would sit inside this same try/except
-            # and be swallowed identically to the corruption it would
-            # guard against -- it would document the invariant, not enforce
-            # it any more than this comment already does. Keep the five
-            # lists built this way (from `firings` and the single scalar
-            # args) if this function is ever refactored.
+            # notice data-corruption mode. All five lists are provably the
+            # same length here (each is `len(firings)` elements, built from
+            # `firings`/`repo`/`pr_number`/`head_sha` directly above, not
+            # from independent sources) -- this check can't fail given
+            # today's construction, but a raised, distinctly-worded
+            # ValueError still beats a cryptic downstream asyncpg error if
+            # a future refactor ever breaks that invariant, even though
+            # it's caught by the same enclosing except as everything else
+            # here (an unreachable-today guard is still a real guard,
+            # unlike a bare `assert`, which strips under `python -O`).
+            if (
+                not len(
+                    {len(rule_ids), len(repos), len(pr_numbers), len(head_shas), len(findings_json)}
+                )
+                == 1
+            ):
+                raise ValueError(
+                    "log_candidate_firings: mismatched array lengths would "
+                    "silently NULL-pad via unnest() -- refusing to insert"
+                )
 
             ensure_stmt = text(_ENSURE_RULE_ROWS_SQL).bindparams(
                 bindparam("rule_ids", type_=ARRAY(TEXT))

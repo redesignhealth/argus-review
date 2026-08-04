@@ -1388,6 +1388,7 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
         return {}
 
     head_sha = state["head_sha"]
+    req = ReviewRequest.model_validate(state["request"])
 
     try:
         result = await run_precheck(worktree_path)
@@ -1408,7 +1409,6 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
 
     if result.candidate_findings:
         try:
-            req = ReviewRequest.model_validate(state["request"])
             await log_candidate_firings(
                 repo=req.repo,
                 pr_number=req.pr_number,
@@ -1425,7 +1425,7 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
         logger.info(
             "Precheck fast-fail: %d verified-rule hit(s) on %s@%s",
             len(result.verified_findings),
-            state["request"].get("repo"),
+            req.repo,
             head_sha[:12],
         )
 
@@ -1437,6 +1437,9 @@ def _edge_precheck_decision(state: ReviewState) -> str:
     return "precheck_fail" if state.get("precheck_fast_fail") else "early_verifier"
 
 
+_MAX_DISPLAYED_FAST_FAIL_HITS = 50
+
+
 async def _node_precheck_fail(state: ReviewState) -> dict[str, Any]:
     """Synthesize a BLOCKING response from verified-rule hits — zero LLM calls.
 
@@ -1444,8 +1447,24 @@ async def _node_precheck_fail(state: ReviewState) -> dict[str, Any]:
     definition, one the out-of-band triage loop has already confirmed as
     high-precision, so its hit is treated the same as a human-confirmed
     BLOCKING finding rather than something needing further LLM judgment.
+
+    The gate decision (BLOCKING, all of ``hits``) is never truncated --
+    only what gets rendered into the ``Finding`` list and comment body is
+    capped, at ``_MAX_DISPLAYED_FAST_FAIL_HITS``. A single broad verified
+    rule matching many locations in one PR is entirely plausible
+    ("verified" means high precision, not single-occurrence), and an
+    unbounded comment body can exceed GitHub's per-comment size limit --
+    which would mean the one case this gate exists to protect (a
+    confirmed violation) silently fails to post anything at all. This is
+    a display-only cap for exactly that reason: it must never reduce
+    ``result.verified_findings`` itself the way an earlier version of
+    ``argus.precheck.engine.run_precheck`` mistakenly capped findings
+    *before* classification.
     """
     hits = state["precheck_fast_fail"]
+    displayed_hits = hits[:_MAX_DISPLAYED_FAST_FAIL_HITS]
+    omitted_count = len(hits) - len(displayed_hits)
+
     findings = [
         Finding(
             severity=Severity.BLOCKING,
@@ -1455,14 +1474,19 @@ async def _node_precheck_fail(state: ReviewState) -> dict[str, Any]:
             description=hit.get("message", "Deterministic precheck rule violation"),
             suggestion=None,
         )
-        for hit in hits
+        for hit in displayed_hits
     ]
     rule_list = ", ".join(sorted({hit["rule_id"] for hit in hits}))
-    comment = (
-        "## Code Review — Deterministic Precheck\n\n"
-        f"Blocked before review by verified rule(s): `{rule_list}`.\n\n"
-        + "\n".join(f"- **{f.file}:{f.line}** — {f.description}" for f in findings)
-    )
+    comment_lines = [
+        "## Code Review — Deterministic Precheck",
+        "",
+        f"Blocked before review by verified rule(s): `{rule_list}`.",
+        "",
+        *(f"- **{f.file}:{f.line}** — {f.description}" for f in findings),
+    ]
+    if omitted_count:
+        comment_lines.append(f"- ...and {omitted_count} more hit(s) (truncated for display)")
+    comment = "\n".join(comment_lines)
 
     # Preserve round/prior_review_id numbering on round 2+, same fields
     # _node_lite_review sets from the same prior_review state, so a fast-
