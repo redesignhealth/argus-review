@@ -107,27 +107,24 @@ def semgrep_available() -> bool:
     return shutil.which("semgrep") is not None
 
 
-async def run_precheck(worktree_path: str) -> PrecheckResult:
-    """Run custom rules against ``worktree_path``; classify hits by DB status.
+async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[SarifResult]:
+    """Run semgrep with ``config_path`` (a rules directory or a single rule
+    file -- semgrep accepts either) against ``worktree_path``; return
+    stripped, unclassified SARIF results.
 
-    The caller (``graph._node_precheck_rules``) owns logging candidate
-    firings for later triage and short-circuiting the pipeline on verified
-    findings — this function only runs semgrep and classifies the results.
+    Shared by :func:`run_precheck` (live per-PR gate, classifies against
+    ``argus.storage.precheck``'s DB-backed rule statuses) and
+    :mod:`argus.precheck.shadow` (offline corpus validation of a candidate
+    rule that has no DB row yet, and doesn't want one consulted -- shadow
+    review cares about raw occurrence counts, not the live candidate/
+    verified split). Fails open the same way ``run_precheck`` does: returns
+    ``[]`` rather than raising, on the same set of conditions (no semgrep,
+    timeout, semgrep's own execution error).
     """
-    if not semgrep_available():
-        logger.info(
-            "semgrep not on PATH (argus[prechecks] extra not installed) — skipping precheck"
-        )
-        return PrecheckResult()
-
-    rules_dir = resolve_rules_dir()
-    if rules_dir is None or not _has_rule_files(rules_dir):
-        return PrecheckResult()
-
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
         "--config",
-        str(rules_dir),
+        str(config_path),
         "--sarif",
         "--quiet",
         "--metrics=off",
@@ -142,7 +139,7 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
         with contextlib.suppress(Exception):
             await proc.communicate()
         logger.warning("semgrep precheck timed out after %ds", _SEMGREP_TIMEOUT_S)
-        return PrecheckResult()
+        return []
 
     # Verified empirically (no --error flag passed above): semgrep exits 0
     # whether or not it produced findings, and only exits non-zero on its
@@ -156,11 +153,11 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
             proc.returncode,
             stderr.decode(errors="replace")[:500],
         )
-        return PrecheckResult()
+        return []
 
     results = parse_semgrep_sarif(stdout)
     if not results:
-        return PrecheckResult()
+        return []
 
     # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
     # with -- since we pass the absolute worktree_path as the scan target,
@@ -191,7 +188,29 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
                 return replace(r, file=r.file[len(prefix) :])
         return r
 
-    results = [_strip(r) for r in results]
+    return [_strip(r) for r in results]
+
+
+async def run_precheck(worktree_path: str) -> PrecheckResult:
+    """Run custom rules against ``worktree_path``; classify hits by DB status.
+
+    The caller (``graph._node_precheck_rules``) owns logging candidate
+    firings for later triage and short-circuiting the pipeline on verified
+    findings — this function only runs semgrep and classifies the results.
+    """
+    if not semgrep_available():
+        logger.info(
+            "semgrep not on PATH (argus[prechecks] extra not installed) — skipping precheck"
+        )
+        return PrecheckResult()
+
+    rules_dir = resolve_rules_dir()
+    if rules_dir is None or not _has_rule_files(rules_dir):
+        return PrecheckResult()
+
+    results = await run_semgrep_sarif(worktree_path, rules_dir)
+    if not results:
+        return PrecheckResult()
 
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)

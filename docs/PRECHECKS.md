@@ -84,6 +84,22 @@ that column is owned entirely by the out-of-band triage job described
 above, for the future implementer of that job to update on every status
 transition.
 
+### Shadow-review harness
+
+Before a candidate rule draft is allowed to fire on any live PR at all,
+`argus.precheck.shadow.run_shadow_review` can validate it against a
+corpus of historical PRs: it checks out each corpus entry into its own
+worktree (reusing `repo_provision.provisioned_worktree`), runs the rule
+via the same `argus.precheck.engine.run_semgrep_sarif` the live gate
+uses, and returns raw occurrence evidence — how many corpus entries
+matched, and every individual hit. It does **not** judge true/false
+positive itself, and does not consult `precheck_rules`' DB status at
+all (a draft has no row yet, and shadow review isn't the live gate). That
+judgment — human approval of the draft, and later the RH-internal async
+triage loop — is a separate, external step built on top of this
+harness's output. Same OSS-ships-the-mechanism /
+RH-internal-owns-the-decision split as everything else here.
+
 ## Pipeline placement
 
 ```
