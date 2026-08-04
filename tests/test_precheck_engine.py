@@ -434,3 +434,44 @@ async def test_run_semgrep_sarif_accepts_a_single_rule_file_as_config_path(
     assert rule_file.name in mock_exec.await_args.args
     assert str(rule_file) not in mock_exec.await_args.args
     assert mock_exec.await_args.kwargs["cwd"] == rule_file.parent
+
+
+async def test_run_semgrep_sarif_directory_config_uses_dot_and_own_cwd(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression test for the production path (run_precheck always passes a
+    # directory, never a single file): a directory config must be run with
+    # cwd=<that directory> and --config "." -- not the absolute directory
+    # path from an unrelated cwd -- or semgrep namespace-prefixes every rule's
+    # reported ruleId with the directory path, breaking select_rule_statuses'
+    # DB lookup by rule_id (see run_semgrep_sarif's docstring).
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    proc = _mock_subprocess(_sarif_bytes("r1"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        result = await run_semgrep_sarif("/tmp/worktree", rules_dir)
+
+    assert result is not None
+    assert [r.rule_id for r in result] == ["r1"]
+    assert mock_exec.await_args is not None
+    assert "." in mock_exec.await_args.args
+    assert str(rules_dir) not in mock_exec.await_args.args
+    assert mock_exec.await_args.kwargs["cwd"] == rules_dir
+
+
+async def test_run_semgrep_sarif_returns_none_when_config_dir_missing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Not reachable via either current caller (both pre-validate existence),
+    # but must fail open rather than let create_subprocess_exec's cwd= raise
+    # FileNotFoundError/NotADirectoryError -- see run_semgrep_sarif's guard.
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    missing_rule_file = tmp_path / "does-not-exist" / "rule.yml"
+
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        result = await run_semgrep_sarif("/tmp/worktree", missing_rule_file)
+
+    assert result is None
+    mock_exec.assert_not_called()

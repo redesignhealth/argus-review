@@ -130,6 +130,12 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
     that fails to execute on every corpus entry would otherwise produce a
     confident-looking zero-occurrence result that looks like strong
     evidence the rule is safe, when it never actually ran.
+
+    ``worktree_path`` must be absolute: semgrep runs with ``cwd`` set to
+    ``config_path``'s own directory (see below), so a relative
+    ``worktree_path`` would resolve against that directory instead of
+    the caller's own cwd and silently scan the wrong tree. Every current
+    caller already passes an absolute path.
     """
     if not semgrep_available():
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
@@ -149,6 +155,17 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
         semgrep_cwd, config_arg = config_path, "."
     else:
         semgrep_cwd, config_arg = config_path.parent, config_path.name
+
+    # Both current callers validate config_path exists before calling (see
+    # run_precheck's _has_rule_files check and shadow.py's rule_path.exists()
+    # guard), so this isn't reachable today -- but create_subprocess_exec's
+    # cwd= would otherwise raise FileNotFoundError/NotADirectoryError on a
+    # missing directory, breaking this module's fail-open contract (and the
+    # "run_semgrep_sarif itself never raises" invariant shadow.py's docstring
+    # depends on) for any future caller that doesn't pre-validate.
+    if not semgrep_cwd.is_dir():
+        logger.warning("semgrep config directory does not exist: %s", semgrep_cwd)
+        return None
 
     proc = await asyncio.create_subprocess_exec(
         "semgrep",

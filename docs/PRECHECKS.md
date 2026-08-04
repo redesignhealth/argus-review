@@ -84,6 +84,21 @@ that column is owned entirely by the out-of-band triage job described
 above, for the future implementer of that job to update on every status
 transition.
 
+**Operator note:** an earlier version of `run_semgrep_sarif` passed
+semgrep's `--config` an absolute directory path from an unrelated `cwd`,
+which causes semgrep to namespace-prefix every rule's reported `ruleId`
+with that path (e.g. `foo` became `tmp.x.rules.foo`) — this meant
+`select_rule_statuses`'s DB lookup by `rule_id` could never match, so no
+rule could ever functionally reach `verified` status. If any
+`precheck_rules` row was created (and possibly manually triaged) under
+one of these namespaced ids before the fix, it's orphaned going forward —
+the bare id the fixed code now reports is a different DB row that starts
+back at `candidate`. Given `verified` was unreachable anyway, this is a
+one-time acceptable reset rather than a migration to write; worth a
+one-off check of `precheck_rules` for any namespaced-looking `rule_id`
+values (containing `.`) before relying on this feature's `verified`
+status in a real deployment.
+
 ### Shadow-review harness
 
 Before a candidate rule draft is allowed to fire on any live PR at all,

@@ -60,8 +60,16 @@ def _mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     Uses the field names (uppercase) from ``argus.config.Settings``.
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+
+    # Only stub GITHUB_TOKEN_RO when it isn't already set -- same reasoning
+    # as ARGUS_DB_URL below: an integration-marked test (e.g.
+    # test_precheck_shadow_integration.py) that needs a real token, and
+    # relies on os.environ.get(...) returning None to trigger its own skip
+    # when one isn't exported, must not have this autouse fixture clobber
+    # a real token with the fake stub, nor mask "not set" as "set."
+    if not os.environ.get("GITHUB_TOKEN_RO"):
+        monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
 
     # Default the history-backend/checkpointer resolution to "postgres" so
     # the many existing graph.py tests that mock a Postgres session factory

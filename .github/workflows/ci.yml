@@ -119,3 +119,5 @@ jobs:
         run: uv sync --all-extras
       - name: pytest
         run: uv run pytest
+      - name: pytest (precheck engine integration -- real semgrep, no network/credentials)
+        run: uv run pytest -m integration tests/test_precheck_engine_integration.py
