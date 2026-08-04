@@ -74,13 +74,25 @@ The canonical schema is in `schema/*.sql` in this repo. Apply them in order:
   `failure_reason` column (`'timeout'` / `'worker_crashed'` / `NULL`) so a
   reviewer subprocess that timed out or crashed is durably distinguishable
   from one that completed and genuinely found nothing.
+- `schema/017_add_precheck_rules.sql` — `precheck_rules` (rule status:
+  `candidate`/`verified`/`suspended`, with occurrence/agreement/
+  disagreement counters) and `precheck_candidate_firings` (a queue of
+  individual rule hits awaiting triage), used by the deterministic-precheck
+  gate ([`docs/PRECHECKS.md`](PRECHECKS.md)). Same split as
+  `schema/010_add_review_patterns.sql`: the tables ship here, but the
+  out-of-band jobs that mine new rules and triage candidate firings are not
+  part of this toolkit. Postgres-only — unlike the seven-operation
+  round-history contract below, there is no SQLite or HTTP equivalent for
+  these tables, so self-hosters not running Postgres can skip it (the
+  precheck gate's custom-rule execution simply never graduates any rule
+  past `candidate` without it).
 
-The numbering (008-011, 015-016) is not a typo or a sign of missing
+The numbering (008-011, 015-017) is not a typo or a sign of missing
 prerequisites — these files are extracted from a longer internal migration
 sequence, and `008_add_code_reviews.sql` creates the `review_service` schema
 from scratch, so nothing before it in that original sequence is needed
-here. Apply the six files above, in order, and you have the complete
-Postgres schema this pipeline needs.
+here. Apply the files above, in order, and you have the complete Postgres
+schema this pipeline needs.
 
 The write path is idempotent on `flow_run_id` via the partial unique index
 (`WHERE flow_run_id IS NOT NULL`): a "running" row is upserted at the start

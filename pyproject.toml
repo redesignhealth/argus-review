@@ -73,6 +73,13 @@ dev = [
     "mypy>=1.10.0",
     "ruff>=0.8.0",
 ]
+# Deterministic-precheck rule engine (argus.precheck). Optional: without it
+# installed, the precheck node no-ops instead of failing the pipeline --
+# see argus/precheck/__init__.py. Kept separate from `dev` because it's a
+# runtime dependency for anyone who wants prechecks, not a test-only tool.
+prechecks = [
+    "semgrep>=1.90.0",
+]
 
 [project.scripts]
 argus = "argus.cli:main"

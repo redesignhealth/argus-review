@@ -340,6 +340,9 @@ see the [write-up](https://www.redesignhealth.com/content/agentic-code-review-ha
   contract for self-hosters.
 - [`docs/BUILDING_A_REVIEW_LOOP.md`](docs/BUILDING_A_REVIEW_LOOP.md) — how to
   wrap Argus in a review → fix → re-review automation loop gated on CI.
+- [`docs/PRECHECKS.md`](docs/PRECHECKS.md) — the deterministic, non-LLM gate
+  that runs before the LLM pipeline: CI-status routing signal and custom
+  semgrep rules mined from Argus's own recurring findings.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the pipeline design and
   why it looks the way it does.
 - [`docs/RELEASING.md`](docs/RELEASING.md) — how releases are cut, for
