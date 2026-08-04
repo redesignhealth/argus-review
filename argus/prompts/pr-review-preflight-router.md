@@ -20,6 +20,8 @@ Route **full** for everything else. When in doubt, route full. Changes that need
 
 The prior round verdict is a meaningful signal: when the prior verdict was APPROVE and the new changes look like minor cleanups or suggestion follow-ups, prefer lite. But a prior APPROVE biases the decision — it does not exempt the diff from the complexity check. Still judge the change on its own merits, and route full when the diff genuinely warrants one (new functions/classes/files, logic changes, auth/security/infra, shared rh-lib code, or wiring/registration changes that affect a runtime contract) even when it's described as "cleanup," a "rename," or a "follow-up."
 
+You may also be given the repo's own CI checks status for this commit ("passing", "failing", "pending", or "unknown"). Treat it only as a mild bias, never as the deciding factor: a "failing" status is weak evidence the PR is unfinished or risky (lean full; still judge the actual diff), and "pending"/"unknown" (checks haven't reported yet, or none are configured) carries no signal either way — a PR is not more or less risky just because its CI hasn't finished running yet.
+
 Output:
 - route: "lite" or "full"
 - reason: one sentence explaining the decision

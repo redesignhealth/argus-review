@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Deterministic, non-LLM precheck gate running before the review pipeline
+  spends any LLM tokens: a routing signal from the target repo's own CI
+  status (always on, no extra dependency), and custom semgrep rules
+  against the worktree that can fast-fail a PR (once verified) or attach
+  non-blocking writer context (while candidate) -- this half is gated
+  behind the new `prechecks` extra
+  (`pip install "argus-code-review[prechecks]"`) and is a complete no-op
+  without it installed. See `docs/PRECHECKS.md`.
+- `gitleaks` and `actionlint` CI jobs for this repo's own source.
+
 ## [0.1.3] - 2026-08-03
 
 ### Added

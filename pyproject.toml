@@ -72,7 +72,43 @@ dev = [
     "pytest-httpx>=0.30.0",
     "mypy>=1.10.0",
     "ruff>=0.8.0",
+    # For argus.precheck.engine's direct `import yaml` (the prechecks
+    # extra's own pyyaml dependency ships no type stubs).
+    "types-PyYAML>=6.0",
 ]
+# Deterministic-precheck rule engine (argus.precheck). Optional: without it
+# installed, the precheck node no-ops instead of failing the pipeline --
+# see argus/precheck/__init__.py. Kept separate from `dev` because it's a
+# runtime dependency for anyone who wants prechecks, not a test-only tool.
+prechecks = [
+    # Upper-bounded: argus.precheck.engine depends on empirically verified
+    # semgrep behavior (exit code 0 with or without findings, non-zero only
+    # on semgrep's own execution errors; SARIF artifactLocation.uri echoing
+    # the scan-root path form verbatim; --no-rewrite-rule-ids reporting the
+    # bare `id:` value regardless of directory nesting, which is what makes
+    # select_rule_statuses' DB lookup by rule_id work at all) that a future
+    # major release isn't contractually obligated to preserve. Bump
+    # deliberately, re-verifying all three behaviors, rather than picking it
+    # up silently.
+    "semgrep>=1.90.0,<2.0.0",
+    # engine._find_duplicate_rule_ids parses rule YAML directly for the
+    # duplicate-id lint -- declared explicitly rather than relying on
+    # semgrep's own transitive PyYAML dependency, which this code has no
+    # contractual guarantee of.
+    "pyyaml>=6.0",
+]
+# semgrep pins mcp==1.23.3 exactly, so uv's single flat resolution (which
+# must satisfy every extra combination at once) locks mcp -- and its own
+# transitives jsonschema/importlib-metadata/pywin32 -- to that version for
+# EVERY install of this package, not just prechecks users. This is provably
+# safe, not a functional regression: claude-agent-sdk (core, always
+# installed) only requires mcp>=1.19.0, and 1.23.3 satisfies that floor, so
+# nothing here depends on an mcp feature added after 1.23.3. Investigated
+# uv's `conflicts` mechanism (declaring dev/prechecks mutually exclusive) as
+# a way to fork the resolution and keep the newer mcp for non-prechecks
+# installs -- it has no effect here, because 1.23.3 already satisfies both
+# constraints simultaneously; there's no genuine incompatibility for uv to
+# fork around, just a tighter shared pin.
 
 [project.scripts]
 argus = "argus.cli:main"
@@ -84,7 +120,8 @@ testpaths = ["tests"]
 # --strict-markers turns unregistered @pytest.mark.<name> typos into errors.
 addopts = ["-m", "not integration", "--strict-markers"]
 markers = [
-    "integration: marks tests as integration tests (require live DB; skipped locally)",
+    "integration: marks tests as integration tests (require a live external resource -- DB, network, or a real binary; skipped by default)",
+    "needs_real_github_token: marks integration tests that need a real GITHUB_TOKEN_RO in the environment, unstubbed by tests/conftest.py's autouse fixture",
     "packaging: marks tests that build the wheel via `uv build` (slow; shells out)",
 ]
 

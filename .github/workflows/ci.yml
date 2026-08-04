@@ -38,6 +38,49 @@ jobs:
       - name: mypy
         run: uv run mypy .
 
+  secrets-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        # Plain CLI, not gitleaks/gitleaks-action: the Action wrapper
+        # requires a paid GITLEAKS_LICENSE for any GitHub organization
+        # account (redesignhealth is one), even on a public repo. The
+        # underlying CLI is MIT-licensed with no such restriction.
+        # Checksum verified against gitleaks' own published
+        # gitleaks_8.30.1_checksums.txt for this exact asset.
+        run: |
+          curl --retry 3 --retry-connrefused -sSfLO https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks_8.30.1_linux_x64.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks_8.30.1_linux_x64.tar.gz -C /usr/local/bin gitleaks
+          rm gitleaks_8.30.1_linux_x64.tar.gz
+      - name: gitleaks detect
+        run: gitleaks detect --no-banner --redact
+
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        # Plain binary, not reviewdog/action-actionlint: that wrapper's
+        # default reporter posts annotations via the Checks/PR-review API,
+        # which needs permissions beyond this workflow's top-level
+        # `contents: read` that couldn't be confirmed against the pinned
+        # SHA without live testing. A plain binary run needs no permissions
+        # beyond reading the checkout, and fails the job on lint errors
+        # via its own exit code -- no separate `fail_level` input to trust.
+        # Checksum verified against actionlint's own published
+        # actionlint_1.7.12_checksums.txt for this exact asset.
+        run: |
+          curl --retry 3 --retry-connrefused -sSfLO https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz" | sha256sum -c -
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz -C /usr/local/bin actionlint
+          rm actionlint_1.7.12_linux_amd64.tar.gz
+      - name: actionlint
+        run: actionlint
+
   # Argus must never depend on rh_lib (a private, RH-internal package) at
   # the code level — Argus is a standalone package. Scoped to *.py only:
   # five prompt files under argus/prompts/*.md intentionally mention
@@ -76,3 +119,14 @@ jobs:
         run: uv sync --all-extras
       - name: pytest
         run: uv run pytest
+      - name: Verify semgrep is installed
+        # Fails loudly rather than letting the next step pass vacuously: the
+        # engine integration test itself pytest.skip()s (not fails) when
+        # semgrep is missing from PATH, so without this explicit guard, a
+        # future restructure of the `prechecks` extra dropping semgrep from
+        # `uv sync --all-extras` would silently stop exercising the real
+        # subprocess path this test tier exists to cover, and CI would stay
+        # green throughout.
+        run: uv run semgrep --version
+      - name: pytest (precheck engine integration -- real semgrep, no network/credentials)
+        run: uv run pytest -m integration tests/test_precheck_engine_integration.py

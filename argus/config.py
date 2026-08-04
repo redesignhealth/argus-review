@@ -51,6 +51,15 @@ class Settings(BaseSettings):
             directory (including ``ARGUS_PROMPTS_DIR``) and force packaged
             prompts only. For CI/official runs that must not pick up a
             developer's local override by accident.
+        ARGUS_RULES_DIR: Override directory for custom deterministic-precheck
+            rules (semgrep YAML). Same "explicit override always wins" idea
+            as ``ARGUS_PROMPTS_DIR``, but simpler: a single directory whose
+            ``*.yml``/``*.yaml`` files replace the packaged (empty-by-default)
+            rules directory wholesale, rather than a multi-location search
+            chain merged by filename -- rules aren't looked up by a fixed
+            name the way prompts are, so there's nothing to merge. Only
+            consulted when the ``prechecks`` extra is installed; see
+            ``argus.precheck``.
         ARGUS_REPO_CACHE: Mirror-clone cache directory.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
@@ -89,6 +98,7 @@ class Settings(BaseSettings):
     ARGUS_HISTORY_DB_PATH: str | None = None
     ARGUS_PROMPTS_DIR: str | None = None
     ARGUS_NO_PROMPT_OVERRIDES: bool = False
+    ARGUS_RULES_DIR: str | None = None
     ARGUS_REPO_CACHE: str | None = None
 
     LANGSMITH_API_KEY: str | None = None

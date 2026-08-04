@@ -31,10 +31,41 @@ uv run pytest              # full test suite (includes the packaging test,
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy .               # strict mode — zero errors required
+uv run pytest -m integration tests/test_precheck_engine_integration.py
+                            # real-semgrep subprocess test for argus.precheck
+                            # -- network/credential-free, requires only the
+                            # `prechecks` extra (already in `--all-extras`)
 ```
 
-All four must pass before a PR is mergeable; CI runs the same commands (see
-`.github/workflows/ci.yml`) on Ubuntu and macOS.
+All five must pass before a PR is mergeable. CI doesn't run identical jobs on
+both platforms, though: `uv run pytest` and the `semgrep`-based integration
+test run on both Ubuntu and macOS (the `test` job's matrix), but
+`ruff check`, `ruff format --check`, and `mypy` run only once, in a
+separate Ubuntu-only `lint` job — see `.github/workflows/ci.yml`. The
+`test` job also runs `uv run semgrep --version` as an explicit guard before
+the integration test step, so a missing `semgrep` binary fails loudly in CI
+rather than the integration test's own `pytest.skip()` silently passing
+green with nothing actually exercised; locally, a bare `uv run semgrep
+--version` is worth running first if you want the same loud-failure parity
+instead of a silent skip.
+
+`tests/test_precheck_shadow_integration.py` is a separate, developer-run-only
+integration tier, deliberately **not** wired into CI: it needs a real
+`GITHUB_TOKEN_RO` (not the fixed stub `tests/conftest.py` sets for every
+other test) to actually clone a public GitHub repo. Run it locally with:
+
+```bash
+GITHUB_TOKEN_RO=$(gh auth token) uv run pytest -m integration tests/test_precheck_shadow_integration.py
+```
+
+(This form, not `export GITHUB_TOKEN_RO=... ` on its own line first — an
+inline prefix scopes the variable to just this one command's process
+environment, whereas `export` leaks it into every later command in the
+same shell session for as long as the session lives. Neither form writes
+the resolved token *value* into shell history either way — history
+records the literal `$(gh auth token)` command-substitution text you
+typed, not its expanded output, on both bash and zsh. Low severity
+regardless, since the token is short-lived and read-only in intent.)
 
 ### Type safety
 

@@ -1004,3 +1004,41 @@ class GitHubClient:
         )
         logger.info("Set commit status %r (%s) on %s@%s", context, state, repo, sha[:12])
         return status
+
+    def get_checks_signal(self, repo: str, sha: str) -> str:
+        """Read the target repo's own CI status for ``sha`` as a routing signal.
+
+        Used only as an input to ``argus.graph.run_preflight_check``'s lite/
+        full decision — never a hard gate. Argus does not re-run the target
+        repo's own linters/tests itself (see ``argus.precheck`` for what it
+        does run: custom rules mined from Argus's own findings, a different
+        concern from generic CI). Reading CI status instead of trusting it
+        as authoritative would be unsafe on its own (a PR can edit its own
+        workflow file, fork PRs may have no checks at all, and Argus
+        typically runs while checks are still in flight) — hence "signal
+        only", not "gate".
+
+        Returns one of "passing", "failing", "pending", or "unknown".
+        "unknown" covers both "no checks configured" and any API failure —
+        deliberately not distinguished, since the router treats both the
+        same way (no signal either way; see ``pr-review-preflight-router``).
+        Only GitHub Actions-style check runs are considered, not the older
+        separate commit-statuses API (which Argus itself posts to via
+        ``set_commit_status`` — a different endpoint, so no self-exclusion
+        is needed here).
+        """
+        try:
+            data = self._request("GET", f"/repos/{repo}/commits/{sha}/check-runs")
+        except GitHubAPIError:
+            logger.warning("Failed to fetch check-runs for %s@%s", repo, sha[:12], exc_info=True)
+            return "unknown"
+
+        runs = data.get("check_runs", [])
+        if not runs:
+            return "unknown"
+        if any(run.get("status") != "completed" for run in runs):
+            return "pending"
+        failing_conclusions = {"failure", "timed_out", "action_required", "cancelled"}
+        if any(run.get("conclusion") in failing_conclusions for run in runs):
+            return "failing"
+        return "passing"
