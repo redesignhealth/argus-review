@@ -24,7 +24,7 @@ import pytest
 
 from argus.precheck.shadow import CorpusEntry, run_shadow_review
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.needs_real_github_token]
 
 if not shutil.which("semgrep"):
     pytest.skip(
@@ -56,8 +56,8 @@ rules:
 
 
 # tests/conftest.py's autouse _mock_settings fixture skips stubbing
-# GITHUB_TOKEN_RO specifically for integration-marked tests (see its
-# docstring) -- unlike the default unit suite, this file needs to see
+# GITHUB_TOKEN_RO for tests carrying the needs_real_github_token marker
+# (set above) -- unlike the default unit suite, this file needs to see
 # whatever the invoking shell actually exported, or nothing at all.
 @pytest.fixture
 def github_token() -> str:

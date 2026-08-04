@@ -61,24 +61,20 @@ def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-    # Unconditional for the default (non-integration) unit suite -- this
-    # fixture's docstring promise ("tests never use real credentials") has
-    # to hold there regardless of what's in a developer's own shell, since
-    # `-m not integration` is pytest's default (see pyproject.toml addopts)
-    # and every one of those tests expects a fake token. But unconditional
-    # for *every* test, including integration-marked ones, would make
-    # tests/test_precheck_shadow_integration.py's real-clone tests
-    # permanently unrunnable: monkeypatch.setenv here always wins over
-    # whatever the invoking shell exported, so a real GITHUB_TOKEN_RO could
-    # never reach that test's own os.environ.get(...) check no matter how
-    # it's invoked. Gate on the `integration` marker instead of on
-    # presence-in-environment (which is what an earlier version of this
-    # fixture did, and which broke isolation for the rest of the unit suite
-    # whenever a developer happened to have a real token exported for
-    # unrelated reasons) -- mirrors how SUPABASE_DB_URL/test_review_patterns_
-    # integration.py already sidesteps this same tension, by checking a var
-    # name this fixture never stubs at all.
-    if not request.node.get_closest_marker("integration"):
+    # Unconditional for every test EXCEPT ones explicitly opted out via the
+    # dedicated `needs_real_github_token` marker -- deliberately narrower
+    # than gating on the generic `integration` marker (an earlier version of
+    # this fixture did that and broke tests/storage/test_backend_contract.py's
+    # `[postgres]` param: that test is *also* integration-marked, doesn't
+    # check GITHUB_TOKEN_RO itself, and still needs Settings() to construct
+    # successfully, which requires this stub). Only
+    # tests/test_precheck_shadow_integration.py carries the narrower marker
+    # today, since it's the only test that needs to see whatever the
+    # invoking shell actually exported (or nothing) rather than this stub.
+    # Presence-in-environment gating (an even earlier version) isn't right
+    # either: it broke isolation for the whole unit suite whenever a
+    # developer happened to have a real token exported for unrelated reasons.
+    if not request.node.get_closest_marker("needs_real_github_token"):
         monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 

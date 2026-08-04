@@ -131,25 +131,31 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
     confident-looking zero-occurrence result that looks like strong
     evidence the rule is safe, when it never actually ran.
 
-    ``worktree_path`` must be absolute: semgrep runs with ``cwd`` set to
-    ``config_path``'s own directory (see below), so a relative
-    ``worktree_path`` would resolve against that directory instead of
-    the caller's own cwd and silently scan the wrong tree. Every current
-    caller already passes an absolute path.
+    ``worktree_path`` is resolved to an absolute path (relative to this
+    process's own cwd, not semgrep's) before use: semgrep runs with ``cwd``
+    set to ``config_path``'s own directory (see below), so an unresolved
+    relative ``worktree_path`` would otherwise resolve against that
+    directory instead of the caller's, silently scanning the wrong tree.
     """
     if not semgrep_available():
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
-    # Enforces the docstring's absoluteness precondition rather than trusting
-    # every caller to uphold it -- os.path.abspath (not a bare isabs assert)
-    # to match this module's fail-open philosophy: normalize into correctness
-    # rather than raise. A relative path resolved against the *caller's* cwd
-    # (os.path.abspath's behavior) is what every current caller already
-    # effectively passes; only a caller relying on resolution against
-    # semgrep's cwd (which the cwd= change below makes the config directory,
-    # not the caller's own) would ever see different behavior here.
-    worktree_path = os.path.abspath(worktree_path)
+    # Normalizes into correctness rather than trusting every caller to pass
+    # an already-absolute path -- matches this module's fail-open philosophy
+    # of degrading/correcting over raising. Every current caller already
+    # passes an absolute path, so this is a no-op for them; logged (unlike
+    # this function's other silent branches, none of which change the
+    # caller-provided path itself) so a future relative-path caller is
+    # visible rather than only inferable from a correct-but-unexpected scan
+    # target.
+    if not os.path.isabs(worktree_path):
+        logger.warning(
+            "run_semgrep_sarif received a relative worktree_path (%r); "
+            "resolving against this process's cwd, not semgrep's",
+            worktree_path,
+        )
+        worktree_path = os.path.abspath(worktree_path)
 
     # Verified empirically: semgrep namespaces each rule's reported ruleId
     # with the config path we hand it -- e.g. a config of "/tmp/x/rules"

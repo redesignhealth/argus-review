@@ -104,9 +104,13 @@ such rows with:
 SELECT rule_id FROM review_service.precheck_rules WHERE rule_id LIKE '%.%';
 ```
 
-(Legitimate rule ids as written in a rule's own `id:` field aren't expected
-to contain periods, so any match here predates this fix and is safe to
-delete or leave to expire unused.)
+**This is a starting point for manual inspection, not a safe-to-delete
+filter on its own:** semgrep registry-style rules commonly use dotted ids
+by convention (e.g. `python.lang.security.audit.something`), so a match
+here isn't automatically a namespaced-by-the-bug id. Cross-reference each
+match's `rule_id` against the actual `id:` values in your rule files
+before deleting anything — only rows whose `rule_id` doesn't match any
+current rule file's own `id:` are candidates for cleanup.
 
 ### Shadow-review harness
 
