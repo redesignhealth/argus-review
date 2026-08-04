@@ -144,3 +144,17 @@ async def test_real_semgrep_invalid_rule_returns_none(tmp_path) -> None:
     # contract this whole module depends on); None, not [], is the correct
     # "didn't run" signal.
     assert result is None
+
+
+async def test_real_semgrep_nonexistent_config_path_returns_none(tmp_path) -> None:
+    # Locks in the real-semgrep behavior a removed unit-level guard used to
+    # enforce in code: a --config path that doesn't exist at all must make
+    # semgrep exit non-zero (giving None), not silently emit empty-but-valid
+    # SARIF (which would be misclassified as [], "ran, no hits").
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _write_target(worktree, "x = 1\n")
+
+    result = await run_semgrep_sarif(str(worktree), tmp_path / "does-not-exist")
+
+    assert result is None

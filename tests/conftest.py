@@ -53,9 +53,16 @@ def _disable_live_langsmith_tracing() -> Iterator[None]:
                 os.environ[name] = value
 
 
-@pytest.fixture(autouse=True)
-def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure tests never use real credentials.
+def _mock_settings_impl(node: pytest.Item, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The actual logic behind the ``_mock_settings`` fixture below.
+
+    Pulled out as a plain function, taking the marker-bearing node directly
+    rather than a full ``FixtureRequest``, specifically so
+    ``tests/test_conftest.py`` can call it directly with a synthetic node in
+    a unit test -- pytest raises if a ``@pytest.fixture``-wrapped function is
+    called directly (it's meant to be requested as a parameter), and
+    reaching into its ``__wrapped__`` attribute to bypass that would depend
+    on an undocumented pytest implementation detail.
 
     Uses the field names (uppercase) from ``argus.config.Settings``.
     """
@@ -74,7 +81,7 @@ def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     # Presence-in-environment gating (an even earlier version) isn't right
     # either: it broke isolation for the whole unit suite whenever a
     # developer happened to have a real token exported for unrelated reasons.
-    if request.node.get_closest_marker("needs_real_github_token"):
+    if node.get_closest_marker("needs_real_github_token"):
         # Centralized here rather than left to each marked test's own
         # fixture: GITHUB_TOKEN_RO is a required (non-Optional) Settings
         # field, so a future needs_real_github_token test that doesn't
@@ -109,6 +116,12 @@ def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
 
     clear_cache()
     clear_engine_cache()
+
+
+@pytest.fixture(autouse=True)
+def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure tests never use real credentials. See ``_mock_settings_impl``."""
+    _mock_settings_impl(request.node, monkeypatch)
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

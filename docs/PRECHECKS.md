@@ -84,12 +84,16 @@ that column is owned entirely by the out-of-band triage job described
 above, for the future implementer of that job to update on every status
 transition.
 
-**Operator note:** an earlier version of `run_semgrep_sarif` passed
-semgrep's `--config` an absolute directory path from an unrelated `cwd`,
-which causes semgrep to namespace-prefix every rule's reported `ruleId`
-with that path (e.g. `foo` became `tmp.x.rules.foo`) — this meant
-`select_rule_statuses`'s DB lookup by `rule_id` could never match, so no
-rule could ever functionally reach `verified` status. `log_candidate_firings`
+**Operator note:** two earlier versions of `run_semgrep_sarif` both caused
+semgrep to namespace-prefix a rule's reported `ruleId`, defeating
+`select_rule_statuses`'s DB lookup by the bare `rule_id`: the original
+version passed semgrep's `--config` an absolute directory path from an
+unrelated `cwd` (e.g. `foo` became `tmp.x.rules.foo` for *every* rule,
+flat or nested), and the intermediate cwd-juggling fix (`cwd=config_path`,
+`--config "."`) narrowed this but still namespaced any rule organized into
+a subdirectory (e.g. `rules/security/foo.yml`'s `foo` became
+`security.foo`). Both meant no rule under either affected layout could
+ever functionally reach `verified` status. `log_candidate_firings`
 auto-creates a `precheck_rules` row (via its `ON CONFLICT DO NOTHING`
 ensure-row insert) under whatever `rule_id` a firing reports on *every*
 candidate firing, not only on rules a human happened to manually triage —
@@ -110,28 +114,36 @@ semgrep registry-style rules commonly use dotted ids by convention (e.g.
 automatically a namespaced-by-the-bug id -- cross-reference each match's
 `rule_id` against the actual `id:` values in your rule files first.
 
-Even once you've identified a genuinely orphaned row, **deleting it is
-not actually possible as granted today, and this doc previously said
-otherwise incorrectly:** `service_role` is granted only `SELECT, INSERT,
-UPDATE` on both tables (see `schema/017_add_precheck_rules.sql`'s GRANT
-statements), not `DELETE`, and `precheck_candidate_firings.rule_id`'s
-foreign key has no `ON DELETE` clause -- every orphaned row has at least
-one dependent firing row (`log_candidate_firings` guarantees this), so a
-delete would fail on the FK even with the right grant. Leaving an
-orphaned row in place is harmless -- it's an inert `candidate`-status row
-no rule file's current `id:` ever matches again, so nothing fires under
-it -- and is the recommended outcome rather than a cleanup task: don't
-grant `DELETE` or attempt to manually delete dependent
-`precheck_candidate_firings` rows first just to clear these out.
+Even once you've identified a genuinely orphaned row, **don't bother
+deleting it, and this doc previously recommended doing so incorrectly:**
+`service_role` (the role this package's own code runs as) is granted only
+`SELECT, INSERT, UPDATE` on both tables (see
+`schema/017_add_precheck_rules.sql`'s GRANT statements), not `DELETE` --
+though a table-owner or superuser connection (e.g. via the Supabase SQL
+editor) bypasses grants entirely, so the grant itself isn't a hard blocker
+for an operator with that level of access. The real obstacle either way is
+`precheck_candidate_firings.rule_id`'s foreign key, which has no
+`ON DELETE` clause: any orphaned row created through this package's own
+normal write path (`log_candidate_firings`) has at least one dependent
+firing row and can't be deleted without deleting those first -- though a
+row seeded some other way (e.g. by a future out-of-band triage job) isn't
+guaranteed to have one. Leaving an orphaned row in place is harmless
+regardless -- it's an inert `candidate`-status row no rule file's current
+`id:` ever matches again, so nothing fires under it -- and is the
+recommended outcome rather than a cleanup task.
 
 **Correction:** an earlier revision of this note called any dotted
 `rule_id` match "safe to delete." That was wrong for two reasons: the
-registry-style-id false-positive risk above, and because deletion isn't
-actually executable against the schema as granted. If you already
-attempted to act on that guidance, it should have failed outright (GRANT
-error or FK violation) rather than silently succeeded -- but re-verify
-your `precheck_rules` table against your rule files' actual `id:` values
-regardless.
+registry-style-id false-positive risk above, and because a row created
+through this package's own write path can't be deleted without deleting
+its dependent firing row(s) first -- an ordinary `DELETE ... WHERE
+rule_id = ...` against `precheck_rules` alone would have failed outright
+on the FK, not silently succeeded. If you already attempted this with a
+connection that also had `DELETE` on `precheck_candidate_firings` (broader
+than `service_role`'s own grant) and deleted the dependent rows first, a
+legitimate registry-style rule's row could genuinely have been removed --
+re-verify your `precheck_rules` table against your rule files' actual
+`id:` values regardless.
 
 ### Shadow-review harness
 

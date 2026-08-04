@@ -55,15 +55,17 @@ integration tier, deliberately **not** wired into CI: it needs a real
 other test) to actually clone a public GitHub repo. Run it locally with:
 
 ```bash
-export GITHUB_TOKEN_RO=$(gh auth token)
-uv run pytest -m integration tests/test_precheck_shadow_integration.py
+GITHUB_TOKEN_RO=$(gh auth token) uv run pytest -m integration tests/test_precheck_shadow_integration.py
 ```
 
-(`export ... ` on its own line, not inline before the command — an inline
-`GITHUB_TOKEN_RO=$(gh auth token) uv run pytest ...` form puts the token
-value in your shell's command history and process table. Low severity here
-since the token is short-lived and read-only in intent, but the exported
-form avoids it for free.)
+(This form, not `export GITHUB_TOKEN_RO=... ` on its own line first — an
+inline prefix scopes the variable to just this one command's process
+environment, whereas `export` leaks it into every later command in the
+same shell session for as long as the session lives. Neither form writes
+the resolved token *value* into shell history either way — history
+records the literal `$(gh auth token)` command-substitution text you
+typed, not its expanded output, on both bash and zsh. Low severity
+regardless, since the token is short-lived and read-only in intent.)
 
 ### Type safety
 

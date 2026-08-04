@@ -5,7 +5,7 @@ Both were previously exercised only indirectly, via the CI-excluded
 integration tier (a test carrying `needs_real_github_token` skipping
 correctly, or `pytest_collection_modifyitems` never actually firing because
 every existing marker pairing happens to be correct). These call the
-functions directly with synthetic items/requests so the branch logic itself
+functions directly with synthetic items/nodes so the branch logic itself
 has coverage that runs in the default suite.
 """
 
@@ -16,16 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.conftest import _mock_settings, pytest_collection_modifyitems
-
-# `.__wrapped__` unwraps pytest's fixture decorator to get the plain
-# function -- pytest raises if a `@pytest.fixture` is called directly (it's
-# meant to be requested as a parameter, not invoked), so these tests exercise
-# the raw logic instead of going through the fixture machinery. `getattr`,
-# not a bare attribute access: mypy strict mode doesn't know pytest's
-# `FixtureFunctionDefinition` wrapper carries `__wrapped__` (it does, at
-# runtime, same as any `functools.wraps`-style decorator).
-_mock_settings_raw = getattr(_mock_settings, "__wrapped__")
+from tests.conftest import _mock_settings_impl, pytest_collection_modifyitems
 
 
 def _fake_item(nodeid: str, markers: set[str]) -> MagicMock:
@@ -64,8 +55,8 @@ def test_collection_hook_aggregates_every_offender_in_one_error() -> None:
 
 
 def test_mock_settings_stubs_github_token_ro_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    request = _fake_item("some::test", set())
-    _mock_settings_raw(request, monkeypatch)
+    node = _fake_item("some::test", set())
+    _mock_settings_impl(node, monkeypatch)
     assert os.environ["GITHUB_TOKEN_RO"] == "test-github-token"
 
 
@@ -73,15 +64,15 @@ def test_mock_settings_skips_when_marker_present_and_token_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("GITHUB_TOKEN_RO", raising=False)
-    request = _fake_item("some::test", {"needs_real_github_token"})
+    node = _fake_item("some::test", {"needs_real_github_token"})
     with pytest.raises(pytest.skip.Exception):
-        _mock_settings_raw(request, monkeypatch)
+        _mock_settings_impl(node, monkeypatch)
 
 
 def test_mock_settings_does_not_stub_when_marker_present_and_token_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GITHUB_TOKEN_RO", "a-real-token")
-    request = _fake_item("some::test", {"needs_real_github_token"})
-    _mock_settings_raw(request, monkeypatch)
+    node = _fake_item("some::test", {"needs_real_github_token"})
+    _mock_settings_impl(node, monkeypatch)
     assert os.environ["GITHUB_TOKEN_RO"] == "a-real-token"

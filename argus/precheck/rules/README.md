@@ -10,7 +10,21 @@ against the PR worktree before the LLM pipeline runs.
 A rule's `id:` field is the key `argus.storage.precheck` uses to look up its
 status in the `review_service.precheck_rules` table (schema/017). The
 database is the single source of truth for status — this directory only
-supplies pattern content:
+supplies pattern content.
+
+**`id:` must be globally unique across every rule file you add, not just
+unique within a directory.** `select_rule_statuses` keys purely off the bare
+id string in one flat table — semgrep's own directory-based namespacing is
+deliberately disabled (`--no-rewrite-rule-ids`, so nested rule directories
+work correctly; see `argus/precheck/engine.py`), which also means two rules
+in different subdirectories that happen to share an `id:` are
+indistinguishable to the status lookup. A new rule that accidentally reuses
+an already-`verified` rule's id would inherit `verified` (fast-fail) status
+immediately, skipping the shadow-review/triage process entirely. Enforcing
+this is a normal code-review responsibility today (every rule file change
+goes through review before merging); it isn't mechanically checked.
+
+Status:
 
 - **No row in the database** (the common case for a brand-new rule): treated
   as `candidate`. Findings are attached to pipeline state as non-blocking

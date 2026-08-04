@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -453,3 +453,61 @@ async def test_run_semgrep_sarif_directory_config_passed_as_is(
     assert str(rules_dir) in mock_exec.await_args.args
     assert "--no-rewrite-rule-ids" in mock_exec.await_args.args
     assert "cwd" not in mock_exec.await_args.kwargs
+
+
+async def test_run_semgrep_sarif_returns_none_when_subprocess_creation_raises(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Enforces the documented "never raises" contract shadow.py's own
+    # narrower try/except now depends on -- a TOCTOU race (semgrep vanishes
+    # from PATH between semgrep_available() and this call) or any other
+    # create_subprocess_exec failure must fail open, not propagate.
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=OSError("boom")),
+        caplog.at_level("WARNING", logger="argus.precheck.engine"),
+    ):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result is None
+    assert any("failed unexpectedly" in record.message for record in caplog.records)
+
+
+async def test_run_semgrep_sarif_returns_none_when_sarif_parsing_raises(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    proc = _mock_subprocess(b"not valid json")
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch(
+            "argus.precheck.engine.parse_semgrep_sarif", side_effect=ValueError("malformed SARIF")
+        ),
+        caplog.at_level("WARNING", logger="argus.precheck.engine"),
+    ):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result is None
+    assert any("failed unexpectedly" in record.message for record in caplog.records)
+
+
+async def test_run_semgrep_sarif_kills_and_reaps_on_non_timeout_exception(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A non-TimeoutError exception raised while communicate() is in flight
+    # (e.g. OSError/BrokenPipeError) must still kill/reap the child before
+    # propagating out of _run_semgrep_sarif_unguarded -- otherwise the
+    # process is orphaned rather than merely "the scan failed."
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    proc = AsyncMock()
+    proc.communicate.side_effect = [OSError("pipe broke"), (b"", b"")]
+    proc.kill = MagicMock()
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await run_semgrep_sarif("/tmp/worktree", tmp_path)
+
+    assert result is None
+    proc.kill.assert_called_once()
+    assert proc.communicate.await_count == 2  # the failing call, then the post-kill drain

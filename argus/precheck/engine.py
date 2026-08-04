@@ -150,6 +150,21 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
         return None
 
 
+async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
+    """Best-effort kill + drain of a still-live subprocess.
+
+    ``kill()`` itself can raise ``ProcessLookupError`` if the process already
+    exited on its own between the caller noticing a problem and this call;
+    the post-kill ``communicate()`` drain is unbounded (no timeout) since
+    it's just reaping an already-killed/exiting process, not waiting on a
+    live one, and any failure there is likewise not worth surfacing.
+    """
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    with contextlib.suppress(Exception):
+        await proc.communicate()
+
+
 async def _run_semgrep_sarif_unguarded(
     worktree_path: str, config_path: Path
 ) -> list[SarifResult] | None:
@@ -193,11 +208,20 @@ async def _run_semgrep_sarif_unguarded(
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SEMGREP_TIMEOUT_S)
     except (asyncio.TimeoutError, TimeoutError):
-        proc.kill()
-        with contextlib.suppress(Exception):
-            await proc.communicate()
+        await _kill_and_reap(proc)
         logger.warning("semgrep timed out after %ds scanning %s", _SEMGREP_TIMEOUT_S, worktree_path)
         return None
+    except BaseException:
+        # Guarantees the child is killed/reaped on any OTHER exception raised
+        # while it's live too, not just the TimeoutError case above --
+        # without this, an OSError/BrokenPipeError (or any other exception)
+        # after spawn but before communicate() returns would propagate
+        # straight out through this function's own outer try/except (see
+        # run_semgrep_sarif) with the child left running, orphaned and
+        # unreaped: a resource leak that's harder to notice than the crash
+        # it replaced.
+        await _kill_and_reap(proc)
+        raise
 
     # Verified empirically (no --error flag passed above): semgrep exits 0
     # whether or not it produced findings, and only exits non-zero on its
@@ -219,9 +243,13 @@ async def _run_semgrep_sarif_unguarded(
         return []
 
     # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
-    # with -- since we pass the absolute worktree_path as the scan target,
-    # that's an absolute temp path (verified empirically), which would
-    # otherwise leak into the fast-fail PR comment and writer context.
+    # with -- every current caller passes an absolute temp path as
+    # worktree_path (verified empirically that semgrep echoes it back
+    # as-given), which would otherwise leak into the fast-fail PR comment
+    # and writer context. This is a caller contract, not something this
+    # function itself enforces or normalizes (see this function's docstring);
+    # a caller passing a relative path would see stripping silently no-op
+    # rather than fail, since the prefixes below just wouldn't match.
     # Strip it down to a path relative to the worktree, matching how every
     # other finding in this pipeline reports file paths. Two candidate
     # prefixes, not one: os.path.realpath's resolved form in addition to
