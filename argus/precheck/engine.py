@@ -141,7 +141,11 @@ def _find_duplicate_rule_ids(rules_dir: Path) -> dict[str, list[Path]]:
         try:
             content = yaml.safe_load(path.read_text())
         except (yaml.YAMLError, OSError):
-            logger.debug("Could not parse %s while checking for duplicate rule ids", path)
+            # WARNING, not DEBUG: a file this lint can't read is a file it
+            # can't check for a collision -- the same security-relevant
+            # blind spot a detected collision itself warns about, so it
+            # gets the same visibility.
+            logger.warning("Could not parse %s while checking for duplicate rule ids", path)
             continue
         if not isinstance(content, dict):
             continue
@@ -244,6 +248,12 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
     try:
         await asyncio.wait_for(proc.communicate(), timeout=_KILL_DRAIN_TIMEOUT_S)
     except Exception:  # noqa: BLE001 -- see docstring: any cleanup failure is swallowed
+        # A drain that reaches this point means a semgrep-core grandchild is
+        # (or may be) still holding the pipe FDs open on the per-PR critical
+        # path -- worth a log line before the swallowed cleanup attempt
+        # below, matching the WARNING already logged for the sibling
+        # timeout path in _run_semgrep_sarif_unguarded.
+        logger.warning("Post-kill drain of semgrep subprocess failed or timed out", exc_info=True)
         # The timeout bound above stops *this process* from hanging on a
         # grandchild that's still holding the pipe FDs open -- it doesn't
         # release those FDs on our side. Explicitly closing the transport
@@ -418,7 +428,23 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     # to_thread: the function itself does blocking I/O (rglob, read_text,
     # yaml.safe_load) and stays synchronous/directly-testable rather than
     # becoming async -- see its own docstring.
-    duplicates = await asyncio.to_thread(_find_duplicate_rule_ids, rules_dir)
+    #
+    # Narrowly scoped ImportError catch: pyyaml is genuinely optional (only
+    # declared in the `prechecks` extra), and if it's actually absent, only
+    # this advisory lint should be skipped -- not the rest of run_precheck.
+    # Without this, an ImportError raised inside _find_duplicate_rule_ids
+    # would propagate out through this function's caller
+    # (graph._node_precheck_rules) to its own outer except, which fail-opens
+    # the WHOLE precheck node including the verified-rule fast-fail path --
+    # a much bigger blast radius than "the duplicate-id lint didn't run."
+    try:
+        duplicates = await asyncio.to_thread(_find_duplicate_rule_ids, rules_dir)
+    except ImportError:
+        logger.warning(
+            "pyyaml not installed -- skipping the duplicate-rule-id lint "
+            "(install the `prechecks` extra to enable it)"
+        )
+        duplicates = {}
     for rule_id, files in duplicates.items():
         logger.warning(
             "Duplicate precheck rule id %r found in multiple files: %s -- "

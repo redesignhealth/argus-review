@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -176,6 +178,7 @@ async def test_run_precheck_timeout_returns_empty(
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
     monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
     monkeypatch.setattr("argus.precheck.engine._SEMGREP_TIMEOUT_S", 0.01)
+    monkeypatch.setattr("argus.precheck.engine._KILL_DRAIN_TIMEOUT_S", 0.01)
 
     proc = AsyncMock()
     proc._transport = None  # see _mock_subprocess's comment on this
@@ -579,11 +582,20 @@ def test_find_duplicate_rule_ids_detects_collision_within_one_file(tmp_path) -> 
     assert duplicates["shared-id"] == [tmp_path / "a.yml", tmp_path / "a.yml"]
 
 
-def test_find_duplicate_rule_ids_skips_unparseable_files(tmp_path) -> None:
+def test_find_duplicate_rule_ids_skips_unparseable_files(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
     (tmp_path / "bad.yml").write_text(": not: valid: yaml: [")
     (tmp_path / "good.yml").write_text("rules:\n  - id: fine\n")
 
-    assert _find_duplicate_rule_ids(tmp_path) == {}
+    with caplog.at_level("WARNING", logger="argus.precheck.engine"):
+        result = _find_duplicate_rule_ids(tmp_path)
+
+    assert result == {}
+    # WARNING, not silent: a file this lint can't parse is a file it can't
+    # check for a collision, the same security-relevant blind spot a
+    # detected collision itself warns about.
+    assert any("Could not parse" in record.message for record in caplog.records)
 
 
 def test_find_duplicate_rule_ids_skips_non_dict_rule_entries(tmp_path) -> None:
@@ -617,12 +629,18 @@ async def test_run_semgrep_sarif_returns_none_for_relative_worktree_path(
 ) -> None:
     # The isabs check (a raised ValueError, not a bare assert -- see the
     # comment at its call site for why) must fail open via
-    # run_semgrep_sarif's own outer except, not propagate.
+    # run_semgrep_sarif's own outer except, not propagate. Mocking
+    # create_subprocess_exec and asserting it's never called pins this to
+    # "the guard fired," not merely "semgrep failed to launch for some
+    # other reason" -- a real subprocess call would also return None for a
+    # missing/broken binary, which wouldn't distinguish the two.
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
 
-    result = await run_semgrep_sarif("relative/worktree", tmp_path)
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        result = await run_semgrep_sarif("relative/worktree", tmp_path)
 
     assert result is None
+    mock_exec.assert_not_called()
 
 
 async def test_kill_and_reap_closes_transport_when_drain_times_out(
@@ -646,6 +664,50 @@ async def test_kill_and_reap_closes_transport_when_drain_times_out(
     transport.close.assert_called_once()
 
 
+async def test_kill_and_reap_handles_missing_transport_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The docstring calls out that _transport may simply not exist on some
+    # backend -- getattr's default must handle that gracefully (no attempt
+    # to call .close() on None) rather than only being incidentally
+    # exercised by an unrelated test.
+    monkeypatch.setattr("argus.precheck.engine._KILL_DRAIN_TIMEOUT_S", 0.01)
+    proc = AsyncMock(spec=["kill", "communicate"])  # no _transport attribute at all
+    proc.kill = MagicMock()
+
+    async def _hangs_forever(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
+        await asyncio.sleep(10)
+        return (b"", b"")
+
+    proc.communicate.side_effect = _hangs_forever
+
+    await _kill_and_reap(proc)  # must not raise
+
+    proc.kill.assert_called_once()
+
+
+async def test_kill_and_reap_suppresses_transport_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine._KILL_DRAIN_TIMEOUT_S", 0.01)
+    proc = AsyncMock()
+    proc.kill = MagicMock()
+
+    async def _hangs_forever(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
+        await asyncio.sleep(10)
+        return (b"", b"")
+
+    proc.communicate.side_effect = _hangs_forever
+    transport = MagicMock()
+    transport.close.side_effect = RuntimeError("already closed")
+    proc._transport = transport
+
+    await _kill_and_reap(proc)  # must not raise
+
+    proc.kill.assert_called_once()
+    transport.close.assert_called_once()
+
+
 async def test_run_precheck_logs_warning_on_duplicate_rule_ids(
     tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -662,3 +724,72 @@ async def test_run_precheck_logs_warning_on_duplicate_rule_ids(
         await run_precheck("/tmp/worktree")
 
     assert any("Duplicate precheck rule id" in record.message for record in caplog.records)
+
+
+async def test_run_precheck_skips_only_the_lint_when_pyyaml_missing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A missing pyyaml (genuinely absent, not just this test's simulation)
+    # must only skip the advisory duplicate-id lint -- not fail-open the
+    # entire run_precheck call, which would silently disable the
+    # verified-rule fast-fail path too via graph.py's much broader outer
+    # except. Simulated by making the to_thread call itself raise
+    # ImportError, rather than actually uninstalling pyyaml.
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+    (tmp_path / "rule.yml").write_text("rules:\n  - id: verified-rule\n")
+    proc = _mock_subprocess(_sarif_bytes("verified-rule"))
+
+    with (
+        patch("asyncio.to_thread", new=AsyncMock(side_effect=ImportError("no module named yaml"))),
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch(
+            "argus.precheck.engine.select_rule_statuses",
+            new=AsyncMock(return_value={"verified-rule": "verified"}),
+        ),
+        caplog.at_level("WARNING", logger="argus.precheck.engine"),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert len(result.verified_findings) == 1
+    assert any("pyyaml not installed" in record.message for record in caplog.records)
+
+
+def test_engine_module_imports_without_yaml_available() -> None:
+    # Structural guard: argus.precheck.engine's own module-level import
+    # graph must not include a top-level `import yaml` -- pyyaml is only
+    # declared in the `prechecks` extra, and graph._node_precheck_rules
+    # imports this module outside its own fail-open try block, so a
+    # module-level ImportError here would crash the whole review rather
+    # than no-op. This can pass with a fully green test suite even if a
+    # future refactor reintroduces a module-level `import yaml`, UNLESS
+    # this test catches it -- CI always runs with `--all-extras`
+    # (pyyaml genuinely present), so only a check like this one would
+    # notice the regression.
+    #
+    # Runs in a subprocess, deliberately: doing this in-process (patching
+    # builtins.__import__ and deleting argus.precheck.* from sys.modules)
+    # was tried and reverted -- it corrupted global module-cache state for
+    # every other test in the same pytest session (other test files' own
+    # `from argus.precheck.shadow import ...` bindings, and `patch(
+    # "argus.precheck.shadow....")` targets resolved via sys.modules, ended
+    # up pointing at stale vs. freshly-reimported module objects
+    # inconsistently). A subprocess gives this test a throwaway interpreter
+    # instead.
+    script = (
+        "import builtins\n"
+        "real_import = builtins.__import__\n"
+        "def _blocked_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
+        "    if name == 'yaml' and level == 0:\n"
+        "        raise ImportError('simulated: pyyaml not installed')\n"
+        "    return real_import(name, globals, locals, fromlist, level)\n"
+        "builtins.__import__ = _blocked_import\n"
+        "import argus.precheck.engine\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
