@@ -54,22 +54,33 @@ def _disable_live_langsmith_tracing() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
-def _mock_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Ensure tests never use real credentials.
 
     Uses the field names (uppercase) from ``argus.config.Settings``.
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
-    # Only stub GITHUB_TOKEN_RO when it isn't already set -- same reasoning
-    # as ARGUS_DB_URL below: an integration-marked test (e.g.
-    # test_precheck_shadow_integration.py) that needs a real token, and
-    # relies on os.environ.get(...) returning None to trigger its own skip
-    # when one isn't exported, must not have this autouse fixture clobber
-    # a real token with the fake stub, nor mask "not set" as "set."
-    if not os.environ.get("GITHUB_TOKEN_RO"):
+    # Unconditional for the default (non-integration) unit suite -- this
+    # fixture's docstring promise ("tests never use real credentials") has
+    # to hold there regardless of what's in a developer's own shell, since
+    # `-m not integration` is pytest's default (see pyproject.toml addopts)
+    # and every one of those tests expects a fake token. But unconditional
+    # for *every* test, including integration-marked ones, would make
+    # tests/test_precheck_shadow_integration.py's real-clone tests
+    # permanently unrunnable: monkeypatch.setenv here always wins over
+    # whatever the invoking shell exported, so a real GITHUB_TOKEN_RO could
+    # never reach that test's own os.environ.get(...) check no matter how
+    # it's invoked. Gate on the `integration` marker instead of on
+    # presence-in-environment (which is what an earlier version of this
+    # fixture did, and which broke isolation for the rest of the unit suite
+    # whenever a developer happened to have a real token exported for
+    # unrelated reasons) -- mirrors how SUPABASE_DB_URL/test_review_patterns_
+    # integration.py already sidesteps this same tension, by checking a var
+    # name this fixture never stubs at all.
+    if not request.node.get_closest_marker("integration"):
         monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
     # Default the history-backend/checkpointer resolution to "postgres" so
     # the many existing graph.py tests that mock a Postgres session factory

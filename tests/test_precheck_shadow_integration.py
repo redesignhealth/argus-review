@@ -55,6 +55,10 @@ rules:
 """
 
 
+# tests/conftest.py's autouse _mock_settings fixture skips stubbing
+# GITHUB_TOKEN_RO specifically for integration-marked tests (see its
+# docstring) -- unlike the default unit suite, this file needs to see
+# whatever the invoking shell actually exported, or nothing at all.
 @pytest.fixture
 def github_token() -> str:
     token = os.environ.get("GITHUB_TOKEN_RO")

@@ -31,10 +31,23 @@ uv run pytest              # full test suite (includes the packaging test,
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy .               # strict mode — zero errors required
+uv run pytest -m integration tests/test_precheck_engine_integration.py
+                            # real-semgrep subprocess test for argus.precheck
+                            # -- network/credential-free, requires only the
+                            # `prechecks` extra (already in `--all-extras`)
 ```
 
-All four must pass before a PR is mergeable; CI runs the same commands (see
+All five must pass before a PR is mergeable; CI runs the same commands (see
 `.github/workflows/ci.yml`) on Ubuntu and macOS.
+
+`tests/test_precheck_shadow_integration.py` is a separate, developer-run-only
+integration tier, deliberately **not** wired into CI: it needs a real
+`GITHUB_TOKEN_RO` (not the fixed stub `tests/conftest.py` sets for every
+other test) to actually clone a public GitHub repo. Run it locally with:
+
+```bash
+GITHUB_TOKEN_RO=$(gh auth token) uv run pytest -m integration tests/test_precheck_shadow_integration.py
+```
 
 ### Type safety
 

@@ -141,6 +141,16 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
+    # Enforces the docstring's absoluteness precondition rather than trusting
+    # every caller to uphold it -- os.path.abspath (not a bare isabs assert)
+    # to match this module's fail-open philosophy: normalize into correctness
+    # rather than raise. A relative path resolved against the *caller's* cwd
+    # (os.path.abspath's behavior) is what every current caller already
+    # effectively passes; only a caller relying on resolution against
+    # semgrep's cwd (which the cwd= change below makes the config directory,
+    # not the caller's own) would ever see different behavior here.
+    worktree_path = os.path.abspath(worktree_path)
+
     # Verified empirically: semgrep namespaces each rule's reported ruleId
     # with the config path we hand it -- e.g. a config of "/tmp/x/rules"
     # turns rule id "foo" into ruleId "tmp.x.rules.foo" -- UNLESS that path

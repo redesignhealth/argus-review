@@ -89,15 +89,24 @@ semgrep's `--config` an absolute directory path from an unrelated `cwd`,
 which causes semgrep to namespace-prefix every rule's reported `ruleId`
 with that path (e.g. `foo` became `tmp.x.rules.foo`) — this meant
 `select_rule_statuses`'s DB lookup by `rule_id` could never match, so no
-rule could ever functionally reach `verified` status. If any
-`precheck_rules` row was created (and possibly manually triaged) under
-one of these namespaced ids before the fix, it's orphaned going forward —
-the bare id the fixed code now reports is a different DB row that starts
-back at `candidate`. Given `verified` was unreachable anyway, this is a
-one-time acceptable reset rather than a migration to write; worth a
-one-off check of `precheck_rules` for any namespaced-looking `rule_id`
-values (containing `.`) before relying on this feature's `verified`
-status in a real deployment.
+rule could ever functionally reach `verified` status. `log_candidate_firings`
+auto-creates a `precheck_rules` row (via its `ON CONFLICT DO NOTHING`
+ensure-row insert) under whatever `rule_id` a firing reports on *every*
+candidate firing, not only on rules a human happened to manually triage —
+so any repo that ran this feature before the fix likely already has rows
+keyed by one of these namespaced ids. Those rows are orphaned going
+forward: the bare id the fixed code now reports is a different row that
+starts back at `candidate`. Given `verified` was unreachable anyway, this
+is a one-time acceptable reset rather than a migration to write; find any
+such rows with:
+
+```sql
+SELECT rule_id FROM review_service.precheck_rules WHERE rule_id LIKE '%.%';
+```
+
+(Legitimate rule ids as written in a rule's own `id:` field aren't expected
+to contain periods, so any match here predates this fix and is safe to
+delete or leave to expire unused.)
 
 ### Shadow-review harness
 
