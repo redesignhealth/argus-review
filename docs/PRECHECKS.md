@@ -112,6 +112,13 @@ match's `rule_id` against the actual `id:` values in your rule files
 before deleting anything — only rows whose `rule_id` doesn't match any
 current rule file's own `id:` are candidates for cleanup.
 
+**Correction:** an earlier revision of this note called any dotted
+`rule_id` match "safe to delete." That was wrong for the reason above --
+if you already acted on that guidance, re-verify your `precheck_rules`
+table against your rule files' actual `id:` values, since a legitimate
+registry-style rule's row could have been deleted, silently demoting it
+back to `candidate`.
+
 ### Shadow-review harness
 
 Before a candidate rule draft is allowed to fire on any live PR at all,
@@ -154,6 +161,15 @@ spanning many distinct repos will accumulate one full bare mirror per
 distinct repo with no automatic cleanup. Fine for occasional use; worth
 revisiting with explicit cache management if shadow review becomes a
 routine, large-multi-repo workflow.
+
+`tests/test_precheck_shadow_integration.py` exercises this harness for
+real (a real clone, real semgrep) rather than mocking `provisioned_worktree`
+the way `tests/test_precheck_shadow.py` does. It's `pytest.mark.integration`
+plus a dedicated `pytest.mark.needs_real_github_token` marker, and is
+deliberately **not** wired into CI (see `CONTRIBUTING.md`) since it needs a
+real `GITHUB_TOKEN_RO`, not the fixed stub `tests/conftest.py` sets for
+every other test. Run it locally with
+`GITHUB_TOKEN_RO=$(gh auth token) uv run pytest -m integration tests/test_precheck_shadow_integration.py`.
 
 ## Pipeline placement
 

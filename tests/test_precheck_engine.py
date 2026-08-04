@@ -462,23 +462,28 @@ async def test_run_semgrep_sarif_directory_config_uses_dot_and_own_cwd(
 
 
 async def test_run_semgrep_sarif_resolves_relative_worktree_path(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     # No current caller passes a relative worktree_path -- this covers the
     # os.path.isabs/abspath normalization directly, since that branch would
-    # otherwise be entirely untested.
+    # otherwise be entirely untested. Also asserts the warning log fires, so
+    # a future refactor can't silently drop it without failing this test.
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
     monkeypatch.chdir(tmp_path)
     rules_dir = tmp_path / "rules"
     rules_dir.mkdir()
     proc = _mock_subprocess(_sarif_bytes())
 
-    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+        caplog.at_level("WARNING", logger="argus.precheck.engine"),
+    ):
         result = await run_semgrep_sarif("relative/worktree", rules_dir)
 
     assert result == []
     assert mock_exec.await_args is not None
     assert str(tmp_path / "relative/worktree") in mock_exec.await_args.args
+    assert any("relative worktree_path" in record.message for record in caplog.records)
 
 
 async def test_run_semgrep_sarif_returns_none_when_config_dir_missing(

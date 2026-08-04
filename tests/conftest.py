@@ -99,3 +99,26 @@ def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
 
     clear_cache()
     clear_engine_cache()
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Enforce that ``needs_real_github_token`` always implies ``integration``.
+
+    Without this, a future test carrying only ``needs_real_github_token``
+    (no ``integration``) would run in the *default* suite -- `_mock_settings`
+    above would skip stubbing `GITHUB_TOKEN_RO` for it, so it'd see whatever
+    real token happens to be in a developer's shell, contradicting both this
+    fixture's own docstring and CONTRIBUTING.md's "no credentials required"
+    claim. Making the pairing a collection-time error means a missing
+    `integration` marker fails loudly and immediately, rather than only
+    being caught by a reviewer noticing the omission.
+    """
+    for item in items:
+        if item.get_closest_marker("needs_real_github_token") and not item.get_closest_marker(
+            "integration"
+        ):
+            raise pytest.UsageError(
+                f"{item.nodeid}: `needs_real_github_token` must always be paired with "
+                "`integration` -- otherwise this test would run in the default suite "
+                "against a real token from the developer's shell."
+            )

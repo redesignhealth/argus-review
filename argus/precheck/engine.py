@@ -141,21 +141,19 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
-    # Normalizes into correctness rather than trusting every caller to pass
-    # an already-absolute path -- matches this module's fail-open philosophy
-    # of degrading/correcting over raising. Every current caller already
-    # passes an absolute path, so this is a no-op for them; logged (unlike
-    # this function's other silent branches, none of which change the
-    # caller-provided path itself) so a future relative-path caller is
-    # visible rather than only inferable from a correct-but-unexpected scan
-    # target.
+    # Always normalize (not just when relative): os.path.abspath also applies
+    # normpath, collapsing "..", ".", and duplicate slashes even in an
+    # already-absolute input -- an unconditional call preserves that for
+    # every caller, matching the normalization this line replaced. The
+    # isabs check below only decides whether to log, so normalization
+    # behavior for already-absolute-but-unnormalized paths doesn't regress.
     if not os.path.isabs(worktree_path):
         logger.warning(
             "run_semgrep_sarif received a relative worktree_path (%r); "
             "resolving against this process's cwd, not semgrep's",
             worktree_path,
         )
-        worktree_path = os.path.abspath(worktree_path)
+    worktree_path = os.path.abspath(worktree_path)
 
     # Verified empirically: semgrep namespaces each rule's reported ruleId
     # with the config path we hand it -- e.g. a config of "/tmp/x/rules"
