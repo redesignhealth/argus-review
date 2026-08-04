@@ -54,10 +54,11 @@ class ShadowReviewResult:
     can exceed either since one entry can produce multiple hits) let a
     human or the RH-internal triage job compute a per-PR occurrence rate
     before deciding whether the rule is even worth the ongoing async
-    triage loop. ``entries_failed`` is not a rule-precision signal --
-    it's corpus/infra flakiness (bad SHA, transient clone error) and
-    should be re-attempted or excluded from precision math, not counted
-    as "rule found nothing here."
+    triage loop. ``entries_failed`` is not a rule-precision signal -- it's
+    corpus/infra flakiness (bad SHA, transient clone error) or semgrep
+    itself not completing on that entry (timeout, its own execution
+    error) -- and should be re-attempted or excluded from precision math,
+    not counted as "rule found nothing here."
     """
 
     hits: list[ShadowReviewHit] = field(default_factory=list)
@@ -80,17 +81,22 @@ async def run_shadow_review(
 
     Each corpus entry is checked out into its own worktree (reusing the
     exact same provisioning path a live review uses, via
-    ``repo_provision.provisioned_worktree``) and scanned in isolation. A
-    failure on one entry (bad SHA, transient clone error, or semgrep
-    itself failing to run against that entry) is recorded in
-    ``entries_failed`` and skipped rather than aborting the whole run --
-    a corpus of dozens-to-hundreds of historical PRs should tolerate a
-    handful of unreachable entries. Failed entries are never counted
-    toward ``entries_scanned``/``entries_matched``: see
-    ``run_semgrep_sarif``'s docstring for why collapsing "semgrep didn't
-    run" into "ran, found nothing" would corrupt the harness's whole
-    purpose (a malformed candidate rule that fails to execute on every
-    corpus entry must not look like strong zero-occurrence evidence).
+    ``repo_provision.provisioned_worktree``) and scanned in isolation, via
+    two independent, non-overlapping failure paths that both land in
+    ``entries_failed``: the surrounding ``try``/``except`` catches
+    provisioning/corpus-level errors (bad SHA, transient clone error --
+    ``run_semgrep_sarif`` itself never raises), while a separate
+    ``is None`` check right after it catches semgrep-level failures
+    (timeout, its own execution error) signaled by
+    ``run_semgrep_sarif``'s dedicated sentinel return value. Either way
+    the entry is skipped rather than aborting the whole run -- a corpus
+    of dozens-to-hundreds of historical PRs should tolerate a handful of
+    unreachable entries. Failed entries are never counted toward
+    ``entries_scanned``/``entries_matched``: see ``run_semgrep_sarif``'s
+    docstring for why collapsing "semgrep didn't run" into "ran, found
+    nothing" would corrupt the harness's whole purpose (a malformed
+    candidate rule that fails to execute on every corpus entry must not
+    look like strong zero-occurrence evidence).
 
     Raises:
         RuntimeError: If semgrep isn't installed at all -- a single clear

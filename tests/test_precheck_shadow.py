@@ -59,6 +59,32 @@ async def test_missing_rule_path_raises_before_touching_the_corpus(tmp_path) -> 
     mock_provision.assert_not_called()
 
 
+async def test_semgrep_unavailable_raises_even_with_empty_corpus(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Backs the docstring's "checked before any corpus entry is cloned"
+    # claim for the degenerate zero-entry case too, not just the 1-entry
+    # case the other guard tests cover -- the guard must run unconditionally
+    # on entry, not as part of (or skipped by) the corpus loop itself.
+    monkeypatch.setattr(_SEMGREP_AVAILABLE, lambda: False)
+    rule_path = tmp_path / "rule.yml"
+    rule_path.write_text("rules: []\n")
+
+    with patch(_PROVISIONED_WORKTREE) as mock_provision:
+        with pytest.raises(RuntimeError, match="semgrep"):
+            await run_shadow_review(rule_path=rule_path, corpus=[], github_token="t")
+    mock_provision.assert_not_called()
+
+
+async def test_missing_rule_path_raises_even_with_empty_corpus(tmp_path) -> None:
+    missing = tmp_path / "does-not-exist.yml"
+
+    with patch(_PROVISIONED_WORKTREE) as mock_provision:
+        with pytest.raises(FileNotFoundError):
+            await run_shadow_review(rule_path=missing, corpus=[], github_token="t")
+    mock_provision.assert_not_called()
+
+
 async def test_empty_corpus_returns_empty_result(tmp_path) -> None:
     rule_path = tmp_path / "rule.yml"
     rule_path.write_text("rules: []\n")

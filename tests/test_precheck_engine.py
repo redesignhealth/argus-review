@@ -361,14 +361,25 @@ async def test_run_semgrep_sarif_returns_none_on_timeout(
     monkeypatch.setattr("argus.precheck.engine._SEMGREP_TIMEOUT_S", 0.01)
 
     proc = AsyncMock()
+    call_count = {"n": 0}
 
-    async def _never_returns(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
+    async def _communicate(*args: object, **kwargs: object) -> tuple[bytes, bytes]:
         import asyncio
 
-        await asyncio.sleep(10)
+        # Only the FIRST call needs to actually sleep past the patched
+        # timeout -- that's the one asyncio.wait_for wraps, and it needs a
+        # real slow awaitable to genuinely trigger TimeoutError. The
+        # SECOND call is the production code's post-kill drain
+        # (`with contextlib.suppress(Exception): await proc.communicate()`
+        # in engine.py), which isn't bounded by the timeout at all -- an
+        # unconditionally sleeping mock would block this test for the
+        # real 10s on that call too, instead of the intended ~0.01s.
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            await asyncio.sleep(10)
         return (b"", b"")
 
-    proc.communicate.side_effect = _never_returns
+    proc.communicate.side_effect = _communicate
     proc.kill = lambda: None
 
     with patch("asyncio.create_subprocess_exec", return_value=proc):
