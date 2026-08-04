@@ -1314,25 +1314,34 @@ async def _node_precheck_checks(state: ReviewState) -> dict[str, Any]:
     philosophy as ``_node_preflight``'s own except-and-fall-through):
     stored as ``checks_signal`` and consumed by ``run_preflight_check`` as
     one more routing input, never a hard gate (see that function's
-    docstring for why). Retries once on a transient failure before falling
-    back to "unknown" — cheap insurance since this is a single GET, and the
-    fallback (no signal either way) is a worse routing input than the real
-    answer would have been for a blip that a second attempt clears.
+    docstring for why).
 
-    Runs in parallel with ``_node_precheck_rules`` (both edge from
-    ``fetch_diff``, fan in at ``precheck_join``): this is an independent
-    GitHub API read with no dependency on the worktree the other node
-    scans, so sequencing them in one node body would only add latency.
+    The retry loop is a manual loop, not LangGraph's ``RetryPolicy``, on
+    purpose: ``RetryPolicy`` retries a node N times and then lets the
+    exception propagate, which is exactly what this node must never do
+    (retry-then-crash still crashes). A manual loop is the only way to get
+    "retry, then fall back to a safe default" in one node.
+
+    What actually benefits from the retry: ``GitHubClient(...)``
+    construction (an invalid/missing token raises immediately, before any
+    network call) and any raw transport-level exception (timeout,
+    connection reset) that ``get_checks_signal`` doesn't already handle —
+    it only catches ``GitHubAPIError`` (a non-2xx HTTP response) internally
+    and returns "unknown" for that case without raising, by design (see its
+    own docstring). A transient 5xx there already degrades to "unknown"
+    immediately without retrying, since retrying an HTTP-level failure
+    response is a smaller win than retrying a dropped connection — worth
+    revisiting only if 5xx responses turn out to be common in practice.
     """
     from argus.github_client import GitHubClient
 
     req = ReviewRequest.model_validate(state["request"])
     head_sha = state["head_sha"]
-    settings = get_settings()
-    gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
 
     for attempt in range(_CHECKS_SIGNAL_ATTEMPTS):
         try:
+            settings = get_settings()
+            gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
             checks_signal = await asyncio.to_thread(gh.get_checks_signal, req.repo, head_sha)
             return {"checks_signal": checks_signal}
         except Exception:  # noqa: BLE001 — a Checks API hiccup is not a review failure
@@ -1367,36 +1376,40 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     if worktree_path is None:
         return {}
 
+    # Everything below (not just run_precheck) is inside the fail-open
+    # boundary: ReviewRequest.model_validate and log_candidate_firings can
+    # both raise too, and this node must never crash a PR review over any
+    # of it.
     try:
         result = await run_precheck(worktree_path)
+
+        if result.candidate_findings:
+            req = ReviewRequest.model_validate(state["request"])
+            await log_candidate_firings(
+                repo=req.repo,
+                pr_number=req.pr_number,
+                head_sha=state["head_sha"],
+                firings=[
+                    CandidateFiring(rule_id=f.rule_id, finding=f.as_storage_dict())
+                    for f in result.candidate_findings
+                ],
+            )
+
+        update: dict[str, Any] = {}
+        if result.candidate_findings:
+            update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
+        if result.verified_findings:
+            logger.info(
+                "Precheck fast-fail: %d verified-rule hit(s) on %s@%s",
+                len(result.verified_findings),
+                state["request"].get("repo"),
+                state["head_sha"][:12],
+            )
+            update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
+        return update
     except Exception:  # noqa: BLE001 — precheck engine failure is not a review failure
         logger.warning("Deterministic precheck failed — proceeding without it", exc_info=True)
         return {}
-
-    if result.candidate_findings:
-        req = ReviewRequest.model_validate(state["request"])
-        await log_candidate_firings(
-            repo=req.repo,
-            pr_number=req.pr_number,
-            head_sha=state["head_sha"],
-            firings=[
-                CandidateFiring(rule_id=f.rule_id, finding=f.as_storage_dict())
-                for f in result.candidate_findings
-            ],
-        )
-
-    update: dict[str, Any] = {}
-    if result.candidate_findings:
-        update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
-    if result.verified_findings:
-        logger.info(
-            "Precheck fast-fail: %d verified-rule hit(s) on %s@%s",
-            len(result.verified_findings),
-            state["request"].get("repo"),
-            state["head_sha"][:12],
-        )
-        update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
-    return update
 
 
 def _edge_precheck_decision(state: ReviewState) -> str:

@@ -70,5 +70,10 @@ CREATE INDEX IF NOT EXISTS idx_precheck_firings_unjudged
 CREATE INDEX IF NOT EXISTS idx_precheck_rules_status
     ON review_service.precheck_rules (status);
 
+-- Both tables get UPDATE even though nothing in this repo issues one yet:
+-- precheck_rules' status/counters and precheck_candidate_firings' judgment/
+-- judged_at are both written by the future out-of-band triage job running
+-- as this same role, not by anything here -- granted preemptively so that
+-- job doesn't hit permission-denied on day one.
 GRANT SELECT, INSERT, UPDATE ON review_service.precheck_rules TO service_role;
-GRANT SELECT, INSERT ON review_service.precheck_candidate_firings TO service_role;
+GRANT SELECT, INSERT, UPDATE ON review_service.precheck_candidate_firings TO service_role;

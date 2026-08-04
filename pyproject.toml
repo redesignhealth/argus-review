@@ -78,7 +78,13 @@ dev = [
 # see argus/precheck/__init__.py. Kept separate from `dev` because it's a
 # runtime dependency for anyone who wants prechecks, not a test-only tool.
 prechecks = [
-    "semgrep>=1.90.0",
+    # Upper-bounded: argus.precheck.engine depends on empirically verified
+    # semgrep behavior (exit code 0 with or without findings, non-zero only
+    # on semgrep's own execution errors; SARIF artifactLocation.uri echoing
+    # the scan-root path form verbatim) that a future major release isn't
+    # contractually obligated to preserve. Bump deliberately, re-verifying
+    # both behaviors, rather than picking it up silently.
+    "semgrep>=1.90.0,<2.0.0",
 ]
 # semgrep pins mcp==1.23.3 exactly, so uv's single flat resolution (which
 # must satisfy every extra combination at once) locks mcp -- and its own

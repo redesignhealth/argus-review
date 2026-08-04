@@ -103,3 +103,29 @@ def test_as_storage_dict_shape() -> None:
         "file": "a.py",
         "line": 5,
     }
+
+
+def test_message_longer_than_max_is_truncated() -> None:
+    from argus.precheck.sarif import _MAX_MESSAGE_LENGTH
+
+    long_message = "x" * (_MAX_MESSAGE_LENGTH + 100)
+    doc = _sarif_doc()
+    doc_dict = json.loads(doc)
+    doc_dict["runs"][0]["results"][0]["message"]["text"] = long_message
+    results = parse_semgrep_sarif(json.dumps(doc_dict))
+
+    assert len(results) == 1
+    assert len(results[0].message) == _MAX_MESSAGE_LENGTH + len("… (truncated)")
+    assert results[0].message.endswith("… (truncated)")
+
+
+def test_message_at_or_under_max_is_not_truncated() -> None:
+    from argus.precheck.sarif import _MAX_MESSAGE_LENGTH
+
+    exact_message = "x" * _MAX_MESSAGE_LENGTH
+    doc = _sarif_doc()
+    doc_dict = json.loads(doc)
+    doc_dict["runs"][0]["results"][0]["message"]["text"] = exact_message
+    results = parse_semgrep_sarif(json.dumps(doc_dict))
+
+    assert results[0].message == exact_message

@@ -9,6 +9,7 @@ import pytest
 
 from argus.precheck.engine import (
     PrecheckResult,
+    _has_rule_files,
     resolve_rules_dir,
     run_precheck,
     semgrep_available,
@@ -178,3 +179,94 @@ async def test_run_precheck_timeout_returns_empty(
         result = await run_precheck("/tmp/worktree")
 
     assert result == PrecheckResult()
+
+
+def test_has_rule_files_finds_nested_rules(tmp_path) -> None:
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / "subdir" / "nested.yml").write_text("rules: []\n")
+    assert _has_rule_files(tmp_path) is True
+
+
+def test_has_rule_files_false_for_empty_dir(tmp_path) -> None:
+    assert _has_rule_files(tmp_path) is False
+
+
+def _sarif_bytes_with_file(rule_id: str, file: str) -> bytes:
+    doc = {
+        "runs": [
+            {
+                "results": [
+                    {
+                        "ruleId": rule_id,
+                        "level": "error",
+                        "message": {"text": f"hit for {rule_id}"},
+                        "locations": [
+                            {
+                                "physicalLocation": {
+                                    "artifactLocation": {"uri": file},
+                                    "region": {"startLine": 1},
+                                }
+                            }
+                        ],
+                    }
+                ]
+            }
+        ]
+    }
+    return json.dumps(doc).encode()
+
+
+async def test_run_precheck_strips_absolute_worktree_prefix(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    worktree = "/tmp/some-worktree"
+    proc = _mock_subprocess(_sarif_bytes_with_file("r1", f"{worktree}/src/app.py"))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck(worktree)
+
+    assert result.candidate_findings[0].file == "src/app.py"
+
+
+async def test_run_precheck_leaves_non_worktree_paths_untouched(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    proc = _mock_subprocess(_sarif_bytes_with_file("r1", "src/app.py"))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/some-worktree")
+
+    assert result.candidate_findings[0].file == "src/app.py"
+
+
+async def test_run_precheck_caps_result_count(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from argus.precheck.engine import _MAX_RESULTS
+
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    many_rule_ids = [f"r{i}" for i in range(_MAX_RESULTS + 10)]
+    proc = _mock_subprocess(_sarif_bytes(*many_rule_ids))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert len(result.candidate_findings) == _MAX_RESULTS

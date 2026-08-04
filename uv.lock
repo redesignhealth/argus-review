@@ -191,7 +191,7 @@ requires-dist = [
     { name = "pytest-httpx", marker = "extra == 'dev'", specifier = ">=0.30.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "semgrep", marker = "extra == 'prechecks'", specifier = ">=1.90.0" },
+    { name = "semgrep", marker = "extra == 'prechecks'", specifier = ">=1.90.0,<2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.0" },
 ]
 provides-extras = ["dev", "prechecks"]

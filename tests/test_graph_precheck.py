@@ -148,6 +148,17 @@ async def test_precheck_checks_succeeds_on_second_attempt() -> None:
     assert result == {"checks_signal": "passing"}
 
 
+async def test_precheck_checks_client_construction_failure_falls_back_to_unknown() -> None:
+    # Regression test: GitHubClient(...) raises ValueError on a missing/
+    # invalid token *before* any network call, i.e. before get_checks_signal
+    # is ever reached. This must still fall back to "unknown", not crash the
+    # node -- round 2 of this PR's own review caught exactly this bug
+    # (construction had been moved outside the retry/fail-open boundary).
+    with patch(_GH_CLIENT_CLASS, side_effect=ValueError("no token")):
+        result = await _node_precheck_checks(_make_state())
+    assert result == {"checks_signal": "unknown"}
+
+
 # ---------------------------------------------------------------------------
 # _node_precheck_rules
 # ---------------------------------------------------------------------------
@@ -272,3 +283,35 @@ async def test_write_review_no_precheck_findings_leaves_findings_untouched() -> 
 
     assert mock_write.await_args is not None
     assert mock_write.await_args.args[0] == []
+
+
+# ---------------------------------------------------------------------------
+# Structural: the compiled StateGraph actually has the fan-out/fan-in
+# topology this file's tests otherwise only exercise node-function-by-
+# node-function. LangGraph can silently mis-wire an edge (wrong source,
+# unreachable node) with no test noticing until runtime.
+# ---------------------------------------------------------------------------
+
+
+def test_graph_wires_precheck_fan_out_and_fan_in() -> None:
+    from argus.graph import _build_review_graph
+
+    compiled = _build_review_graph().compile()
+    graph = compiled.get_graph()
+    nodes = set(graph.nodes.keys())
+    edges = {(e.source, e.target) for e in graph.edges}
+
+    for name in ("precheck_checks", "precheck_rules", "precheck_join", "precheck_fail"):
+        assert name in nodes
+
+    # fetch_diff fans out to both precheck nodes ...
+    assert ("fetch_diff", "precheck_checks") in edges
+    assert ("fetch_diff", "precheck_rules") in edges
+    # ... which fan back in at precheck_join ...
+    assert ("precheck_checks", "precheck_join") in edges
+    assert ("precheck_rules", "precheck_join") in edges
+    # ... which conditionally routes to the fast-fail terminal node or
+    # continues into the normal round-1+ path.
+    assert ("precheck_join", "precheck_fail") in edges
+    assert ("precheck_join", "early_verifier") in edges
+    assert ("precheck_fail", "__end__") in edges

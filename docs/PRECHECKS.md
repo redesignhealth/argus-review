@@ -1,10 +1,12 @@
 # Deterministic prechecks
 
 A non-LLM gate that runs before Argus's LLM pipeline spends any tokens.
-Two distinct things, both optional and both fail-open (a precheck problem
-never blocks or slows a review):
+Two distinct things, both fail-open (a precheck problem never blocks or
+slows a review) but different in how "optional" applies to each:
 
-1. **CI status as a routing signal.** `argus.graph.run_preflight_check`
+1. **CI status as a routing signal.** Always on, no extra to install —
+   this is a signal that can be ignored, but the read itself isn't gated
+   behind anything. `argus.graph.run_preflight_check`
    reads the target repo's own GitHub Checks status for the PR's head
    commit and passes it to the lite-vs-full routing decision as one more
    input — never a hard gate. Argus deliberately does **not** re-run the

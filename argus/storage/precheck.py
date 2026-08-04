@@ -90,6 +90,14 @@ async def log_candidate_firings(
     somewhere to point -- deduped across the batch via a single ``unnest``
     into the ``ON CONFLICT DO NOTHING`` upsert, same reasoning as the firings
     insert itself.
+
+    Trade-off, deliberate: batching removes the per-firing fault isolation
+    a loop-of-inserts would have had -- one malformed row (e.g. a `finding`
+    dict that fails the ``finding::jsonb`` cast) now drops the whole
+    round's candidate firings in the same all-or-nothing transaction,
+    rather than just that one row. Consistent with this module's fail-open
+    design (a firing-logging problem must never surface to the PR review),
+    just at coarser granularity than before.
     """
     if not firings or not get_settings().db_url:
         return
@@ -97,6 +105,22 @@ async def log_candidate_firings(
         session_factory = get_async_session_factory()
         async with session_factory() as session:
             rule_ids = [f.rule_id for f in firings]
+            repos = [repo] * len(firings)
+            pr_numbers = [pr_number] * len(firings)
+            head_shas = [head_sha] * len(firings)
+            findings_json = [json.dumps(f.finding) for f in firings]
+            # unnest() zips positionally and pads short arrays with NULL on
+            # a length mismatch rather than erroring -- a silent, hard-to-
+            # notice data-corruption mode if this construction is ever
+            # edited to build these five lists independently instead of
+            # all from the same `firings`/`len(firings)` source.
+            assert (
+                len(
+                    {len(rule_ids), len(repos), len(pr_numbers), len(head_shas), len(findings_json)}
+                )
+                == 1
+            )
+
             ensure_stmt = text(_ENSURE_RULE_ROWS_SQL).bindparams(
                 bindparam("rule_ids", type_=ARRAY(TEXT))
             )
@@ -113,10 +137,10 @@ async def log_candidate_firings(
                 insert_stmt,
                 {
                     "rule_ids": rule_ids,
-                    "repos": [repo] * len(firings),
-                    "pr_numbers": [pr_number] * len(firings),
-                    "head_shas": [head_sha] * len(firings),
-                    "findings": [json.dumps(f.finding) for f in firings],
+                    "repos": repos,
+                    "pr_numbers": pr_numbers,
+                    "head_shas": head_shas,
+                    "findings": findings_json,
                 },
             )
             await session.commit()

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field, replace
 from importlib import resources
@@ -25,6 +26,11 @@ from argus.storage.precheck import select_rule_statuses
 logger = logging.getLogger(__name__)
 
 _SEMGREP_TIMEOUT_S = 120
+
+# Caps the aggregate size of what reaches the LLM writer context or a
+# fast-fail PR comment -- per-message truncation (sarif._MAX_MESSAGE_LENGTH)
+# bounds one finding, this bounds the count.
+_MAX_RESULTS = 50
 
 
 @dataclass
@@ -99,8 +105,8 @@ def semgrep_available() -> bool:
 async def run_precheck(worktree_path: str) -> PrecheckResult:
     """Run custom rules against ``worktree_path``; classify hits by DB status.
 
-    The caller (``graph._node_precheck``) owns logging candidate firings
-    for later triage and short-circuiting the pipeline on verified
+    The caller (``graph._node_precheck_rules``) owns logging candidate
+    firings for later triage and short-circuiting the pipeline on verified
     findings — this function only runs semgrep and classifies the results.
     """
     if not semgrep_available():
@@ -151,19 +157,42 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     if not results:
         return PrecheckResult()
 
+    # Per-message truncation (see sarif._MAX_MESSAGE_LENGTH) bounds one
+    # finding's size but not how many findings reach the LLM writer context
+    # or a fast-fail PR comment. A rule matching a repeated pattern many
+    # times over could otherwise still produce an oversized aggregate
+    # payload; cap the count too.
+    if len(results) > _MAX_RESULTS:
+        logger.warning(
+            "semgrep precheck produced %d results, capping to %d", len(results), _MAX_RESULTS
+        )
+        results = results[:_MAX_RESULTS]
+
     # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
     # with -- since we pass the absolute worktree_path as the scan target,
     # that's an absolute temp path (verified empirically), which would
     # otherwise leak into the fast-fail PR comment and writer context.
     # Strip it down to a path relative to the worktree, matching how every
-    # other finding in this pipeline reports file paths.
-    prefix = worktree_path.rstrip("/") + "/"
-    results = [
-        r
-        if r.file is None or not r.file.startswith(prefix)
-        else replace(r, file=r.file[len(prefix) :])
-        for r in results
-    ]
+    # other finding in this pipeline reports file paths. Two candidate
+    # prefixes, not one: os.path.realpath's resolved form in addition to
+    # the literal worktree_path, in case semgrep (or the OS, e.g. macOS's
+    # /var -> /private/var symlink) reports a canonicalized path for
+    # individual matched files even when the scan-root argument itself
+    # wasn't resolved.
+    prefixes = {
+        worktree_path.rstrip("/") + "/",
+        os.path.realpath(worktree_path).rstrip("/") + "/",
+    }
+
+    def _strip(r: SarifResult) -> SarifResult:
+        if r.file is None:
+            return r
+        for prefix in prefixes:
+            if r.file.startswith(prefix):
+                return replace(r, file=r.file[len(prefix) :])
+        return r
+
+    results = [_strip(r) for r in results]
 
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)
