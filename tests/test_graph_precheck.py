@@ -179,6 +179,7 @@ async def test_precheck_rules_candidate_findings_attached_and_logged() -> None:
     assert "precheck_fast_fail" not in result
     mock_log.assert_awaited_once()
     # Batched: one call carrying the whole list, not one call per finding.
+    assert mock_log.await_args is not None
     assert len(mock_log.await_args.kwargs["firings"]) == 1
 
 
@@ -225,7 +226,11 @@ async def test_precheck_rules_engine_exception_is_swallowed() -> None:
 
 
 async def test_write_review_appends_precheck_findings_as_extra_context() -> None:
-    plan = {"system_groups": [], "cross_cutting_concerns": [], "file_manifest": []}
+    plan: dict[str, list[object]] = {
+        "system_groups": [],
+        "cross_cutting_concerns": [],
+        "file_manifest": [],
+    }
     state = _make_state(
         plan=plan,
         findings=[],
@@ -243,6 +248,7 @@ async def test_write_review_appends_precheck_findings_as_extra_context() -> None
     with patch("argus.graph.write_review", new=AsyncMock(return_value=fake_response)) as mock_write:
         await _node_write_review(state)
 
+    assert mock_write.await_args is not None
     findings_arg = mock_write.await_args.args[0]
     assert len(findings_arg) == 1
     assert findings_arg[0].system_group == "deterministic-precheck"
@@ -250,7 +256,11 @@ async def test_write_review_appends_precheck_findings_as_extra_context() -> None
 
 
 async def test_write_review_no_precheck_findings_leaves_findings_untouched() -> None:
-    plan = {"system_groups": [], "cross_cutting_concerns": [], "file_manifest": []}
+    plan: dict[str, list[object]] = {
+        "system_groups": [],
+        "cross_cutting_concerns": [],
+        "file_manifest": [],
+    }
     state = _make_state(plan=plan, findings=[])
 
     fake_response = ReviewResponse(
@@ -260,4 +270,5 @@ async def test_write_review_no_precheck_findings_leaves_findings_untouched() -> 
     with patch("argus.graph.write_review", new=AsyncMock(return_value=fake_response)) as mock_write:
         await _node_write_review(state)
 
+    assert mock_write.await_args is not None
     assert mock_write.await_args.args[0] == []
