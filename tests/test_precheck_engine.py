@@ -270,3 +270,68 @@ async def test_run_precheck_caps_result_count(tmp_path, monkeypatch: pytest.Monk
         result = await run_precheck("/tmp/worktree")
 
     assert len(result.candidate_findings) == _MAX_RESULTS
+
+
+async def test_run_precheck_verified_finding_survives_the_cap(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Regression test: an earlier version capped the raw SARIF results list
+    # *before* classifying by rule status, so a verified (fast-fail) hit
+    # landing past the cap boundary in SARIF's scan-order-dependent results
+    # list would be silently dropped -- letting a PR that should have been
+    # blocked continue through the full LLM pipeline instead. The cap must
+    # only ever apply to candidate_findings.
+    from argus.precheck.engine import _MAX_RESULTS
+
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    # One verified rule ID placed LAST, after far more than _MAX_RESULTS
+    # candidate hits -- exactly the position a naive pre-classification cap
+    # would drop.
+    many_candidate_ids = [f"candidate-{i}" for i in range(_MAX_RESULTS + 10)]
+    all_rule_ids = [*many_candidate_ids, "verified-rule"]
+    proc = _mock_subprocess(_sarif_bytes(*all_rule_ids))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch(
+            "argus.precheck.engine.select_rule_statuses",
+            new=AsyncMock(return_value={"verified-rule": "verified"}),
+        ),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert [f.rule_id for f in result.verified_findings] == ["verified-rule"]
+    assert len(result.candidate_findings) == _MAX_RESULTS
+
+
+async def test_run_precheck_strips_realpath_resolved_prefix(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Distinct from test_run_precheck_strips_absolute_worktree_prefix: this
+    # exercises the os.path.realpath() branch specifically, simulating a
+    # symlink-resolved scan (e.g. macOS's /var -> /private/var) where the
+    # SARIF file path matches the *resolved* form, not the literal
+    # worktree_path passed to semgrep.
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    worktree = "/var/folders/worktree"
+    resolved = "/private/var/folders/worktree"
+    monkeypatch.setattr(
+        "argus.precheck.engine.os.path.realpath",
+        lambda p: resolved if p == worktree else p,
+    )
+
+    proc = _mock_subprocess(_sarif_bytes_with_file("r1", f"{resolved}/src/app.py"))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck(worktree)
+
+    assert result.candidate_findings[0].file == "src/app.py"

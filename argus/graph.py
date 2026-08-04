@@ -1322,9 +1322,13 @@ async def _node_precheck_checks(state: ReviewState) -> dict[str, Any]:
     (retry-then-crash still crashes). A manual loop is the only way to get
     "retry, then fall back to a safe default" in one node.
 
-    What actually benefits from the retry: ``GitHubClient(...)``
-    construction (an invalid/missing token raises immediately, before any
-    network call) and any raw transport-level exception (timeout,
+    ``GitHubClient(...)`` construction happens inside the loop for
+    fail-open *coverage*, not because retrying can fix an invalid/missing
+    token: ``get_settings()`` is process-cached, so a genuinely missing
+    ``GITHUB_TOKEN_RO`` fails identically on every attempt — the point is
+    that construction is inside the same try the retry-then-fallback logic
+    already needs, not that a second attempt recovers it. What a retry
+    actually helps with is a raw transport-level exception (timeout,
     connection reset) that ``get_checks_signal`` doesn't already handle —
     it only catches ``GitHubAPIError`` (a non-2xx HTTP response) internally
     and returns "unknown" for that case without raising, by design (see its
@@ -1364,7 +1368,14 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     ``precheck_findings``, attached later as non-blocking writer context by
     ``_node_write_review``. Every candidate hit is also logged, batched in
     one write, for later out-of-band triage (``log_candidate_firings``) —
-    best-effort, never raises into this node.
+    best-effort, in a narrower try than the gate decision itself (see
+    below), never raises into this node.
+
+    Only ``run_precheck`` is inside the fail-open try: a genuinely
+    unexpected error reading ``state["request"]``/``state["head_sha"]``
+    here is a graph-wiring bug, not a precheck-engine hiccup, and should
+    propagate loudly rather than silently discard a result — same
+    boundary ``_node_precheck_checks`` draws for its own state access.
 
     Runs in parallel with ``_node_precheck_checks``: see that node's
     docstring for why they're split rather than sequenced in one body.
@@ -1376,40 +1387,49 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     if worktree_path is None:
         return {}
 
-    # Everything below (not just run_precheck) is inside the fail-open
-    # boundary: ReviewRequest.model_validate and log_candidate_firings can
-    # both raise too, and this node must never crash a PR review over any
-    # of it.
+    head_sha = state["head_sha"]
+
     try:
         result = await run_precheck(worktree_path)
+    except Exception:  # noqa: BLE001 — precheck engine failure is not a review failure
+        logger.warning("Deterministic precheck failed — proceeding without it", exc_info=True)
+        return {}
 
-        if result.candidate_findings:
+    # Built immediately from `result`, before the candidate-logging call
+    # below, which is best-effort telemetry with its own narrower
+    # try/except: a logging failure there must never discard an already-
+    # computed gate decision (verified-rule fast-fail included) the way an
+    # earlier version of this node did by sharing one wide try block.
+    update: dict[str, Any] = {}
+    if result.candidate_findings:
+        update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
+    if result.verified_findings:
+        update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
+
+    if result.candidate_findings:
+        try:
             req = ReviewRequest.model_validate(state["request"])
             await log_candidate_firings(
                 repo=req.repo,
                 pr_number=req.pr_number,
-                head_sha=state["head_sha"],
+                head_sha=head_sha,
                 firings=[
                     CandidateFiring(rule_id=f.rule_id, finding=f.as_storage_dict())
                     for f in result.candidate_findings
                 ],
             )
+        except Exception:  # noqa: BLE001 — logging failure must not affect the gate decision
+            logger.warning("Failed to log candidate-rule firings", exc_info=True)
 
-        update: dict[str, Any] = {}
-        if result.candidate_findings:
-            update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
-        if result.verified_findings:
-            logger.info(
-                "Precheck fast-fail: %d verified-rule hit(s) on %s@%s",
-                len(result.verified_findings),
-                state["request"].get("repo"),
-                state["head_sha"][:12],
-            )
-            update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
-        return update
-    except Exception:  # noqa: BLE001 — precheck engine failure is not a review failure
-        logger.warning("Deterministic precheck failed — proceeding without it", exc_info=True)
-        return {}
+    if result.verified_findings:
+        logger.info(
+            "Precheck fast-fail: %d verified-rule hit(s) on %s@%s",
+            len(result.verified_findings),
+            state["request"].get("repo"),
+            head_sha[:12],
+        )
+
+    return update
 
 
 def _edge_precheck_decision(state: ReviewState) -> str:

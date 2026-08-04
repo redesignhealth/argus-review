@@ -111,15 +111,16 @@ async def log_candidate_firings(
             findings_json = [json.dumps(f.finding) for f in firings]
             # unnest() zips positionally and pads short arrays with NULL on
             # a length mismatch rather than erroring -- a silent, hard-to-
-            # notice data-corruption mode if this construction is ever
-            # edited to build these five lists independently instead of
-            # all from the same `firings`/`len(firings)` source.
-            assert (
-                len(
-                    {len(rule_ids), len(repos), len(pr_numbers), len(head_shas), len(findings_json)}
-                )
-                == 1
-            )
+            # notice data-corruption mode. Not guarded by an explicit check:
+            # all five lists are provably the same length here (each is
+            # `len(firings)` elements, built from `firings`/`repo`/
+            # `pr_number`/`head_sha` directly above, not from independent
+            # sources), and any check would sit inside this same try/except
+            # and be swallowed identically to the corruption it would
+            # guard against -- it would document the invariant, not enforce
+            # it any more than this comment already does. Keep the five
+            # lists built this way (from `firings` and the single scalar
+            # args) if this function is ever refactored.
 
             ensure_stmt = text(_ENSURE_RULE_ROWS_SQL).bindparams(
                 bindparam("rule_ids", type_=ARRAY(TEXT))

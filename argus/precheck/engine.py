@@ -157,17 +157,6 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     if not results:
         return PrecheckResult()
 
-    # Per-message truncation (see sarif._MAX_MESSAGE_LENGTH) bounds one
-    # finding's size but not how many findings reach the LLM writer context
-    # or a fast-fail PR comment. A rule matching a repeated pattern many
-    # times over could otherwise still produce an oversized aggregate
-    # payload; cap the count too.
-    if len(results) > _MAX_RESULTS:
-        logger.warning(
-            "semgrep precheck produced %d results, capping to %d", len(results), _MAX_RESULTS
-        )
-        results = results[:_MAX_RESULTS]
-
     # semgrep's SARIF `artifactLocation.uri` is whatever path form we scan
     # with -- since we pass the absolute worktree_path as the scan target,
     # that's an absolute temp path (verified empirically), which would
@@ -179,10 +168,15 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     # /var -> /private/var symlink) reports a canonicalized path for
     # individual matched files even when the scan-root argument itself
     # wasn't resolved.
-    prefixes = {
-        worktree_path.rstrip("/") + "/",
-        os.path.realpath(worktree_path).rstrip("/") + "/",
-    }
+    # Longest-first: not just deduped, but ordered, so a prefix that happens
+    # to be a strict prefix of the other (not the case today, but not an
+    # invariant this code should silently depend on) always matches its
+    # fullest form first rather than whichever the set happened to iterate.
+    prefixes = sorted(
+        {worktree_path.rstrip("/") + "/", os.path.realpath(worktree_path).rstrip("/") + "/"},
+        key=len,
+        reverse=True,
+    )
 
     def _strip(r: SarifResult) -> SarifResult:
         if r.file is None:
@@ -197,6 +191,12 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)
 
+    # Classify BEFORE capping: a verified hit must never be subject to the
+    # aggregate-size cap below, whatever position it happens to land in
+    # SARIF's scan-order-dependent results list. An earlier version capped
+    # the raw `results` list first, which could silently drop a verified
+    # (fast-fail) finding on a PR with many total hits -- exactly the
+    # dropped-BLOCKING-finding bug this ordering exists to prevent.
     candidate: list[SarifResult] = []
     verified: list[SarifResult] = []
     for r in results:
@@ -204,5 +204,18 @@ async def run_precheck(worktree_path: str) -> PrecheckResult:
         if status == "suspended":
             continue
         (verified if status == "verified" else candidate).append(r)
+
+    # Per-message truncation (see sarif._MAX_MESSAGE_LENGTH) bounds one
+    # finding's size but not how many reach the LLM writer context. Only
+    # candidate findings are capped -- that's the list a size cap actually
+    # protects (writer-context length); verified findings gate a PR
+    # regardless of how many there are.
+    if len(candidate) > _MAX_RESULTS:
+        logger.warning(
+            "semgrep precheck produced %d candidate results, capping to %d",
+            len(candidate),
+            _MAX_RESULTS,
+        )
+        candidate = candidate[:_MAX_RESULTS]
 
     return PrecheckResult(candidate_findings=candidate, verified_findings=verified)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 
 from argus.graph import (
     _edge_precheck_decision,
@@ -216,6 +217,40 @@ async def test_precheck_rules_verified_findings_set_fast_fail() -> None:
     mock_log.assert_not_awaited()
 
 
+async def test_precheck_rules_fast_fail_survives_candidate_logging_failure() -> None:
+    # Regression test: an earlier version computed precheck_fast_fail only
+    # after candidate-firing logging, inside the same try block -- a
+    # log_candidate_firings failure there discarded an already-computed
+    # verified-rule gate decision instead of just failing to log telemetry.
+    # A logging failure must never suppress a gate decision.
+    from argus.precheck.engine import PrecheckResult
+    from argus.precheck.sarif import SarifResult
+
+    verified_hit = SarifResult(rule_id="r2", level="error", message="m", file="b.py", line=2)
+    candidate_hit = SarifResult(rule_id="r1", level="warning", message="m", file="a.py", line=1)
+
+    with (
+        patch(
+            "argus.precheck.engine.run_precheck",
+            new=AsyncMock(
+                return_value=PrecheckResult(
+                    candidate_findings=[candidate_hit], verified_findings=[verified_hit]
+                )
+            ),
+        ),
+        patch(
+            "argus.storage.precheck.log_candidate_firings",
+            new=AsyncMock(side_effect=RuntimeError("db boom")),
+        ),
+    ):
+        result = await _node_precheck_rules(
+            _make_state(), {"configurable": {"worktree_path": "/tmp/wt"}}
+        )
+
+    assert result["precheck_fast_fail"] == [verified_hit.as_storage_dict()]
+    assert result["precheck_findings"] == [candidate_hit.as_finding_dict()]
+
+
 async def test_precheck_rules_engine_exception_is_swallowed() -> None:
     with patch(
         "argus.precheck.engine.run_precheck",
@@ -226,6 +261,17 @@ async def test_precheck_rules_engine_exception_is_swallowed() -> None:
         )
 
     assert result == {}
+
+
+async def test_precheck_rules_malformed_state_propagates_not_swallowed() -> None:
+    # A missing state["head_sha"] is a graph-wiring bug, not a precheck-
+    # engine hiccup -- only run_precheck's own try/except is fail-open;
+    # state access happens outside it and must still raise.
+    state = _make_state()
+    del state["head_sha"]
+
+    with pytest.raises(KeyError):
+        await _node_precheck_rules(state, {"configurable": {"worktree_path": "/tmp/wt"}})
 
 
 # ---------------------------------------------------------------------------
