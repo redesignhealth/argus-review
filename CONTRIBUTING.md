@@ -37,8 +37,17 @@ uv run pytest -m integration tests/test_precheck_engine_integration.py
                             # `prechecks` extra (already in `--all-extras`)
 ```
 
-All five must pass before a PR is mergeable; CI runs the same commands (see
-`.github/workflows/ci.yml`) on Ubuntu and macOS.
+All five must pass before a PR is mergeable. CI doesn't run identical jobs on
+both platforms, though: `uv run pytest` and the `semgrep`-based integration
+test run on both Ubuntu and macOS (the `test` job's matrix), but
+`ruff check`, `ruff format --check`, and `mypy` run only once, in a
+separate Ubuntu-only `lint` job — see `.github/workflows/ci.yml`. The
+`test` job also runs `uv run semgrep --version` as an explicit guard before
+the integration test step, so a missing `semgrep` binary fails loudly in CI
+rather than the integration test's own `pytest.skip()` silently passing
+green with nothing actually exercised; locally, a bare `uv run semgrep
+--version` is worth running first if you want the same loud-failure parity
+instead of a silent skip.
 
 `tests/test_precheck_shadow_integration.py` is a separate, developer-run-only
 integration tier, deliberately **not** wired into CI: it needs a real
@@ -46,8 +55,15 @@ integration tier, deliberately **not** wired into CI: it needs a real
 other test) to actually clone a public GitHub repo. Run it locally with:
 
 ```bash
-GITHUB_TOKEN_RO=$(gh auth token) uv run pytest -m integration tests/test_precheck_shadow_integration.py
+export GITHUB_TOKEN_RO=$(gh auth token)
+uv run pytest -m integration tests/test_precheck_shadow_integration.py
 ```
+
+(`export ... ` on its own line, not inline before the command — an inline
+`GITHUB_TOKEN_RO=$(gh auth token) uv run pytest ...` form puts the token
+value in your shell's command history and process table. Low severity here
+since the token is short-lived and read-only in intent, but the exported
+form avoids it for free.)
 
 ### Type safety
 

@@ -104,20 +104,34 @@ such rows with:
 SELECT rule_id FROM review_service.precheck_rules WHERE rule_id LIKE '%.%';
 ```
 
-**This is a starting point for manual inspection, not a safe-to-delete
-filter on its own:** semgrep registry-style rules commonly use dotted ids
-by convention (e.g. `python.lang.security.audit.something`), so a match
-here isn't automatically a namespaced-by-the-bug id. Cross-reference each
-match's `rule_id` against the actual `id:` values in your rule files
-before deleting anything — only rows whose `rule_id` doesn't match any
-current rule file's own `id:` are candidates for cleanup.
+**This is a starting point for manual inspection, not a to-do list:**
+semgrep registry-style rules commonly use dotted ids by convention (e.g.
+`python.lang.security.audit.something`), so a match here isn't
+automatically a namespaced-by-the-bug id -- cross-reference each match's
+`rule_id` against the actual `id:` values in your rule files first.
+
+Even once you've identified a genuinely orphaned row, **deleting it is
+not actually possible as granted today, and this doc previously said
+otherwise incorrectly:** `service_role` is granted only `SELECT, INSERT,
+UPDATE` on both tables (see `schema/017_add_precheck_rules.sql`'s GRANT
+statements), not `DELETE`, and `precheck_candidate_firings.rule_id`'s
+foreign key has no `ON DELETE` clause -- every orphaned row has at least
+one dependent firing row (`log_candidate_firings` guarantees this), so a
+delete would fail on the FK even with the right grant. Leaving an
+orphaned row in place is harmless -- it's an inert `candidate`-status row
+no rule file's current `id:` ever matches again, so nothing fires under
+it -- and is the recommended outcome rather than a cleanup task: don't
+grant `DELETE` or attempt to manually delete dependent
+`precheck_candidate_firings` rows first just to clear these out.
 
 **Correction:** an earlier revision of this note called any dotted
-`rule_id` match "safe to delete." That was wrong for the reason above --
-if you already acted on that guidance, re-verify your `precheck_rules`
-table against your rule files' actual `id:` values, since a legitimate
-registry-style rule's row could have been deleted, silently demoting it
-back to `candidate`.
+`rule_id` match "safe to delete." That was wrong for two reasons: the
+registry-style-id false-positive risk above, and because deletion isn't
+actually executable against the schema as granted. If you already
+attempted to act on that guidance, it should have failed outright (GRANT
+error or FK violation) rather than silently succeeded -- but re-verify
+your `precheck_rules` table against your rule files' actual `id:` values
+regardless.
 
 ### Shadow-review harness
 

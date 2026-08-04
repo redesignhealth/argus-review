@@ -425,26 +425,20 @@ async def test_run_semgrep_sarif_accepts_a_single_rule_file_as_config_path(
 
     assert result is not None
     assert [r.rule_id for r in result] == ["r1"]
-    # A single rule file is run with cwd set to its own parent directory and
-    # --config given the bare filename, not the full path -- verified
-    # empirically that passing the full path (from an unrelated cwd) makes
-    # semgrep namespace-prefix every rule's reported ruleId with that path,
-    # which would break select_rule_statuses' DB lookup by rule_id.
+    # config_path is passed through exactly as given -- no cwd juggling, no
+    # relative-ification. --no-rewrite-rule-ids is what keeps ruleId bare
+    # (see run_semgrep_sarif's docstring for why an earlier version instead
+    # manipulated cwd/relative-config for this, and why that was insufficient
+    # for nested rule directories).
     assert mock_exec.await_args is not None
-    assert rule_file.name in mock_exec.await_args.args
-    assert str(rule_file) not in mock_exec.await_args.args
-    assert mock_exec.await_args.kwargs["cwd"] == rule_file.parent
+    assert str(rule_file) in mock_exec.await_args.args
+    assert "--no-rewrite-rule-ids" in mock_exec.await_args.args
+    assert "cwd" not in mock_exec.await_args.kwargs
 
 
-async def test_run_semgrep_sarif_directory_config_uses_dot_and_own_cwd(
+async def test_run_semgrep_sarif_directory_config_passed_as_is(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Regression test for the production path (run_precheck always passes a
-    # directory, never a single file): a directory config must be run with
-    # cwd=<that directory> and --config "." -- not the absolute directory
-    # path from an unrelated cwd -- or semgrep namespace-prefixes every rule's
-    # reported ruleId with the directory path, breaking select_rule_statuses'
-    # DB lookup by rule_id (see run_semgrep_sarif's docstring).
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
     rules_dir = tmp_path / "rules"
     rules_dir.mkdir()
@@ -456,47 +450,6 @@ async def test_run_semgrep_sarif_directory_config_uses_dot_and_own_cwd(
     assert result is not None
     assert [r.rule_id for r in result] == ["r1"]
     assert mock_exec.await_args is not None
-    assert "." in mock_exec.await_args.args
-    assert str(rules_dir) not in mock_exec.await_args.args
-    assert mock_exec.await_args.kwargs["cwd"] == rules_dir
-
-
-async def test_run_semgrep_sarif_resolves_relative_worktree_path(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # No current caller passes a relative worktree_path -- this covers the
-    # os.path.isabs/abspath normalization directly, since that branch would
-    # otherwise be entirely untested. Also asserts the warning log fires, so
-    # a future refactor can't silently drop it without failing this test.
-    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
-    monkeypatch.chdir(tmp_path)
-    rules_dir = tmp_path / "rules"
-    rules_dir.mkdir()
-    proc = _mock_subprocess(_sarif_bytes())
-
-    with (
-        patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
-        caplog.at_level("WARNING", logger="argus.precheck.engine"),
-    ):
-        result = await run_semgrep_sarif("relative/worktree", rules_dir)
-
-    assert result == []
-    assert mock_exec.await_args is not None
-    assert str(tmp_path / "relative/worktree") in mock_exec.await_args.args
-    assert any("relative worktree_path" in record.message for record in caplog.records)
-
-
-async def test_run_semgrep_sarif_returns_none_when_config_dir_missing(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Not reachable via either current caller (both pre-validate existence),
-    # but must fail open rather than let create_subprocess_exec's cwd= raise
-    # FileNotFoundError/NotADirectoryError -- see run_semgrep_sarif's guard.
-    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
-    missing_rule_file = tmp_path / "does-not-exist" / "rule.yml"
-
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
-        result = await run_semgrep_sarif("/tmp/worktree", missing_rule_file)
-
-    assert result is None
-    mock_exec.assert_not_called()
+    assert str(rules_dir) in mock_exec.await_args.args
+    assert "--no-rewrite-rule-ids" in mock_exec.await_args.args
+    assert "cwd" not in mock_exec.await_args.kwargs

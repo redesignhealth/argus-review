@@ -131,67 +131,64 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
     confident-looking zero-occurrence result that looks like strong
     evidence the rule is safe, when it never actually ran.
 
-    ``worktree_path`` is resolved to an absolute path (relative to this
-    process's own cwd, not semgrep's) before use: semgrep runs with ``cwd``
-    set to ``config_path``'s own directory (see below), so an unresolved
-    relative ``worktree_path`` would otherwise resolve against that
-    directory instead of the caller's, silently scanning the wrong tree.
+    ``worktree_path`` and ``config_path`` are both passed to semgrep exactly
+    as given (no cwd juggling): correctness no longer depends on either
+    being absolute or on this process's cwd.
     """
     if not semgrep_available():
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
-    # Always normalize (not just when relative): os.path.abspath also applies
-    # normpath, collapsing "..", ".", and duplicate slashes even in an
-    # already-absolute input -- an unconditional call preserves that for
-    # every caller, matching the normalization this line replaced. The
-    # isabs check below only decides whether to log, so normalization
-    # behavior for already-absolute-but-unnormalized paths doesn't regress.
-    if not os.path.isabs(worktree_path):
+    try:
+        return await _run_semgrep_sarif_unguarded(worktree_path, config_path)
+    except Exception:  # noqa: BLE001 -- enforce the documented never-raises contract
         logger.warning(
-            "run_semgrep_sarif received a relative worktree_path (%r); "
-            "resolving against this process's cwd, not semgrep's",
+            "semgrep subprocess/SARIF-parsing failed unexpectedly scanning %s",
             worktree_path,
+            exc_info=True,
         )
-    worktree_path = os.path.abspath(worktree_path)
-
-    # Verified empirically: semgrep namespaces each rule's reported ruleId
-    # with the config path we hand it -- e.g. a config of "/tmp/x/rules"
-    # turns rule id "foo" into ruleId "tmp.x.rules.foo" -- UNLESS that path
-    # is just a bare name/"." relative to semgrep's own cwd, in which case
-    # the id passes through unmodified. Since `select_rule_statuses` looks
-    # up the raw rule_id a rule author wrote in `id:`, running with cwd set
-    # to config_path's own directory (and passing a same-directory-relative
-    # config arg) is required for DB status lookups to ever match -- passing
-    # config_path directly, from an unrelated cwd, would silently namespace
-    # every rule id and permanently misclassify verified rules as candidate.
-    if config_path.is_dir():
-        semgrep_cwd, config_arg = config_path, "."
-    else:
-        semgrep_cwd, config_arg = config_path.parent, config_path.name
-
-    # Both current callers validate config_path exists before calling (see
-    # run_precheck's _has_rule_files check and shadow.py's rule_path.exists()
-    # guard), so this isn't reachable today -- but create_subprocess_exec's
-    # cwd= would otherwise raise FileNotFoundError/NotADirectoryError on a
-    # missing directory, breaking this module's fail-open contract (and the
-    # "run_semgrep_sarif itself never raises" invariant shadow.py's docstring
-    # depends on) for any future caller that doesn't pre-validate.
-    if not semgrep_cwd.is_dir():
-        logger.warning("semgrep config directory does not exist: %s", semgrep_cwd)
         return None
 
+
+async def _run_semgrep_sarif_unguarded(
+    worktree_path: str, config_path: Path
+) -> list[SarifResult] | None:
+    """The actual subprocess-and-parse work for :func:`run_semgrep_sarif`.
+
+    Split out so the outer function can wrap this whole body in one
+    try/except -- ``asyncio.create_subprocess_exec`` (e.g. a TOCTOU race if
+    the semgrep binary vanishes between ``semgrep_available()`` and this
+    call) and ``parse_semgrep_sarif`` (malformed SARIF) were previously
+    unguarded despite the module's fail-open contract and this function's
+    own docstring claiming it "never raises".
+    """
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
         "--config",
-        config_arg,
+        str(config_path),
+        # Verified empirically: semgrep's default --rewrite-rule-ids
+        # namespaces a rule's reported ruleId with its path *relative to the
+        # config root* -- e.g. a rule "foo" nested at "<config>/security/foo.yml"
+        # is reported as "security.foo", not "foo", even for a directory
+        # config passed as an absolute path with no cwd tricks. This bit for
+        # bit defeats `select_rule_statuses`' DB lookup by rule_id for any
+        # subdirectory-organized rule set (which `_has_rule_files`'s
+        # recursive rglob explicitly anticipates and supports) -- a verified
+        # rule under a subdirectory could never actually reach 'verified'
+        # classification. --no-rewrite-rule-ids reports the bare `id:` value
+        # unconditionally, for both flat and nested layouts, and for both a
+        # directory and a single-file config -- no cwd manipulation needed
+        # at all (an earlier version of this function juggled `cwd`/relative
+        # `--config` args specifically to work around --rewrite-rule-ids for
+        # the flat case only, which is why this flag is strictly better, not
+        # just simpler).
+        "--no-rewrite-rule-ids",
         "--sarif",
         "--quiet",
         "--metrics=off",
         worktree_path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        cwd=semgrep_cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_SEMGREP_TIMEOUT_S)

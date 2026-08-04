@@ -67,6 +67,53 @@ async def test_real_semgrep_finds_a_real_match(tmp_path) -> None:
     assert result[0].file == "target.py"
 
 
+async def test_real_semgrep_nested_rule_reports_bare_rule_id(tmp_path) -> None:
+    # Regression test: semgrep's default --rewrite-rule-ids namespaces a
+    # rule's reported ruleId with its path relative to the config root (a
+    # rule "foo" at "<config>/security/foo.yml" is reported as
+    # "security.foo") -- which defeats select_rule_statuses' DB lookup by
+    # the rule's own bare `id:` value for any subdirectory-organized rule
+    # set, a layout _has_rule_files' recursive rglob explicitly supports.
+    # --no-rewrite-rule-ids is what run_semgrep_sarif passes to prevent this.
+    rules_dir = tmp_path / "rules"
+    (rules_dir / "security").mkdir(parents=True)
+    (rules_dir / "security" / "rule.yml").write_text(_RULE_YAML)
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _write_target(
+        worktree,
+        "def f():\n    try:\n        risky()\n    except Exception:\n        pass\n",
+    )
+
+    result = await run_semgrep_sarif(str(worktree), rules_dir)
+
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].rule_id == "integration-test-bare-except"
+
+
+async def test_real_semgrep_single_file_config_reports_bare_rule_id(tmp_path) -> None:
+    # shadow.py's only production call pattern passes a single rule file
+    # (not a directory) as config_path -- this exercises that branch against
+    # real semgrep, not just a mocked subprocess.
+    rule_file = tmp_path / "rule.yml"
+    rule_file.write_text(_RULE_YAML)
+
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    _write_target(
+        worktree,
+        "def f():\n    try:\n        risky()\n    except Exception:\n        pass\n",
+    )
+
+    result = await run_semgrep_sarif(str(worktree), rule_file)
+
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].rule_id == "integration-test-bare-except"
+
+
 async def test_real_semgrep_no_match_returns_empty_list(tmp_path) -> None:
     rules_dir = tmp_path / "rules"
     rules_dir.mkdir()

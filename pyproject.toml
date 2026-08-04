@@ -81,9 +81,12 @@ prechecks = [
     # Upper-bounded: argus.precheck.engine depends on empirically verified
     # semgrep behavior (exit code 0 with or without findings, non-zero only
     # on semgrep's own execution errors; SARIF artifactLocation.uri echoing
-    # the scan-root path form verbatim) that a future major release isn't
-    # contractually obligated to preserve. Bump deliberately, re-verifying
-    # both behaviors, rather than picking it up silently.
+    # the scan-root path form verbatim; --no-rewrite-rule-ids reporting the
+    # bare `id:` value regardless of directory nesting, which is what makes
+    # select_rule_statuses' DB lookup by rule_id work at all) that a future
+    # major release isn't contractually obligated to preserve. Bump
+    # deliberately, re-verifying all three behaviors, rather than picking it
+    # up silently.
     "semgrep>=1.90.0,<2.0.0",
 ]
 # semgrep pins mcp==1.23.3 exactly, so uv's single flat resolution (which

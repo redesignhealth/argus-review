@@ -117,6 +117,13 @@ async def run_shadow_review(
     result = ShadowReviewResult()
     for entry in corpus:
         try:
+            # run_semgrep_sarif itself is guaranteed to never raise (its own
+            # docstring's contract, now actually enforced there rather than
+            # merely documented) -- so this try's remaining job is exactly
+            # provisioned_worktree's own failure modes (bad SHA, transient
+            # clone error), not a catch-all for a hypothetical bug in the
+            # scan call too. A genuine bug in run_semgrep_sarif can no
+            # longer surface here as ordinary-looking corpus flakiness.
             async with provisioned_worktree(
                 repo=entry.repo, head_sha=entry.head_sha, token=github_token
             ) as worktree_path:

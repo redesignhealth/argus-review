@@ -55,16 +55,13 @@ rules:
 """
 
 
-# tests/conftest.py's autouse _mock_settings fixture skips stubbing
-# GITHUB_TOKEN_RO for tests carrying the needs_real_github_token marker
-# (set above) -- unlike the default unit suite, this file needs to see
-# whatever the invoking shell actually exported, or nothing at all.
+# tests/conftest.py's autouse _mock_settings fixture already skips this
+# whole test (via the needs_real_github_token marker set above) when
+# GITHUB_TOKEN_RO isn't set -- by the time this fixture runs, a real token
+# is guaranteed present, so this just reads it.
 @pytest.fixture
 def github_token() -> str:
-    token = os.environ.get("GITHUB_TOKEN_RO")
-    if not token:
-        pytest.skip("GITHUB_TOKEN_RO not set — skipping integration test")
-    return token
+    return os.environ["GITHUB_TOKEN_RO"]
 
 
 async def test_real_corpus_scan_finds_a_real_hit(tmp_path, github_token: str) -> None:

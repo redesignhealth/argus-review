@@ -74,7 +74,17 @@ def _mock_settings(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPat
     # Presence-in-environment gating (an even earlier version) isn't right
     # either: it broke isolation for the whole unit suite whenever a
     # developer happened to have a real token exported for unrelated reasons.
-    if not request.node.get_closest_marker("needs_real_github_token"):
+    if request.node.get_closest_marker("needs_real_github_token"):
+        # Centralized here rather than left to each marked test's own
+        # fixture: GITHUB_TOKEN_RO is a required (non-Optional) Settings
+        # field, so a future needs_real_github_token test that doesn't
+        # separately reimplement this skip would otherwise hit a confusing
+        # pydantic ValidationError instead of a clean skip the moment
+        # Settings() is constructed below. The marker alone now guarantees
+        # the full contract.
+        if not os.environ.get("GITHUB_TOKEN_RO"):
+            pytest.skip("GITHUB_TOKEN_RO not set — skipping test marked needs_real_github_token")
+    else:
         monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
 
@@ -113,12 +123,16 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     `integration` marker fails loudly and immediately, rather than only
     being caught by a reviewer noticing the omission.
     """
-    for item in items:
-        if item.get_closest_marker("needs_real_github_token") and not item.get_closest_marker(
-            "integration"
-        ):
-            raise pytest.UsageError(
-                f"{item.nodeid}: `needs_real_github_token` must always be paired with "
-                "`integration` -- otherwise this test would run in the default suite "
-                "against a real token from the developer's shell."
-            )
+    offending = [
+        item.nodeid
+        for item in items
+        if item.get_closest_marker("needs_real_github_token")
+        and not item.get_closest_marker("integration")
+    ]
+    if offending:
+        raise pytest.UsageError(
+            "`needs_real_github_token` must always be paired with `integration` -- "
+            "otherwise the test would run in the default suite against a real token "
+            "from the developer's shell. Offending test(s):\n"
+            + "\n".join(f"  - {nodeid}" for nodeid in offending)
+        )
