@@ -149,15 +149,21 @@ async def _run_eslint_sarif_unguarded(
     try:
         raw_files = json.loads(stdout)
     except (json.JSONDecodeError, TypeError):
-        # None, not [] -- matching Checkov's convention for the analogous
-        # parse-failure case (terraform_scanner.py). This is exactly
-        # eslint's own dash-prefixed-filename argv-injection failure mode
-        # (see scanner_utils.py's "Dash-prefixed-filename argument
-        # injection" section): eslint exits 0 but prints a plain-text error
-        # instead of JSON, so is_success_exit already returned True above,
-        # and it's this except clause's job to still distinguish "didn't
-        # really run" from "ran clean, zero findings" -- [] would misreport
-        # the former as the latter.
+        # None, not [] -- this is exactly eslint's own dash-prefixed-
+        # filename argv-injection failure mode (see scanner_utils.py's
+        # "Dash-prefixed-filename argument injection" section): eslint
+        # exits 0 but prints a plain-text error instead of JSON, so
+        # is_success_exit already returned True above, and it's this
+        # except clause's job to still distinguish "didn't really run"
+        # from "ran clean, zero findings" -- [] would misreport the former
+        # as the latter. NOT actually parallel to Checkov's parse path
+        # (terraform_scanner.py's SARIF parsing goes through
+        # sarif.parse_semgrep_sarif, which returns [] on a parse failure,
+        # not None) -- eslint is simply the first scanner in this package
+        # to make this specific distinction; squawk/actionlint's identical
+        # except clauses still return [] here too (see migration_scanner.py
+        # and workflow_lint_scanner.py), a known inconsistency, not a
+        # package-wide convention yet.
         logger.warning("Could not parse eslint JSON output", exc_info=True)
         return None
 

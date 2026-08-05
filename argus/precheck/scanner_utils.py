@@ -32,11 +32,16 @@ with ``nargs='+'``) errors "expected at least one argument" the same way,
 also yielding ``None``; eslint (yargs) is the odd one out -- it prints
 "Invalid option" to stderr but still EXITS 0, so ``is_success_exit`` reports
 success, and it's the subsequent ``json.loads`` failure on eslint's
-non-JSON stderr-only output that this module's except-and-return-``[]``
-path catches, yielding ``[]`` ("ran clean, zero findings") rather than
-``None``. Either way the whole batch's real findings go unreported -- just
-via a different signal per tool -- silently suppressing scanning for every
-OTHER file in the same batch too, not just the one with the odd name.
+non-JSON stderr-only output that has to catch this instead. js_scanner.py's
+except clause returns ``None`` here (not the misleadingly-successful-
+looking ``[]``) specifically for this case -- squawk/actionlint's own
+identical ``except (json.JSONDecodeError, TypeError)`` clauses still return
+``[]`` for an analogous parse failure (migration_scanner.py,
+workflow_lint_scanner.py), a known inconsistency this package hasn't
+resolved package-wide, not a convention every scanner already follows.
+Either way the whole batch's real findings go unreported -- just via a
+different signal per tool -- silently suppressing scanning for every OTHER
+file in the same batch too, not just the one with the odd name.
 actionlint is not actually exposed to this (its changed-file list is always
 ".github/workflows/"-prefixed, so no argv token can itself start with "-"),
 but gets the same guard anyway for consistency.

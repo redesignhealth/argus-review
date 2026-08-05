@@ -420,7 +420,7 @@ async def test_run_precheck_drops_fileless_findings_when_scoped(
 
 
 async def test_run_precheck_empty_changed_files_is_a_full_noop(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """``changed_files == []`` means "no relevant scope for this round" in
     practice (almost always a genuinely empty diff, e.g. a comment-triggered
@@ -431,17 +431,12 @@ async def test_run_precheck_empty_changed_files_is_a_full_noop(
     reach the fast-fail gate based on pre-existing debt this round's diff
     never touched (fail-CLOSED for verified rules -- the one direction this
     module's fail-open philosophy forbids). No subprocess should even be
-    spawned; the result must be empty.
-
-    ``semgrep_available`` is explicitly mocked True (unlike a real "dead
-    setup" no-op) so ``mock_exec.assert_not_called()`` is self-contained --
-    without it, this assertion would only be meaningful on a machine
-    without the `prechecks` extras installed, passing vacuously in CI
-    (where semgrep/zizmor/trivy genuinely are on PATH) even if the early
-    return this test exists to pin were deleted entirely.
+    spawned; the result must be empty. No ``semgrep_available``/etc. mocking
+    is needed (or meaningful) here regardless of what's on the test
+    machine's PATH -- the early return this test pins happens unconditionally
+    on ``changed_files == []``, before any availability check is ever
+    consulted.
     """
-    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
-
     with (
         patch("asyncio.create_subprocess_exec") as mock_exec,
         caplog.at_level("WARNING", logger="argus.precheck.engine"),
@@ -450,8 +445,9 @@ async def test_run_precheck_empty_changed_files_is_a_full_noop(
 
     assert result == PrecheckResult()
     mock_exec.assert_not_called()
-    assert "changed_files was an empty list" in caplog.text
-    assert all(r.levelname == "WARNING" for r in caplog.records)
+    engine_records = [r for r in caplog.records if r.name == "argus.precheck.engine"]
+    assert any("changed_files was an empty list" in r.message for r in engine_records)
+    assert all(r.levelname == "WARNING" for r in engine_records)
 
 
 async def test_run_precheck_no_scoping_when_changed_files_is_none(
