@@ -58,10 +58,24 @@ class PrecheckResult:
     LLM step runs. A rule with status 'suspended' is dropped entirely —
     neither list — since it's a known-bad rule that shouldn't influence a
     review at all until re-verified.
+
+    ``failed_scanners`` names every scanner that returned ``None`` this run
+    (genuinely didn't complete -- crashed, timed out, unparseable output --
+    as opposed to running clean with zero hits). Observability only: this
+    module stays fail-open regardless (a failed scanner never blocks or
+    slows down a review, same as before), but a failure that was
+    previously indistinguishable from "ran clean" is now surfaced to the
+    caller so it can be made visible in the review comment/logs rather than
+    silently lost. Deliberately does NOT include semgrep:
+    ``_run_semgrep_precheck`` already collapses its own ``None`` into
+    ``[]`` before it reaches this aggregation (see that function's
+    docstring for why), so a semgrep failure is not observable at this
+    layer without a separate, larger change to that function's contract.
     """
 
     candidate_findings: list[SarifResult] = field(default_factory=list)
     verified_findings: list[SarifResult] = field(default_factory=list)
+    failed_scanners: list[str] = field(default_factory=list)
 
 
 def resolve_rules_dir() -> Path | None:
@@ -582,17 +596,22 @@ async def run_precheck(
         )
         return PrecheckResult()
 
-    scans: list[Coroutine[Any, Any, list[SarifResult] | None]] = [
-        _run_semgrep_precheck(worktree_path)
+    # (name, coroutine) pairs, not bare coroutines -- the name is what lets
+    # the aggregation below report *which* scanner returned None (a real
+    # failure) rather than just "something failed somewhere". semgrep is
+    # deliberately excluded from this tracking -- see PrecheckResult's
+    # docstring for why a semgrep failure isn't observable at this layer.
+    named_scans: list[tuple[str, Coroutine[Any, Any, list[SarifResult] | None]]] = [
+        ("_semgrep_precheck", _run_semgrep_precheck(worktree_path))
     ]
 
     if zizmor_available():
-        scans.append(run_zizmor_sarif(worktree_path))
+        named_scans.append(("zizmor", run_zizmor_sarif(worktree_path)))
     else:
         logger.info("zizmor not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
     if trivy_available():
-        scans.append(run_trivy_secrets_sarif(worktree_path))
+        named_scans.append(("trivy", run_trivy_secrets_sarif(worktree_path)))
     else:
         logger.info("trivy not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
@@ -601,34 +620,48 @@ async def run_precheck(
     # (none has a whole-worktree mode the way semgrep/zizmor/trivy do).
     if changed_files is not None:
         if squawk_available():
-            scans.append(run_squawk_sarif(worktree_path, changed_files))
+            named_scans.append(("squawk", run_squawk_sarif(worktree_path, changed_files)))
         else:
             logger.info("squawk not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
         if checkov_available():
-            scans.append(run_checkov_sarif(worktree_path, changed_files))
+            named_scans.append(("checkov", run_checkov_sarif(worktree_path, changed_files)))
         else:
             logger.info(
                 "checkov not on PATH (argus[prechecks] extra not installed) — skipping scan"
             )
 
         if actionlint_available():
-            scans.append(run_actionlint_sarif(worktree_path, changed_files))
+            named_scans.append(("actionlint", run_actionlint_sarif(worktree_path, changed_files)))
         else:
             logger.info(
                 "actionlint not on PATH (argus[prechecks] extra not installed) — skipping scan"
             )
 
         if eslint_available():
-            scans.append(run_eslint_sarif(worktree_path, changed_files))
+            named_scans.append(("eslint", run_eslint_sarif(worktree_path, changed_files)))
         else:
             logger.info(
                 "eslint security bundle not installed (see argus/precheck/eslint_bundle/"
                 "README.md) — skipping scan"
             )
 
-    scan_batches = await asyncio.gather(*scans)
+    scan_batches = await asyncio.gather(*(coro for _, coro in named_scans))
     results: list[SarifResult] = [r for batch in scan_batches for r in (batch or [])]
+
+    failed_scanners = sorted(
+        name
+        for (name, _), batch in zip(named_scans, scan_batches)
+        if batch is None and name != "_semgrep_precheck"
+    )
+    if failed_scanners:
+        logger.warning(
+            "%d precheck scanner(s) did not complete this round (crashed, timed out, or "
+            "produced unparseable output) and contributed no findings: %s -- this is a "
+            "silent coverage gap, not a blocked review (this module stays fail-open)",
+            len(failed_scanners),
+            ", ".join(failed_scanners),
+        )
 
     if changed_files is not None:
         # Guaranteed non-empty here -- the empty-list case returns early
@@ -645,7 +678,12 @@ async def run_precheck(
             )
 
     if not results:
-        return PrecheckResult()
+        # Still carries failed_scanners even with zero findings: a scanner
+        # crashing and every OTHER scanner genuinely finding nothing are
+        # different events, and this is the one place that distinction
+        # would otherwise be lost -- a bare PrecheckResult() here reads
+        # identically to "everything ran clean."
+        return PrecheckResult(failed_scanners=failed_scanners)
 
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)
@@ -677,4 +715,6 @@ async def run_precheck(
         )
         candidate = candidate[:_MAX_RESULTS]
 
-    return PrecheckResult(candidate_findings=candidate, verified_findings=verified)
+    return PrecheckResult(
+        candidate_findings=candidate, verified_findings=verified, failed_scanners=failed_scanners
+    )

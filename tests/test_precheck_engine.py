@@ -124,6 +124,40 @@ async def test_run_precheck_runs_zizmor_even_without_custom_rules_dir(
     assert [f.rule_id for f in result.candidate_findings] == ["unpinned-uses"]
 
 
+async def test_run_precheck_reports_failed_scanner_by_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scanner that returns ``None`` (genuinely didn't complete) must be
+    named in ``PrecheckResult.failed_scanners`` -- this is the observability
+    signal that lets a crashed/timed-out scanner be distinguished from one
+    that ran clean, surfaced in the review comment via
+    ``graph._node_write_review``'s degraded-coverage section. This module
+    stays fail-open regardless: the failure must not affect
+    candidate_findings/verified_findings at all.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+
+    with patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=None)):
+        result = await run_precheck("/tmp/worktree")
+
+    assert result.candidate_findings == []
+    assert result.verified_findings == []
+    assert result.failed_scanners == ["zizmor"]
+
+
+async def test_run_precheck_no_failed_scanners_when_all_clean(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+
+    with patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[])):
+        result = await run_precheck("/tmp/worktree")
+
+    assert result.failed_scanners == []
+
+
 async def test_run_precheck_merges_semgrep_and_zizmor_findings(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

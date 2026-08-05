@@ -73,6 +73,29 @@ regardless of post-hoc filtering).
   `WARNING` specifically because it silently disables the whole gate for
   the round.
 
+## Scanner failure observability
+
+This module stays fail-open by design (see the module docstring): a scanner
+that crashes, times out, or produces unparseable output never blocks a
+review, and its contribution to that round is silently treated as if it had
+run clean with zero findings. That's the right call for a gate that must
+never be the thing standing between a PR and its review — but "silently"
+means a genuine coverage gap (the scanner never actually ran) was, until
+recently, indistinguishable from "the scanner ran and found nothing."
+
+`run_precheck` now names every scanner that returned `None` (a real
+failure, not a clean `[]`) in `PrecheckResult.failed_scanners` — logged
+once, loudly, inside `run_precheck` itself, and a second time via
+`graph._node_precheck_rules` → `run_review`'s existing degraded-coverage
+section (the same mechanism already used for a killed/timed-out LLM
+reviewer session), so a scanner failure is visible in the rendered review
+comment, not just a backend log line. Still purely observability: nothing
+about the review's verdict, gating, or blocking behavior changes based on
+this. semgrep is not tracked here — `_run_semgrep_precheck` already
+collapses its own `None` into `[]` before this aggregation ever sees it
+(see that function's docstring for why); its own failures are only visible
+via the plain log line semgrep's own runner already emits.
+
 ## Stock rule sources vs. custom/mined rules
 
 `run_precheck` runs several independent scanners and merges their findings

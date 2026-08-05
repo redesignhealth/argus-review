@@ -241,6 +241,9 @@ class ReviewState(TypedDict, total=False):
     precheck_fast_fail: list[
         dict[str, Any]
     ]  # verified-rule hits: present only when short-circuiting
+    precheck_scanner_failures: list[
+        str
+    ]  # scanner names that returned None this round (crashed/timed out) -- observability only
 
 
 class ReviewerInput(TypedDict):
@@ -1409,6 +1412,14 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
         update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
     if result.verified_findings:
         update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
+    if result.failed_scanners:
+        # Observability only -- see PrecheckResult's docstring: this module
+        # stays fail-open regardless, but a scanner failure that was
+        # previously indistinguishable from "ran clean" should still be
+        # visible somewhere. Consumed by _node_write_review, which appends
+        # it to the review comment via the same degraded-coverage pattern
+        # already used for killed/timed-out LLM reviewer sessions.
+        update["precheck_scanner_failures"] = result.failed_scanners
 
     if result.candidate_findings:
         try:
@@ -2995,13 +3006,23 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
 
     response.usage.cost_usd = total_cost_usd
 
-    # Surface killed/timed-out reviewer sessions instead of letting them
-    # collapse silently into "0 findings" — both in the rendered markdown
-    # (not schema-frozen, safe to append to) and in the logs.
+    # Surface killed/timed-out reviewer sessions AND crashed/timed-out
+    # deterministic precheck scanners instead of letting either collapse
+    # silently into "0 findings" — both in the rendered markdown (not
+    # schema-frozen, safe to append to) and in the logs. Precheck scanner
+    # failures were already logged once, loudly, inside
+    # precheck.engine.run_precheck itself (this module stays fail-open
+    # regardless of what's surfaced here) — this is the second, PR-visible
+    # half of that same observability, not a duplicate warning path.
     failed_labels = failed_reviewer_labels(findings_models)
+    failed_labels += [
+        (f"precheck:{name}", "scanner did not complete this round")
+        for name in result.get("precheck_scanner_failures", [])
+    ]
     if failed_labels:
         logger.warning(
-            "Degraded coverage: %d reviewer session(s) did not complete and reported 0 findings: %s",
+            "Degraded coverage: %d reviewer session(s)/scanner(s) did not complete and "
+            "reported 0 findings: %s",
             len(failed_labels),
             ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
         )

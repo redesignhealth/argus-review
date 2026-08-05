@@ -239,6 +239,34 @@ async def test_precheck_rules_passes_changed_files_derived_from_diff() -> None:
     mock_run_precheck.assert_awaited_once_with("/tmp/wt", changed_files=["a.py"])
 
 
+async def test_precheck_rules_attaches_failed_scanner_names() -> None:
+    """A scanner returning None (see PrecheckResult.failed_scanners) must
+    surface into state as precheck_scanner_failures -- consumed by
+    run_review's degraded-coverage section so a crashed/timed-out scanner
+    is visible in the review comment, not silently indistinguishable from
+    "ran clean". This module stays fail-open regardless: it must not
+    produce precheck_fast_fail/precheck_findings just because a scanner
+    failed.
+    """
+    from argus.precheck.engine import PrecheckResult
+
+    with (
+        patch(
+            "argus.precheck.engine.run_precheck",
+            new=AsyncMock(return_value=PrecheckResult(failed_scanners=["zizmor", "trivy"])),
+        ),
+        patch("argus.storage.precheck.log_candidate_firings", new=AsyncMock()) as mock_log,
+    ):
+        result = await _node_precheck_rules(
+            _make_state(), {"configurable": {"worktree_path": "/tmp/wt"}}
+        )
+
+    assert result["precheck_scanner_failures"] == ["zizmor", "trivy"]
+    assert "precheck_findings" not in result
+    assert "precheck_fast_fail" not in result
+    mock_log.assert_not_awaited()
+
+
 async def test_precheck_rules_verified_findings_set_fast_fail() -> None:
     from argus.precheck.engine import PrecheckResult
     from argus.precheck.sarif import SarifResult
