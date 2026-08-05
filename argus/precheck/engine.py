@@ -531,8 +531,18 @@ async def run_precheck(
     round) rather than truncation -- GitHub compare-diff truncation keeps
     the diff's *leading* lines, which almost always still contain at least
     the first changed file's ``diff --git`` header, so truncation alone
-    essentially never drives extraction all the way down to zero files. An
-    earlier version of this fallback ran the whole-worktree scanners
+    essentially never drives extraction all the way down to zero files.
+    Truncation isn't the only residual risk, though: ``extract_changed_files``'s
+    regex cannot match a path containing a space, so a genuinely non-empty
+    diff whose only changed file(s) have one would also yield ``[]`` here --
+    silently no-op'ing the whole gate for that round, including its
+    always-on whole-worktree scanners. Rare (most repos don't have
+    space-containing paths at all), and a no-op is still strictly safer
+    than the unscoped fallback this replaced, but it's a real, distinct gap
+    from the "genuinely empty diff" case this docstring otherwise
+    describes -- logged at ``WARNING`` specifically because it silently
+    disables the whole gate for the round, not because the no-op response
+    itself is wrong. An earlier version of this fallback ran the whole-worktree scanners
     (semgrep/zizmor/Trivy) unscoped whenever ``changed_files == []``, which
     let their ``verified``-status findings reach the fast-fail gate
     (``graph._node_precheck_fail``) based on pre-existing debt in files
@@ -564,10 +574,11 @@ async def run_precheck(
         # always a genuinely empty diff -- running scanners unscoped here
         # would let verified findings fast-fail the PR based on files this
         # round's diff never touched. No-op is the only safe response.
-        logger.info(
+        logger.warning(
             "changed_files was an empty list -- treating as no relevant "
             "scope for this review round and skipping precheck scanning "
-            "entirely (see run_precheck's docstring)"
+            "entirely, including always-on whole-worktree scanners (see "
+            "run_precheck's docstring)"
         )
         return PrecheckResult()
 

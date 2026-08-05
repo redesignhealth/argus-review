@@ -53,6 +53,26 @@ module docstring for why — a large migrations/Terraform history, or a
 project-root requirement, make scanning the whole worktree impractical
 regardless of post-hoc filtering).
 
+`changed_files` has three distinct states, not two:
+
+- **`None`** — no scoping requested; every scanner that can run
+  whole-worktree does (semgrep/zizmor/Trivy), and the changed-files-only
+  scanners (squawk/Checkov/actionlint/eslint) don't run at all. Used by
+  this module's own tests and any future non-PR-context caller; the live
+  per-PR gate never passes this.
+- **A non-empty list** — the normal live-PR case: whole-worktree scanners'
+  results are filtered down to files in the list, and the changed-files-only
+  scanners run scoped to it.
+- **`[]` (empty, not `None`)** — a full no-op: *no* scanner runs at all,
+  including the always-on whole-worktree ones. This is the live per-PR
+  gate's state whenever `helpers.extract_changed_files` finds nothing to
+  scope to — in practice almost always a genuinely empty diff (e.g. a
+  comment-triggered re-review with no new commits since the last round),
+  though a diff whose only changed file(s) have a space in their path can
+  also trigger it (the extraction regex can't match those). Logged at
+  `WARNING` specifically because it silently disables the whole gate for
+  the round.
+
 ## Stock rule sources vs. custom/mined rules
 
 `run_precheck` runs several independent scanners and merges their findings

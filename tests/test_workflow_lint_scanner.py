@@ -127,15 +127,34 @@ async def test_run_actionlint_sarif_uses_dash_dash_before_files(
     workflows.mkdir(parents=True)
     (workflows / "-x.yml").write_text("name: ci\non: push\njobs: {}\n")
     monkeypatch.setattr("argus.precheck.workflow_lint_scanner.actionlint_available", lambda: True)
-    proc = _mock_subprocess(_actionlint_json())
+    proc = _mock_subprocess(
+        _actionlint_json(
+            {
+                "message": 'input "nodee-version" is not defined',
+                "filepath": ".github/workflows/-x.yml",
+                "line": 9,
+                "kind": "action",
+            }
+        ),
+        returncode=1,
+    )
 
     with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
-        await run_actionlint_sarif(str(tmp_path), changed_files=[".github/workflows/-x.yml"])
+        result = await run_actionlint_sarif(
+            str(tmp_path), changed_files=[".github/workflows/-x.yml"]
+        )
 
     args = mock_exec.call_args.args
     assert "--" in args
     dash_dash_index = args.index("--")
     assert args[dash_dash_index + 1 :] == (".github/workflows/-x.yml",)
+
+    # Pin the argv change and engine.py's changed_set match together:
+    # actionlint does no path-stripping of its own (unlike eslint/semgrep),
+    # so the echoed `file` must be the exact bare path as-given.
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].file == ".github/workflows/-x.yml"
 
 
 async def test_run_actionlint_sarif_extracts_shellcheck_code(

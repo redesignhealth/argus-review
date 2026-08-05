@@ -1,4 +1,4 @@
-"""Integration tests for argus.precheck.terraform_scanner — real checkov subprocess.
+"""Integration tests for argus.precheck.terraform_scanner -- real checkov subprocess.
 
 Unlike tests/test_terraform_scanner.py (which mocks asyncio.create_subprocess_exec
 entirely), these exercise the real subprocess/SARIF-parsing path end to end
@@ -14,13 +14,14 @@ import shutil
 
 import pytest
 
+from argus.precheck.scanner_utils import run_scanner_subprocess
 from argus.precheck.terraform_scanner import run_checkov_sarif
 
 pytestmark = pytest.mark.integration
 
 if not shutil.which("checkov"):
     pytest.skip(
-        "checkov not on PATH (pip install checkov) — skipping integration test",
+        "checkov not on PATH (install the `prechecks` extra) -- skipping integration test",
         allow_module_level=True,
     )
 
@@ -77,18 +78,20 @@ async def test_real_checkov_bare_dash_dash_does_not_fix_dash_prefixed_filename(
     # comments against a real binary, not just a mock.
     (tmp_path / "-x.tf").write_text(_WILDCARD_IAM_POLICY_TF)
 
-    from argus.precheck.scanner_utils import run_scanner_subprocess
-
     outcome = await run_scanner_subprocess(
         ["checkov", "-f", "--", "-x.tf", "--framework", "terraform", "-c", "CKV_AWS_63"],
         cwd=str(tmp_path),
         timeout=30,
     )
 
+    # Checks rejection semantics (a genuine argparse error, distinct from
+    # both "clean scan" (0) and "findings exist" (_FINDINGS_EXIT_CODE, 1)),
+    # not an exact stderr string/code -- those details aren't guaranteed
+    # stable across the pinned `checkov>=3.3.0,<4.0.0` range's patch/minor
+    # releases, only that this argv shape keeps failing.
     assert outcome is not None
-    _, stderr, returncode = outcome
-    assert returncode == 2
-    assert b"expected at least one argument" in stderr
+    _, _, returncode = outcome
+    assert returncode not in (0, 1)
 
 
 async def test_real_checkov_scans_all_files_with_repeated_file_flag(tmp_path) -> None:
