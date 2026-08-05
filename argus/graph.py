@@ -1380,6 +1380,7 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     Runs in parallel with ``_node_precheck_checks``: see that node's
     docstring for why they're split rather than sequenced in one body.
     """
+    from argus.helpers import extract_changed_files
     from argus.precheck.engine import run_precheck
     from argus.storage.precheck import CandidateFiring, log_candidate_firings
 
@@ -1391,7 +1392,7 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     req = ReviewRequest.model_validate(state["request"])
 
     try:
-        result = await run_precheck(worktree_path)
+        result = await run_precheck(worktree_path, changed_files=extract_changed_files(state["diff"]))
     except Exception:  # noqa: BLE001 — precheck engine failure is not a review failure
         logger.warning("Deterministic precheck failed — proceeding without it", exc_info=True)
         return {}

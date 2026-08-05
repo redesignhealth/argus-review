@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`pip install "argus-code-review[prechecks]"`) and is a complete no-op
   without it installed. See `docs/PRECHECKS.md`.
 - `gitleaks` and `actionlint` CI jobs for this repo's own source.
+- Seven additional stock rule sources for the precheck gate, feeding the
+  same candidate/verified pipeline as custom `ARGUS_RULES_DIR` rules and
+  independent of whether one is configured: semgrep registry packs
+  (`ARGUS_STOCK_SEMGREP_PACKS`, e.g. `p/secrets`); `zizmor` and
+  `actionlint` for GitHub Actions (security, and syntax/shellcheck,
+  respectively); Trivy for secrets; squawk for Postgres migration safety;
+  Checkov for Terraform IAM/privilege-escalation; and a bundled
+  `eslint-plugin-security` for JS/TS. See `docs/PRECHECKS.md`'s "Stock
+  rule sources" section for exact versions, install instructions (several
+  are standalone binaries or npm packages `pip` cannot install), and
+  scope/overlap decisions (e.g. why Trivy's own misconfiguration scanner
+  is deliberately unused in favor of Checkov).
+- `run_precheck` now accepts a `changed_files` list to scope findings to
+  what the PR actually touched, and runs every scanner concurrently via
+  `asyncio.gather` rather than sequentially -- both prerequisites for
+  adding the additional scanners above without flooding every PR with
+  pre-existing findings or stacking up each scanner's own timeout.
 
 ## [0.1.3] - 2026-08-03
 

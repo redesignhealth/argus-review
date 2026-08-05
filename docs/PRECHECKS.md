@@ -28,11 +28,136 @@ slows a review) but different in how "optional" applies to each:
 ## Enabling it
 
 ```bash
-pip install "argus-code-review[prechecks]"   # installs semgrep
+pip install "argus-code-review[prechecks]"   # installs semgrep, zizmor, checkov
 ```
 
 Without the extra installed, `argus.precheck.engine.run_precheck` no-ops —
-the pipeline behaves exactly as if this feature didn't exist.
+the pipeline behaves exactly as if this feature didn't exist. Several stock
+scanners (below) are standalone binaries or npm packages that `pip` cannot
+install — each needs a separate one-time setup step wherever this package
+runs live, and each degrades gracefully (skips its own scan, logs once) if
+its step hasn't been done.
+
+## Diff scoping
+
+`run_precheck(worktree_path, changed_files=...)` scopes findings to files
+the PR actually touched (`changed_files`, derived from the PR diff via
+`helpers.extract_changed_files` — see `graph._node_precheck_rules`).
+Several scanners below (Trivy, zizmor) scan the *whole* worktree, not just
+the diff; without this scoping a repo with any pre-existing debt would
+surface it on every PR, and `_MAX_RESULTS` would then truncate that flood
+arbitrarily — silently dropping real, in-scope findings alongside the
+noise. Others (squawk, Checkov, actionlint, eslint) additionally require
+an explicit `changed_files` list to run *at all* (see each one's own
+module docstring for why — a large migrations/Terraform history, or a
+project-root requirement, make scanning the whole worktree impractical
+regardless of post-hoc filtering).
+
+## Stock rule sources vs. custom/mined rules
+
+`run_precheck` runs several independent scanners and merges their findings
+into the same candidate/verified classification pipeline below. None
+depends on the others being configured — a deployment that has never set
+`ARGUS_RULES_DIR` still gets full benefit from every stock source:
+
+1. **Custom or mined rules** (`ARGUS_RULES_DIR`, see "Rule files" below) —
+   patterns *this specific codebase's own review history* has flagged
+   repeatedly. The one thing no stock tool could know to check for.
+2. **Semgrep registry packs** (`ARGUS_STOCK_SEMGREP_PACKS`, unset/off by
+   default) — a comma-separated list of semgrep registry pack ids (e.g.
+   `p/secrets`) merged into the same semgrep invocation as your custom
+   rules via multiple `--config` flags. **Two caveats before enabling
+   this:** (a) unlike a local rules directory, semgrep fetches each pack
+   over the network on first use (cached afterward) — a real, if usually
+   small, added latency/network dependency on the live per-PR gate; (b)
+   the free/unauthenticated tier of a registry pack is noticeably smaller
+   than what's actually in the registry (`p/secrets` loads ~37 generic
+   rules without a `semgrep login` session vs. a much larger authenticated
+   set) — verified empirically, not a guess, while building this feature.
+   `semgrep login` support for a richer pack isn't wired up here; start
+   with the free tier and revisit if it's not enough.
+3. **zizmor** ([docs.zizmor.sh](https://docs.zizmor.sh), `pip install
+   zizmor`, part of the `prechecks` extra) — always on when installed, no
+   opt-in setting: a purpose-built, externally-maintained GitHub Actions
+   security scanner (unpinned action tags, `${{ }}` script-injection,
+   credential-persistence via artifacts, etc.). Runs fully offline
+   (`--offline`, explicit — never depends on a GitHub token or makes
+   outbound calls on the target repo's behalf) against the whole worktree;
+   auto-discovers workflow/action files and no-ops cleanly (not an error)
+   on a worktree with nothing to audit, which is the common case for most
+   PRs. See `argus/precheck/actions_scanner.py`.
+4. **Trivy secrets** (`trivy` binary — **not on PyPI**, install via
+   `brew install trivy` or a
+   [binary download](https://github.com/aquasecurity/trivy/releases);
+   verified against 0.73.0) — always on when installed. Scoped to
+   `--scanners secret` only: Trivy's misconfiguration scanner is
+   deliberately NOT used (the specific check this integration originally
+   wanted — generic Terraform IAM wildcard detection — turned out to be a
+   dead/deprecated rule in Trivy's own default bundle, verified
+   empirically; running it anyway would double-report several
+   IAM/S3 conditions Checkov (below) already covers, on the same lines).
+   Ships dozens of built-in vendor-specific secret regexes (AWS keys,
+   GitHub tokens, Stripe keys) with no login/download step — a genuine
+   improvement over semgrep's own thin `p/secrets` free tier. Has its own
+   blind spot: well-known example/placeholder keys (e.g. AWS's own docs
+   example key) are deliberately allowlisted to cut false positives from
+   docs/tests. See `argus/precheck/secrets_scanner.py`.
+5. **squawk** (Postgres migration linting — `squawk` binary, **npm-only**,
+   install via `npm install -g squawk-cli`; verified against 2.61.0) —
+   requires `changed_files`; only scans `.sql` files that were actually
+   changed. Catches missing `CONCURRENTLY`/`IF NOT EXISTS`, unsafe column
+   type changes, constraints added without `NOT VALID`, missing lock/
+   statement timeouts. No SARIF reporter — this module parses squawk's
+   `--reporter json` output directly (whose line numbers are 0-indexed,
+   verified empirically against squawk's own TTY reporter — corrected to
+   1-indexed before reaching the shared `SarifResult` shape). See
+   `argus/precheck/migration_scanner.py`.
+6. **Checkov** (Terraform IAM/privilege-escalation — `pip install checkov`,
+   part of the `prechecks` extra; verified against 3.3.9) — requires
+   `changed_files`; only scans `.tf`/`.tf.json` files that were actually
+   changed, and only Checkov's own IAM-wildcard/privilege-escalation
+   checks (`terraform_scanner._ALLOWED_CHECKS`) — Checkov's *default*
+   catalog is far broader (verified empirically: a plain, otherwise-fine
+   `aws_s3_bucket` resource failed 7 unrelated best-practice checks under
+   the defaults), which would flood every Terraform PR with opinionated
+   noise unrelated to the actual gap this integration exists for.
+   **Exit-code convention is inverted** relative to every other scanner
+   here: Checkov exits 0 only when clean and 1 when genuine findings exist
+   (verified empirically) — the same inversion squawk has, handled by a
+   shared `is_success_exit(..., findings_exit_code=1)` helper
+   (`scanner_utils.py`), not a Checkov-specific special case. Also unlike
+   every other scanner, Checkov writes SARIF only to a file
+   (`--output-file-path`), never stdout — this module reads that file back
+   after the subprocess completes. See `argus/precheck/terraform_scanner.py`.
+7. **actionlint** (GitHub Actions syntax/shellcheck — **not on PyPI**,
+   install via `brew install actionlint shellcheck`
+   or a [binary download](https://github.com/rhysd/actionlint/releases);
+   verified against 1.7.12, shellcheck 0.11.0) — requires `changed_files`;
+   only scans changed `.github/workflows/*.yml`/`.yaml` files, invoked
+   with explicit file paths (not directory auto-discovery, which requires
+   a git-project root actionlint couldn't detect in an arbitrary worktree
+   — verified empirically). Genuinely different from zizmor's security
+   focus: catches typo'd action inputs (validated against the action's
+   real input schema), expression syntax errors (`=` vs `==`), and — via
+   its own built-in shellcheck integration, which degrades gracefully
+   (verified empirically) if `shellcheck` isn't separately installed —
+   real shell-scripting bugs inside `run:` blocks. See
+   `argus/precheck/workflow_lint_scanner.py`.
+8. **eslint-plugin-security** (JS/TS — **bundled**, not pip/npm-global;
+   see `argus/precheck/eslint_bundle/README.md`'s one-time `npm install`
+   setup step) — requires `changed_files`; only scans changed JS/TS files.
+   Uses a dedicated bundled eslint config (`eslint_bundle/eslint.config.js`,
+   invoked with `--no-config-lookup` so the target repo's own eslint setup
+   is never merged in) applying only `eslint-plugin-security`'s recommended
+   rules — independent of whether the reviewed repo has any JS/TS security
+   linting configured at all, which is the actual gap this fills. See
+   `argus/precheck/js_scanner.py`.
+
+Every rule id from every source goes through the *exact same* status
+lookup as a custom rule — a stock scanner's finding starts as `candidate`
+(non-blocking, logged for triage) exactly like a brand-new custom rule
+would, per the table below. Nothing from any of these three sources ever
+fast-fails a PR on day one.
 
 ## Rule files
 

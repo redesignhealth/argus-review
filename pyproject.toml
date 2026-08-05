@@ -96,7 +96,43 @@ prechecks = [
     # semgrep's own transitive PyYAML dependency, which this code has no
     # contractual guarantee of.
     "pyyaml>=6.0",
+    # argus.precheck.actions_scanner depends on empirically verified zizmor
+    # CLI behavior (--format sarif emitting real SARIF 2.1.0; exit 0 with or
+    # without findings; exit 3 with a "no inputs collected" stderr substring
+    # specifically for the empty-input case, distinct from other non-zero
+    # exits) that a future major release isn't contractually obligated to
+    # preserve. Bump deliberately, re-verifying all three, rather than
+    # picking it up silently -- same discipline as the semgrep pin above.
+    "zizmor>=1.29.0,<2.0.0",
+    # argus.precheck.terraform_scanner depends on empirically verified
+    # Checkov behavior (exit 0 only when clean, exit 1 when genuine
+    # findings exist -- the OPPOSITE of semgrep/zizmor's "always 0"
+    # convention; `--output sarif` writing real SARIF only to a file via
+    # `--output-file-path`, never to stdout; the specific check ids in
+    # terraform_scanner._ALLOWED_CHECKS existing and firing on a generic
+    # wildcard IAM policy) that a future major release isn't contractually
+    # obligated to preserve. Bump deliberately, re-verifying all three,
+    # rather than picking it up silently -- same discipline as semgrep/
+    # zizmor above. Checkov's own transitive dependency tree is
+    # significantly heavier than semgrep/zizmor's (a full IaC-parsing
+    # toolchain) -- accepted here since it's the one tool in this
+    # extra that isn't a standalone binary and genuinely needs pip.
+    "checkov>=3.3.0,<4.0.0",
 ]
+
+# squawk (Postgres migrations -- migration_scanner.py), actionlint (GitHub
+# Actions syntax/shellcheck -- workflow_lint_scanner.py), and Trivy
+# (secrets -- secrets_scanner.py) are standalone binaries, NOT PyPI
+# packages -- pip/uv cannot install them, so they aren't (and can't be)
+# listed above. eslint + eslint-plugin-security (JS/TS --
+# js_scanner.py) are npm packages, installed into their own bundled
+# directory (argus/precheck/eslint_bundle/), also outside pip's reach.
+# All four must be installed separately wherever this package runs live
+# -- see docs/PRECHECKS.md's "stock rule sources" section for exact
+# versions this project has verified against and install instructions.
+# Every scanner here degrades gracefully (skips its own scan, logs once)
+# when its binary/bundle is absent -- see each module's own
+# `*_available()` check.
 # semgrep pins mcp==1.23.3 exactly, so uv's single flat resolution (which
 # must satisfy every extra combination at once) locks mcp -- and its own
 # transitives jsonschema/importlib-metadata/pywin32 -- to that version for

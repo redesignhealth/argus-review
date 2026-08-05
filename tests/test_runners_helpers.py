@@ -11,6 +11,7 @@ from pathlib import Path
 from argus.helpers import (
     append_degraded_coverage_section,
     collect_reviewed_files,
+    extract_changed_files,
     filter_diff_for_files,
     parse_review_result,
     sanitize_file_paths,
@@ -68,6 +69,34 @@ class TestFilterDiffForFiles:
 
     def test_empty_files(self) -> None:
         assert filter_diff_for_files(self.SAMPLE_DIFF, []) == ""
+
+
+# ---------------------------------------------------------------------------
+# extract_changed_files
+# ---------------------------------------------------------------------------
+
+
+class TestExtractChangedFiles:
+    def test_extracts_both_sides_of_a_rename(self) -> None:
+        diff = (
+            "diff --git a/old_name.py b/new_name.py\n"
+            "--- a/old_name.py\n"
+            "+++ b/new_name.py\n"
+            "@@ -1 +1 @@\n"
+            "-x\n"
+            "+y\n"
+        )
+        assert extract_changed_files(diff) == ["new_name.py", "old_name.py"]
+
+    def test_dedupes_and_sorts(self) -> None:
+        result = extract_changed_files(TestFilterDiffForFiles.SAMPLE_DIFF)
+        assert result == ["src/main.py", "src/utils.py", "tests/test_main.py"]
+
+    def test_empty_diff_returns_empty_list(self) -> None:
+        assert extract_changed_files("") == []
+
+    def test_diff_with_no_file_headers_returns_empty_list(self) -> None:
+        assert extract_changed_files("not a real diff\njust text\n") == []
 
 
 # ---------------------------------------------------------------------------

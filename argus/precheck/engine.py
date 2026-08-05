@@ -15,12 +15,23 @@ import contextlib
 import logging
 import os
 import shutil
+from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass, field, replace
 from importlib import resources
+from typing import Any
 from pathlib import Path
 
 from argus.config import get_settings
+from argus.precheck.actions_scanner import run_zizmor_sarif, zizmor_available
+from argus.precheck.js_scanner import eslint_available, run_eslint_sarif
+from argus.precheck.migration_scanner import run_squawk_sarif, squawk_available
 from argus.precheck.sarif import SarifResult, parse_semgrep_sarif
+from argus.precheck.secrets_scanner import run_trivy_secrets_sarif, trivy_available
+from argus.precheck.terraform_scanner import checkov_available, run_checkov_sarif
+from argus.precheck.workflow_lint_scanner import (
+    actionlint_available,
+    run_actionlint_sarif,
+)
 from argus.storage.precheck import select_rule_statuses
 
 logger = logging.getLogger(__name__)
@@ -163,10 +174,21 @@ def semgrep_available() -> bool:
     return shutil.which("semgrep") is not None
 
 
-async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[SarifResult] | None:
-    """Run semgrep with ``config_path`` (a rules directory or a single rule
-    file -- semgrep accepts either) against ``worktree_path``; return
-    stripped, unclassified SARIF results.
+async def run_semgrep_sarif(
+    worktree_path: str, config_path: Path | Sequence[str | Path]
+) -> list[SarifResult] | None:
+    """Run semgrep against ``worktree_path``; return stripped, unclassified
+    SARIF results.
+
+    ``config_path`` accepts either a single rules directory/file (a bare
+    ``Path`` -- every existing caller's shape, unchanged) or a sequence of
+    config sources merged into one semgrep invocation via multiple
+    ``--config`` flags (semgrep's own native way to combine sources; not a
+    new subprocess per source). A sequence entry can be a local path or a
+    semgrep registry pack id (e.g. ``"p/secrets"``) -- semgrep resolves the
+    latter over the network, fetching once and caching locally. This is
+    what lets :func:`run_precheck` combine a custom ``ARGUS_RULES_DIR`` with
+    ``ARGUS_STOCK_SEMGREP_PACKS`` in one scan.
 
     Shared by :func:`run_precheck` (live per-PR gate, classifies against
     ``argus.storage.precheck``'s DB-backed rule statuses) and
@@ -187,16 +209,17 @@ async def run_semgrep_sarif(worktree_path: str, config_path: Path) -> list[Sarif
     confident-looking zero-occurrence result that looks like strong
     evidence the rule is safe, when it never actually ran.
 
-    ``worktree_path`` and ``config_path`` are both passed to semgrep exactly
-    as given (no cwd juggling): correctness no longer depends on either
-    being absolute or on this process's cwd.
+    ``worktree_path`` and every ``config_path`` entry are passed to semgrep
+    exactly as given (no cwd juggling): correctness no longer depends on
+    either being absolute or on this process's cwd.
     """
     if not semgrep_available():
         logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
+    configs = [config_path] if isinstance(config_path, (str, Path)) else list(config_path)
     try:
-        return await _run_semgrep_sarif_unguarded(worktree_path, config_path)
+        return await _run_semgrep_sarif_unguarded(worktree_path, configs)
     except Exception:  # noqa: BLE001 -- enforce the documented never-raises contract
         logger.warning(
             "semgrep subprocess/SARIF-parsing failed unexpectedly scanning %s",
@@ -272,7 +295,7 @@ async def _kill_and_reap(proc: asyncio.subprocess.Process) -> None:
 
 
 async def _run_semgrep_sarif_unguarded(
-    worktree_path: str, config_path: Path
+    worktree_path: str, config_paths: list[str | Path]
 ) -> list[SarifResult] | None:
     """The actual subprocess-and-parse work for :func:`run_semgrep_sarif`.
 
@@ -301,10 +324,13 @@ async def _run_semgrep_sarif_unguarded(
     if not os.path.isabs(worktree_path):
         raise ValueError(f"worktree_path must be absolute, got {worktree_path!r}")
 
+    config_args: list[str] = []
+    for c in config_paths:
+        config_args.extend(("--config", str(c)))
+
     proc = await asyncio.create_subprocess_exec(
         "semgrep",
-        "--config",
-        str(config_path),
+        *config_args,
         # Verified empirically: semgrep's default --rewrite-rule-ids
         # namespaces a rule's reported ruleId with its path *relative to the
         # config root* -- e.g. a rule "foo" nested at "<config>/security/foo.yml"
@@ -399,66 +425,185 @@ async def _run_semgrep_sarif_unguarded(
     return [_strip(r) for r in results]
 
 
-async def run_precheck(worktree_path: str) -> PrecheckResult:
-    """Run custom rules against ``worktree_path``; classify hits by DB status.
+async def _run_semgrep_precheck(worktree_path: str) -> list[SarifResult]:
+    """The semgrep half of run_precheck: custom ``ARGUS_RULES_DIR`` rules
+    plus any configured ``ARGUS_STOCK_SEMGREP_PACKS``, merged into one scan.
 
-    The caller (``graph._node_precheck_rules``) owns logging candidate
-    firings for later triage and short-circuiting the pipeline on verified
-    findings — this function only runs semgrep and classifies the results.
+    Returns ``[]`` whenever semgrep isn't installed, has nothing to scan
+    with (no custom rules dir AND no stock packs configured), or fails to
+    run -- callers can't distinguish "no config sources" from "ran, no
+    hits" here, but run_precheck doesn't need to: either way there's
+    nothing to gate or attach from this half.
     """
-    # Redundant with run_semgrep_sarif's own check below -- kept here purely
-    # as an optimization to skip resolving/scanning the rules directory
-    # entirely when semgrep isn't installed, not for correctness (that
-    # correctness now lives in run_semgrep_sarif itself, shared by every
-    # caller including argus.precheck.shadow).
     if not semgrep_available():
-        logger.info(
-            "semgrep not on PATH (argus[prechecks] extra not installed) — skipping precheck"
-        )
-        return PrecheckResult()
+        logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
+        return []
+
+    config_sources: list[str | Path] = []
 
     rules_dir = resolve_rules_dir()
-    if rules_dir is None or not _has_rule_files(rules_dir):
-        return PrecheckResult()
+    if rules_dir is not None and _has_rule_files(rules_dir):
+        # Advisory only -- logged loudly, never blocks the run itself. See
+        # _find_duplicate_rule_ids' docstring for why a collision is
+        # security-relevant (a new rule can silently inherit an existing
+        # verified rule's fast-fail status), not merely a style nit.
+        # to_thread: the function itself does blocking I/O (rglob,
+        # read_text, yaml.safe_load) and stays synchronous/directly-
+        # testable rather than becoming async -- see its own docstring.
+        #
+        # Narrowly scoped ImportError catch: pyyaml is genuinely optional
+        # (only declared in the `prechecks` extra), and if it's actually
+        # absent, only this advisory lint should be skipped -- not the
+        # rest of run_precheck. Without this, an ImportError raised inside
+        # _find_duplicate_rule_ids would propagate out through this
+        # function's caller (graph._node_precheck_rules) to its own outer
+        # except, which fail-opens the WHOLE precheck node including the
+        # verified-rule fast-fail path -- a much bigger blast radius than
+        # "the duplicate-id lint didn't run."
+        try:
+            duplicates = await asyncio.to_thread(_find_duplicate_rule_ids, rules_dir)
+        except ImportError:
+            logger.warning(
+                "pyyaml not installed -- skipping the duplicate-rule-id lint "
+                "(install the `prechecks` extra to enable it)"
+            )
+            duplicates = {}
+        for rule_id, files in duplicates.items():
+            logger.warning(
+                "Duplicate precheck rule id %r found in multiple files: %s -- "
+                "select_rule_statuses cannot distinguish these; a new rule "
+                "reusing an existing verified rule's id would silently inherit "
+                "fast-fail status",
+                rule_id,
+                ", ".join(str(f) for f in files),
+            )
+        config_sources.append(rules_dir)
 
-    # Advisory only -- logged loudly, never blocks the run itself. See
-    # _find_duplicate_rule_ids' docstring for why a collision is
-    # security-relevant (a new rule can silently inherit an existing
-    # verified rule's fast-fail status), not merely a style nit.
-    # to_thread: the function itself does blocking I/O (rglob, read_text,
-    # yaml.safe_load) and stays synchronous/directly-testable rather than
-    # becoming async -- see its own docstring.
-    #
-    # Narrowly scoped ImportError catch: pyyaml is genuinely optional (only
-    # declared in the `prechecks` extra), and if it's actually absent, only
-    # this advisory lint should be skipped -- not the rest of run_precheck.
-    # Without this, an ImportError raised inside _find_duplicate_rule_ids
-    # would propagate out through this function's caller
-    # (graph._node_precheck_rules) to its own outer except, which fail-opens
-    # the WHOLE precheck node including the verified-rule fast-fail path --
-    # a much bigger blast radius than "the duplicate-id lint didn't run."
-    try:
-        duplicates = await asyncio.to_thread(_find_duplicate_rule_ids, rules_dir)
-    except ImportError:
-        logger.warning(
-            "pyyaml not installed -- skipping the duplicate-rule-id lint "
-            "(install the `prechecks` extra to enable it)"
-        )
-        duplicates = {}
-    for rule_id, files in duplicates.items():
-        logger.warning(
-            "Duplicate precheck rule id %r found in multiple files: %s -- "
-            "select_rule_statuses cannot distinguish these; a new rule "
-            "reusing an existing verified rule's id would silently inherit "
-            "fast-fail status",
-            rule_id,
-            ", ".join(str(f) for f in files),
-        )
+    stock_packs = get_settings().ARGUS_STOCK_SEMGREP_PACKS
+    if stock_packs:
+        config_sources.extend(p.strip() for p in stock_packs.split(",") if p.strip())
+
+    if not config_sources:
+        return []
 
     # None (semgrep didn't run) and [] (ran, no hits) are both "nothing to
     # gate or attach" for the live pipeline -- see run_semgrep_sarif's
     # docstring for why run_shadow_review can't collapse these the same way.
-    results = await run_semgrep_sarif(worktree_path, rules_dir)
+    return await run_semgrep_sarif(worktree_path, config_sources) or []
+
+
+async def run_precheck(
+    worktree_path: str, *, changed_files: list[str] | None = None
+) -> PrecheckResult:
+    """Run stock + custom rules against ``worktree_path``; classify hits by
+    DB status.
+
+    Independent scanners feed the same classification pipeline below:
+    semgrep (custom ``ARGUS_RULES_DIR`` rules and/or
+    ``ARGUS_STOCK_SEMGREP_PACKS`` registry packs), zizmor (GitHub Actions
+    security -- actions_scanner.py) and Trivy (secrets -- secrets_scanner.py,
+    both whole-worktree/always-on), and squawk (Postgres migrations --
+    migration_scanner.py), Checkov (Terraform IAM/privilege-escalation --
+    terraform_scanner.py), actionlint (GitHub Actions syntax/shellcheck --
+    workflow_lint_scanner.py), and eslint-plugin-security (JS/TS --
+    js_scanner.py), all four of which only run when ``changed_files`` is
+    given. None depend on the others being configured: an earlier version
+    of this function returned early whenever no custom rules directory was
+    configured, which would have made stock scanning permanently dead code
+    in any deployment (like this
+    project's own, as of this change) that hasn't wired up ARGUS_RULES_DIR
+    yet.
+
+    ``changed_files``, when given, scopes findings to files this PR
+    actually touched (see ``helpers.extract_changed_files``) -- both
+    scanners here scan the WHOLE worktree, not just the diff, so without
+    this a repo with any pre-existing debt would surface it on every PR,
+    and _MAX_RESULTS below would then truncate that flood arbitrarily,
+    silently dropping real, in-scope findings alongside the noise. ``None``
+    (the default) applies no filtering -- used by callers that genuinely
+    want whole-worktree results (this module's own tests; a future
+    non-PR-context caller), and is NOT what the live per-PR gate passes
+    (see ``graph._node_precheck_rules``, which always derives and passes
+    the real list). A finding with no ``file`` at all is dropped when
+    scoping is active -- there's no way to confirm it's in scope, and this
+    module's fail-open philosophy favors not blocking over false-blocking.
+
+    Every scanner is a subprocess call with its own timeout (up to 120s
+    each) -- run concurrently via ``asyncio.gather`` rather than
+    sequentially awaited one after another, so this function's worst-case
+    latency is roughly the slowest single scanner, not their sum. Safe to
+    gather without ``return_exceptions=True``: every scanner wrapper here
+    (``run_zizmor_sarif``, etc.) already guarantees it never raises (see
+    each module's own docstring), so nothing here should ever propagate an
+    exception through ``gather`` in practice.
+
+    The caller (``graph._node_precheck_rules``) owns logging candidate
+    firings for later triage and short-circuiting the pipeline on verified
+    findings — this function only runs the scanners and classifies the
+    results.
+    """
+    scans: list[Coroutine[Any, Any, list[SarifResult] | None]] = [
+        _run_semgrep_precheck(worktree_path)
+    ]
+
+    if zizmor_available():
+        scans.append(run_zizmor_sarif(worktree_path))
+    else:
+        logger.info("zizmor not on PATH (argus[prechecks] extra not installed) — skipping scan")
+
+    if trivy_available():
+        scans.append(run_trivy_secrets_sarif(worktree_path))
+    else:
+        logger.info("trivy not on PATH (argus[prechecks] extra not installed) — skipping scan")
+
+    # squawk, checkov, actionlint, and eslint all require an explicit
+    # changed_files list -- see their own modules' docstrings for why
+    # (none has a whole-worktree mode the way semgrep/zizmor/trivy do).
+    if changed_files is not None:
+        if squawk_available():
+            scans.append(run_squawk_sarif(worktree_path, changed_files))
+        else:
+            logger.info(
+                "squawk not on PATH (argus[prechecks] extra not installed) — skipping scan"
+            )
+
+        if checkov_available():
+            scans.append(run_checkov_sarif(worktree_path, changed_files))
+        else:
+            logger.info(
+                "checkov not on PATH (argus[prechecks] extra not installed) — skipping scan"
+            )
+
+        if actionlint_available():
+            scans.append(run_actionlint_sarif(worktree_path, changed_files))
+        else:
+            logger.info(
+                "actionlint not on PATH (argus[prechecks] extra not installed) — skipping scan"
+            )
+
+        if eslint_available():
+            scans.append(run_eslint_sarif(worktree_path, changed_files))
+        else:
+            logger.info(
+                "eslint security bundle not installed (see argus/precheck/eslint_bundle/"
+                "README.md) — skipping scan"
+            )
+
+    scan_batches = await asyncio.gather(*scans)
+    results: list[SarifResult] = [r for batch in scan_batches for r in (batch or [])]
+
+    if changed_files is not None:
+        changed_set = set(changed_files)
+        before = len(results)
+        results = [r for r in results if r.file is not None and r.file in changed_set]
+        if before != len(results):
+            logger.info(
+                "Diff-scoped precheck results: %d -> %d (kept findings in %d changed file(s))",
+                before,
+                len(results),
+                len(changed_set),
+            )
+
     if not results:
         return PrecheckResult()
 

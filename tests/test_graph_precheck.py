@@ -219,6 +219,26 @@ async def test_precheck_rules_candidate_findings_attached_and_logged() -> None:
     assert len(mock_log.await_args.kwargs["firings"]) == 1
 
 
+async def test_precheck_rules_passes_changed_files_derived_from_diff() -> None:
+    """run_precheck must be diff-scoped on the live per-PR gate path -- see
+    argus.precheck.engine.run_precheck's own docstring for why (whole-
+    worktree scanners would otherwise flood every PR with pre-existing
+    findings, which _MAX_RESULTS would then truncate arbitrarily).
+    """
+    from argus.precheck.engine import PrecheckResult
+
+    with (
+        patch(
+            "argus.precheck.engine.run_precheck",
+            new=AsyncMock(return_value=PrecheckResult()),
+        ) as mock_run_precheck,
+        patch("argus.storage.precheck.log_candidate_firings", new=AsyncMock()),
+    ):
+        await _node_precheck_rules(_make_state(), {"configurable": {"worktree_path": "/tmp/wt"}})
+
+    mock_run_precheck.assert_awaited_once_with("/tmp/wt", changed_files=["a.py"])
+
+
 async def test_precheck_rules_verified_findings_set_fast_fail() -> None:
     from argus.precheck.engine import PrecheckResult
     from argus.precheck.sarif import SarifResult

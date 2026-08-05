@@ -23,6 +23,25 @@ from argus.precheck.engine import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stock_scanners_unavailable_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """zizmor, trivy, squawk, checkov, actionlint, and (once its bundle is
+    installed) eslint are all real, available scanners in this project's
+    own dev environment (each needed for its own scanner module's tests)
+    -- without this, every pre-existing run_precheck test in this file
+    (none of which anticipate more than the one scanner they were written
+    for) would trigger a real subprocess call against a nonexistent path
+    for every other scanner. Tests that specifically exercise one of these
+    scanners' code paths override the relevant one explicitly.
+    """
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.trivy_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.squawk_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.eslint_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.checkov_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.actionlint_available", lambda: False)
+
+
 def test_resolve_rules_dir_prefers_override(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ARGUS_RULES_DIR", str(tmp_path))
     from argus.config import clear_cache
@@ -69,8 +88,210 @@ async def test_run_precheck_noop_when_no_rule_files(
 ) -> None:
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
     monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: False)
     result = await run_precheck("/tmp/worktree")
     assert result == PrecheckResult()
+
+
+async def test_run_precheck_runs_zizmor_even_without_custom_rules_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stock scanning (zizmor here) must not depend on a custom
+    ARGUS_RULES_DIR being configured -- an earlier version of run_precheck
+    returned early whenever no custom rules dir existed, which would make
+    this permanently dead code in a deployment (like this project's own)
+    that has never wired up ARGUS_RULES_DIR.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+
+    from argus.precheck.sarif import SarifResult
+
+    zizmor_hit = SarifResult(
+        rule_id="unpinned-uses",
+        level="warning",
+        message="mutable tag",
+        file=".github/workflows/ci.yml",
+        line=5,
+    )
+
+    with (
+        patch(
+            "argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[zizmor_hit])
+        ),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert [f.rule_id for f in result.candidate_findings] == ["unpinned-uses"]
+
+
+async def test_run_precheck_merges_semgrep_and_zizmor_findings(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+
+    from argus.precheck.sarif import SarifResult
+
+    proc = _mock_subprocess(_sarif_bytes("custom-rule"))
+    zizmor_hit = SarifResult(
+        rule_id="unpinned-uses", level="warning", message="m", file="w.yml", line=1
+    )
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch(
+            "argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[zizmor_hit])
+        ),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert sorted(f.rule_id for f in result.candidate_findings) == [
+        "custom-rule",
+        "unpinned-uses",
+    ]
+
+
+async def test_run_precheck_runs_trivy_even_without_custom_rules_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same guarantee as zizmor: trivy (whole-worktree, like zizmor -- see
+    secrets_scanner.py) must not depend on a custom ARGUS_RULES_DIR.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.trivy_available", lambda: True)
+
+    from argus.precheck.sarif import SarifResult
+
+    trivy_hit = SarifResult(
+        rule_id="trivy/github-pat", level="error", message="m", file="config.py", line=1
+    )
+
+    with (
+        patch("argus.precheck.engine.run_trivy_secrets_sarif", new=AsyncMock(return_value=[trivy_hit])),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert [f.rule_id for f in result.candidate_findings] == ["trivy/github-pat"]
+
+
+async def test_run_precheck_runs_squawk_actionlint_checkov_eslint_when_changed_files_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """squawk/actionlint/checkov/eslint all require changed_files --
+    confirm all four are actually invoked and merged when it's provided.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.squawk_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.checkov_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.actionlint_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.eslint_available", lambda: True)
+
+    from argus.precheck.sarif import SarifResult
+
+    squawk_hit = SarifResult(
+        rule_id="squawk/require-concurrent-index-creation",
+        level="warning",
+        message="m",
+        file="a.sql",
+        line=1,
+    )
+    checkov_hit = SarifResult(
+        rule_id="checkov/CKV_AWS_63", level="error", message="m", file="a.tf", line=1
+    )
+    actionlint_hit = SarifResult(
+        rule_id="actionlint/action",
+        level="warning",
+        message="m",
+        file=".github/workflows/a.yml",
+        line=1,
+    )
+    eslint_hit = SarifResult(
+        rule_id="security/detect-child-process", level="warning", message="m", file="a.js", line=1
+    )
+
+    with (
+        patch(
+            "argus.precheck.engine.run_squawk_sarif", new=AsyncMock(return_value=[squawk_hit])
+        ),
+        patch(
+            "argus.precheck.engine.run_checkov_sarif", new=AsyncMock(return_value=[checkov_hit])
+        ),
+        patch(
+            "argus.precheck.engine.run_actionlint_sarif",
+            new=AsyncMock(return_value=[actionlint_hit]),
+        ),
+        patch(
+            "argus.precheck.engine.run_eslint_sarif", new=AsyncMock(return_value=[eslint_hit])
+        ),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck(
+            "/tmp/worktree",
+            changed_files=["a.sql", "a.tf", ".github/workflows/a.yml", "a.js"],
+        )
+
+    assert sorted(f.rule_id for f in result.candidate_findings) == [
+        "actionlint/action",
+        "checkov/CKV_AWS_63",
+        "security/detect-child-process",
+        "squawk/require-concurrent-index-creation",
+    ]
+
+
+async def test_run_precheck_skips_squawk_actionlint_checkov_eslint_when_no_changed_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.squawk_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.checkov_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.actionlint_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.eslint_available", lambda: True)
+
+    with (
+        patch("argus.precheck.engine.run_squawk_sarif", new=AsyncMock()) as mock_squawk,
+        patch("argus.precheck.engine.run_checkov_sarif", new=AsyncMock()) as mock_checkov,
+        patch("argus.precheck.engine.run_actionlint_sarif", new=AsyncMock()) as mock_actionlint,
+        patch("argus.precheck.engine.run_eslint_sarif", new=AsyncMock()) as mock_eslint,
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert result == PrecheckResult()
+    mock_squawk.assert_not_awaited()
+    mock_checkov.assert_not_awaited()
+    mock_actionlint.assert_not_awaited()
+    mock_eslint.assert_not_awaited()
+
+
+async def test_run_precheck_uses_stock_semgrep_packs_without_custom_dir(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: None)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: False)
+    monkeypatch.setenv("ARGUS_STOCK_SEMGREP_PACKS", "p/secrets, p/dockerfile")
+    from argus.config import clear_cache
+
+    clear_cache()
+
+    proc = _mock_subprocess(_sarif_bytes("p.secrets.hardcoded"))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec,
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert mock_exec.await_args is not None
+    args = mock_exec.await_args.args
+    config_values = [args[i + 1] for i, a in enumerate(args) if a == "--config"]
+    assert config_values == ["p/secrets", "p/dockerfile"]
+    assert [f.rule_id for f in result.candidate_findings] == ["p.secrets.hardcoded"]
 
 
 def _sarif_bytes(*rule_ids: str) -> bytes:
@@ -135,6 +356,98 @@ async def test_run_precheck_classifies_by_status(tmp_path, monkeypatch: pytest.M
     mock_exec.assert_awaited_once()
     assert [f.rule_id for f in result.verified_findings] == ["verified-rule"]
     assert [f.rule_id for f in result.candidate_findings] == ["candidate-rule"]
+
+
+def _sarif_bytes_with_files(*rule_id_file_pairs: tuple[str, str | None]) -> bytes:
+    return json.dumps(
+        {
+            "runs": [
+                {
+                    "results": [
+                        {
+                            "ruleId": rule_id,
+                            "level": "error",
+                            "message": {"text": f"hit for {rule_id}"},
+                            "locations": (
+                                []
+                                if file is None
+                                else [
+                                    {
+                                        "physicalLocation": {
+                                            "artifactLocation": {"uri": file},
+                                            "region": {"startLine": 1},
+                                        }
+                                    }
+                                ]
+                            ),
+                        }
+                        for rule_id, file in rule_id_file_pairs
+                    ]
+                }
+            ]
+        }
+    ).encode()
+
+
+async def test_run_precheck_scopes_to_changed_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    proc = _mock_subprocess(
+        _sarif_bytes_with_files(("touched-file-rule", "a.py"), ("untouched-file-rule", "b.py"))
+    )
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree", changed_files=["a.py"])
+
+    assert [f.rule_id for f in result.candidate_findings] == ["touched-file-rule"]
+
+
+async def test_run_precheck_drops_fileless_findings_when_scoped(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    proc = _mock_subprocess(_sarif_bytes_with_files(("no-location-rule", None)))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree", changed_files=["a.py"])
+
+    assert result == PrecheckResult()
+
+
+async def test_run_precheck_no_scoping_when_changed_files_is_none(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default (no changed_files argument) preserves whole-worktree
+    behavior -- every other run_precheck test in this file relies on this.
+    """
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    proc = _mock_subprocess(
+        _sarif_bytes_with_files(("rule-a", "a.py"), ("rule-b", "unrelated/b.py"))
+    )
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert sorted(f.rule_id for f in result.candidate_findings) == ["rule-a", "rule-b"]
 
 
 async def test_run_precheck_unknown_rule_id_defaults_to_candidate(
@@ -467,6 +780,29 @@ async def test_run_semgrep_sarif_directory_config_passed_as_is(
     assert [r.rule_id for r in result] == ["r1"]
     assert mock_exec.await_args is not None
     assert str(rules_dir) in mock_exec.await_args.args
+
+
+async def test_run_semgrep_sarif_accepts_multiple_config_sources(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A list of config sources (local dir + registry pack id) becomes
+    multiple --config flags in one invocation -- semgrep's own native way
+    to merge sources, not a separate scan per source.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    rules_dir = tmp_path / "rules"
+    rules_dir.mkdir()
+    proc = _mock_subprocess(_sarif_bytes("r1"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        result = await run_semgrep_sarif("/tmp/worktree", [rules_dir, "p/secrets"])
+
+    assert result is not None
+    assert mock_exec.await_args is not None
+    args = mock_exec.await_args.args
+    assert args.count("--config") == 2
+    config_values = [args[i + 1] for i, a in enumerate(args) if a == "--config"]
+    assert config_values == [str(rules_dir), "p/secrets"]
     assert "--no-rewrite-rule-ids" in mock_exec.await_args.args
     assert "cwd" not in mock_exec.await_args.kwargs
 

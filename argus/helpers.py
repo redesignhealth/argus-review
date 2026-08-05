@@ -29,6 +29,35 @@ def sanitize_file_paths(files: list[str], repo_root: str) -> list[str]:
     return safe
 
 
+def extract_changed_files(diff: str) -> list[str]:
+    """Return the sorted, deduped set of repo-relative paths touched by a
+    unified diff (both sides of a rename).
+
+    Used to scope ``argus.precheck.engine.run_precheck`` to files this PR
+    actually touched — a static-analysis scanner run against the whole
+    worktree (as several precheck scanners now are, beyond the original
+    small-footprint custom rules) would otherwise surface every pre-existing
+    finding in the repo on every PR, not just what this PR introduced or
+    changed, and ``run_precheck``'s own ``_MAX_RESULTS`` cap would then
+    truncate that flood arbitrarily -- silently dropping real, in-scope
+    findings alongside the noise.
+
+    Same ``diff --git a/(\\S+) b/(\\S+)`` extraction already used ad hoc in
+    ``graph._is_image_tag_bump_only``/``_is_high_blast_radius`` — centralized
+    here rather than re-deriving the regex a third time.
+    """
+    if not diff:
+        return []
+    path_pairs: list[tuple[str, str]] = re.findall(
+        r"^diff --git a/(\S+) b/(\S+)", diff, re.MULTILINE
+    )
+    files: set[str] = set()
+    for a_path, b_path in path_pairs:
+        files.add(a_path)
+        files.add(b_path)
+    return sorted(files)
+
+
 def filter_diff_for_files(full_diff: str, files: list[str]) -> str:
     """Extract only the diff hunks for the specified files."""
     if not files or not full_diff:

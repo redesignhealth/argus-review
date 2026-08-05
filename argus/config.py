@@ -60,6 +60,14 @@ class Settings(BaseSettings):
             name the way prompts are, so there's nothing to merge. Only
             consulted when the ``prechecks`` extra is installed; see
             ``argus.precheck``.
+        ARGUS_STOCK_SEMGREP_PACKS: Comma-separated semgrep registry pack IDs
+            (e.g. ``"p/secrets"``) to run alongside (or instead of) a custom
+            ``ARGUS_RULES_DIR`` — unlike a local rules directory, each pack
+            is fetched over the network by semgrep itself on first use
+            (cached locally after). Unset by default: this is an opt-in
+            addition of vetted, community-maintained rules, not a silent
+            default, since it adds a network dependency to the live gate.
+            See ``docs/PRECHECKS.md``'s "stock rule sources" section.
         ARGUS_REPO_CACHE: Mirror-clone cache directory.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
@@ -99,6 +107,7 @@ class Settings(BaseSettings):
     ARGUS_PROMPTS_DIR: str | None = None
     ARGUS_NO_PROMPT_OVERRIDES: bool = False
     ARGUS_RULES_DIR: str | None = None
+    ARGUS_STOCK_SEMGREP_PACKS: str | None = None
     ARGUS_REPO_CACHE: str | None = None
 
     LANGSMITH_API_KEY: str | None = None
