@@ -276,12 +276,23 @@ def apply_precheck_scanner_failure_gate(
     # string replace. count=1 -- there's exactly one verdict header line
     # to rewrite, and a broader replace risks touching a coincidental
     # "**Verdict**:"-shaped line quoted elsewhere in the comment body.
-    response.review_comment = re.sub(
+    # subn (not sub) so a header that doesn't match the expected shape --
+    # e.g. future drift in the pr-review-writer/pr-review-lite prompts --
+    # is a loud warning, not a silent no-op leaving the header still
+    # reading the old verdict while the structured response and the
+    # appended note below both say BLOCKING.
+    response.review_comment, match_count = re.subn(
         r"\*\*Verdict\*\*:.*?(?=\n|$)",
         f"**Verdict**: 🚫 BLOCKING | **Risk**: {response.risk_level.value}",
         response.review_comment,
         count=1,
     )
+    if match_count == 0:
+        logger.warning(
+            "apply_precheck_scanner_failure_gate: no '**Verdict**:'-shaped line found in "
+            "review_comment to rewrite -- the rendered comment's header may still read the "
+            "old verdict despite response.verdict now being BLOCKING"
+        )
     response.review_comment += f"\n\n---\n\n### 🚫 Verdict forced to BLOCKING\n\n{note}\n"
     return True
 

@@ -3051,7 +3051,8 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     ):
         logger.warning(
             "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set -- forced verdict to BLOCKING "
-            "because %d precheck scanner(s) did not complete this round: %s",
+            "(risk_level=%s) because %d precheck scanner(s) did not complete this round: %s",
+            response.risk_level.value,
             len(precheck_scanner_failures),
             ", ".join(precheck_scanner_failures),
         )

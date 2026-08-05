@@ -5,10 +5,14 @@ These are security controls and parsing logic with no LLM dependency.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from argus.helpers import (
+    _RISK_LEVEL_ORDER,
     append_degraded_coverage_section,
     apply_precheck_scanner_failure_gate,
     build_degraded_coverage_labels,
@@ -354,17 +358,21 @@ class TestApplyPrecheckScannerFailureGate:
 
     def test_noop_when_flag_off(self) -> None:
         response = _response()
+        original_comment = response.review_comment
         fired = apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=False)
         assert fired is False
         assert response.verdict == Verdict.APPROVE
         assert response.findings == []
+        assert response.review_comment == original_comment
 
     def test_noop_when_no_failures(self) -> None:
         response = _response()
+        original_comment = response.review_comment
         fired = apply_precheck_scanner_failure_gate(response, [], block_on_failure=True)
         assert fired is False
         assert response.verdict == Verdict.APPROVE
         assert response.findings == []
+        assert response.review_comment == original_comment
 
     def test_noop_when_already_blocking(self) -> None:
         """Never touches a review that's already BLOCKING for its own
@@ -372,10 +380,12 @@ class TestApplyPrecheckScannerFailureGate:
         verdict.
         """
         response = _response(verdict=Verdict.BLOCKING)
+        original_comment = response.review_comment
         fired = apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
         assert fired is False
         assert response.verdict == Verdict.BLOCKING
         assert response.findings == []
+        assert response.review_comment == original_comment
 
     def test_forces_blocking_when_flag_on_and_failures_present(self) -> None:
         response = _response()
@@ -432,6 +442,35 @@ class TestApplyPrecheckScannerFailureGate:
         response = _response(risk_level=RiskLevel.MEDIUM)
         apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
         assert response.risk_level == RiskLevel.HIGH
+
+    def test_risk_level_already_high_stays_high(self) -> None:
+        """Exact-boundary case: HIGH is neither raised nor downgraded."""
+        response = _response(risk_level=RiskLevel.HIGH)
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert response.risk_level == RiskLevel.HIGH
+
+    def test_warns_and_still_appends_note_when_comment_has_no_verdict_header(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """If review_comment doesn't contain a '**Verdict**:'-shaped line,
+        the re.subn rewrite can't find anything to rewrite -- this must not
+        silently no-op; it should log a warning and still append the
+        explanatory section so the forced-BLOCKING reason is visible
+        somewhere in the comment.
+        """
+        response = _response(review_comment="## Code Review\n\nNo header here at all.")
+        with caplog.at_level(logging.WARNING):
+            apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert "No header here at all." in response.review_comment
+        assert "Verdict forced to BLOCKING" in response.review_comment
+        assert any(
+            "no '**Verdict**:'-shaped line found" in record.message for record in caplog.records
+        )
+
+
+class TestRiskLevelOrderExhaustive:
+    def test_covers_every_risk_level(self) -> None:
+        assert set(_RISK_LEVEL_ORDER) == set(RiskLevel)
 
 
 class TestAppendDegradedCoverageSection:
