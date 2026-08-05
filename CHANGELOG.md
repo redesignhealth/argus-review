@@ -35,6 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `asyncio.gather` rather than sequentially -- both prerequisites for
   adding the additional scanners above without flooding every PR with
   pre-existing findings or stacking up each scanner's own timeout.
+- `PrecheckResult.failed_scanners`: a scanner that crashes/times out is
+  now surfaced in the review comment's degraded-coverage section, not
+  just a backend log line, so a genuine coverage gap is distinguishable
+  from "ran clean, found nothing." Purely observability by default.
+- `ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE` (opt-in, off by default):
+  forces the verdict to `BLOCKING` when a precheck scanner failed this
+  round, for repos that have decided a silently-skipped deterministic
+  gate is a worse outcome than a blocked review. See `docs/PRECHECKS.md`'s
+  "Opting into fail-closed on scanner failure" section.
 
 ## [0.1.3] - 2026-08-03
 

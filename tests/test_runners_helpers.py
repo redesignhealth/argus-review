@@ -10,6 +10,7 @@ from pathlib import Path
 
 from argus.helpers import (
     append_degraded_coverage_section,
+    apply_precheck_scanner_failure_gate,
     build_degraded_coverage_labels,
     collect_reviewed_files,
     extract_changed_files,
@@ -18,7 +19,16 @@ from argus.helpers import (
     sanitize_file_paths,
     failed_reviewer_labels,
 )
+from argus.models import ReviewResponse, RiskLevel, Verdict
 from argus.pipeline_models import RawFinding, SystemReviewResult
+
+
+def _response(verdict: Verdict = Verdict.APPROVE) -> ReviewResponse:
+    return ReviewResponse(
+        verdict=verdict,
+        risk_level=RiskLevel.LOW,
+        review_comment="body",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +338,58 @@ class TestBuildDegradedCoverageLabels:
             ("specialist/orchestration::g2", "timeout"),
             ("precheck:zizmor", "scanner did not complete this round"),
         ]
+
+
+class TestApplyPrecheckScannerFailureGate:
+    """ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is opt-in and off by default
+    -- see its docstring in argus/config.py for the fail-open-vs-fail-closed
+    tradeoff. This gate must only ever make the verdict stricter, never
+    looser, and must be a true no-op (no mutation) in every case where it
+    doesn't fire.
+    """
+
+    def test_noop_when_flag_off(self) -> None:
+        response = _response()
+        fired = apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=False)
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+        assert response.findings == []
+
+    def test_noop_when_no_failures(self) -> None:
+        response = _response()
+        fired = apply_precheck_scanner_failure_gate(response, [], block_on_failure=True)
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+        assert response.findings == []
+
+    def test_noop_when_already_blocking(self) -> None:
+        """Never touches a review that's already BLOCKING for its own
+        reasons -- this flag only ever strengthens, never re-derives, the
+        verdict.
+        """
+        response = _response(verdict=Verdict.BLOCKING)
+        fired = apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert fired is False
+        assert response.verdict == Verdict.BLOCKING
+        assert response.findings == []
+
+    def test_forces_blocking_when_flag_on_and_failures_present(self) -> None:
+        response = _response()
+        fired = apply_precheck_scanner_failure_gate(
+            response, ["zizmor", "trivy"], block_on_failure=True
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+        assert response.risk_level == RiskLevel.HIGH
+        assert len(response.findings) == 1
+        finding = response.findings[0]
+        assert finding.severity.value == "BLOCKING"
+        assert finding.category == "deterministic-precheck"
+        # Sorted, not insertion order -- deterministic regardless of which
+        # scanner's coroutine happened to finish first.
+        assert "trivy" in finding.description
+        assert "zizmor" in finding.description
+        assert finding.description.index("trivy") < finding.description.index("zizmor")
 
 
 class TestAppendDegradedCoverageSection:

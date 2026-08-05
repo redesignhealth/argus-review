@@ -105,6 +105,26 @@ OWN execution-error/exit-code/timeout failures are caught by this
 observability layer today; a parse failure specifically is still silently
 indistinguishable from "ran clean" for those three.
 
+### Opting into fail-closed on scanner failure
+
+Set `ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE=true` to make a scanner
+failure force the verdict to `BLOCKING`, instead of the default (surface
+it in the review comment's degraded-coverage section, but let the
+review's own verdict stand on its own merits). Off by default: every
+other part of this module is deliberately fail-open (see the module
+docstring) — a broken scanner should never, by default, be the reason a
+review can't complete. This flag exists for repos that have decided the
+opposite tradeoff is worth it — e.g. one whose own CI treats a specific
+scanner as a hard release gate, where "the gate silently didn't run" is a
+worse outcome than "the review is blocked until it's fixed."
+
+The gate only ever makes the verdict *stricter*: it never turns an
+already-`BLOCKING` verdict back to `APPROVE`, and never fires at all when
+there's no scanner failure regardless of the flag. It's also scoped to
+precheck scanner failures specifically — a killed/timed-out LLM reviewer
+session (a different, pre-existing failure class this flag was never
+meant to cover) doesn't trigger it.
+
 ## Stock rule sources vs. custom/mined rules
 
 `run_precheck` runs several independent scanners and merges their findings

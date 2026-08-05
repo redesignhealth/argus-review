@@ -68,6 +68,24 @@ class Settings(BaseSettings):
             addition of vetted, community-maintained rules, not a silent
             default, since it adds a network dependency to the live gate.
             See ``docs/PRECHECKS.md``'s "stock rule sources" section.
+        ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE: Set truthy to force the
+            verdict to BLOCKING whenever a deterministic precheck scanner
+            crashed/timed out/errored this round (``PrecheckResult.
+            failed_scanners`` non-empty) instead of the default fail-open
+            behavior (surface it in the review comment's degraded-coverage
+            section — see ``argus.helpers.build_degraded_coverage_labels``
+            — but let the review's own verdict stand on its own merits).
+            False by default: every other part of this module's design is
+            deliberately fail-open (a broken scanner should never be the
+            reason a review can't complete), and this flag exists for
+            callers who've decided the opposite tradeoff is worth it for
+            their repo -- e.g. one whose CI treats a specific scanner as a
+            hard release gate, where "the gate silently didn't run" is a
+            worse failure mode than "the review is blocked until it's
+            fixed." Deliberately does NOT downgrade an existing APPROVE
+            with no failures, and never *un-blocks* a review that would
+            have been BLOCKING anyway -- it only ever makes the verdict
+            stricter, never looser.
         ARGUS_REPO_CACHE: Mirror-clone cache directory.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
@@ -108,6 +126,7 @@ class Settings(BaseSettings):
     ARGUS_NO_PROMPT_OVERRIDES: bool = False
     ARGUS_RULES_DIR: str | None = None
     ARGUS_STOCK_SEMGREP_PACKS: str | None = None
+    ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE: bool = False
     ARGUS_REPO_CACHE: str | None = None
 
     LANGSMITH_API_KEY: str | None = None

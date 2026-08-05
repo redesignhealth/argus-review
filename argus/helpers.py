@@ -11,6 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from argus.models import Finding, ReviewResponse, RiskLevel, Severity, Verdict
 from argus.pipeline_models import RawFinding, SystemReviewResult
 
 logger = logging.getLogger(__name__)
@@ -183,6 +184,61 @@ def build_degraded_coverage_labels(
         for name in graph_result.get("precheck_scanner_failures", [])
     ]
     return failed_labels
+
+
+def apply_precheck_scanner_failure_gate(
+    response: ReviewResponse,
+    precheck_scanner_failures: list[str],
+    block_on_failure: bool,
+) -> bool:
+    """Force ``response``'s verdict to BLOCKING if a precheck scanner
+    failed this round and the opt-in ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE``
+    setting is on (see that setting's own docstring in ``argus/config.py``
+    for the fail-open-vs-fail-closed tradeoff this exists for). Mutates
+    ``response`` in place; returns whether it did anything, purely so the
+    caller can decide whether to log.
+
+    No-op in every other case: an empty ``precheck_scanner_failures``,
+    ``block_on_failure`` false (the default), or a verdict that's already
+    BLOCKING (nothing to strengthen). This only ever makes the verdict
+    stricter, never looser -- it will never turn a BLOCKING verdict into
+    APPROVE, and never fires at all when there's no scanner failure to
+    react to regardless of the flag.
+
+    Pulled out of ``graph.run_review`` for the same reason
+    :func:`build_degraded_coverage_labels` was -- no dedicated test
+    harness exists for that function as a whole, and this logic is
+    directly unit-testable in isolation once separated from it.
+    """
+    if (
+        not precheck_scanner_failures
+        or response.verdict == Verdict.BLOCKING
+        or not block_on_failure
+    ):
+        return False
+    response.verdict = Verdict.BLOCKING
+    response.risk_level = RiskLevel.HIGH
+    response.findings.append(
+        Finding(
+            severity=Severity.BLOCKING,
+            category="deterministic-precheck",
+            file=None,
+            line=None,
+            description=(
+                "Precheck scanner(s) "
+                f"{', '.join(sorted(precheck_scanner_failures))} did not complete this "
+                "round (crashed, timed out, or hit an execution error). "
+                "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set, so this round cannot be "
+                "APPROVE without confirmed coverage from every configured scanner."
+            ),
+            suggestion=(
+                "Re-run once the underlying scanner failure is resolved -- see this "
+                "round's logs (or the degraded-coverage section above) for which "
+                "scanner(s) failed and why."
+            ),
+        )
+    )
+    return True
 
 
 def append_degraded_coverage_section(

@@ -37,7 +37,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
-from argus.helpers import append_degraded_coverage_section, build_degraded_coverage_labels
+from argus.helpers import (
+    append_degraded_coverage_section,
+    apply_precheck_scanner_failure_gate,
+    build_degraded_coverage_labels,
+)
 from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
 
@@ -3030,6 +3034,26 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
         )
         response.review_comment = append_degraded_coverage_section(
             response.review_comment, failed_labels
+        )
+
+    # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
+    # own docstring (argus/config.py) for the fail-open-vs-fail-closed
+    # tradeoff, and apply_precheck_scanner_failure_gate's for why this is
+    # a helpers.py call rather than inline logic here. Deliberately keyed
+    # on precheck_scanner_failures alone, not the combined failed_labels
+    # above -- a killed/timed-out LLM reviewer session is a different
+    # failure class this flag was never scoped to.
+    precheck_scanner_failures = result.get("precheck_scanner_failures", [])
+    if apply_precheck_scanner_failure_gate(
+        response,
+        precheck_scanner_failures,
+        get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
+    ):
+        logger.warning(
+            "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set -- forced verdict to BLOCKING "
+            "because %d precheck scanner(s) did not complete this round: %s",
+            len(precheck_scanner_failures),
+            ", ".join(precheck_scanner_failures),
         )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
