@@ -101,7 +101,7 @@ async def test_run_checkov_sarif_skips_files_that_dont_exist_on_disk(
 async def test_run_checkov_sarif_parses_hits_and_namespaces_rule_id(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "iam.tf").write_text("resource \"aws_iam_policy\" \"bad\" {}\n")
+    (tmp_path / "iam.tf").write_text('resource "aws_iam_policy" "bad" {}\n')
     monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
 
     with patch(
@@ -182,7 +182,7 @@ async def test_run_checkov_sarif_uses_file_equals_form_not_bare_dash_f(
 async def test_run_checkov_sarif_clean_scan_returns_empty_list(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "iam.tf").write_text("resource \"aws_iam_policy\" \"ok\" {}\n")
+    (tmp_path / "iam.tf").write_text('resource "aws_iam_policy" "ok" {}\n')
     monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
 
     with patch(
@@ -197,7 +197,7 @@ async def test_run_checkov_sarif_clean_scan_returns_empty_list(
 async def test_run_checkov_sarif_returns_none_on_genuine_failure(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "iam.tf").write_text("resource \"aws_iam_policy\" \"bad\" {}\n")
+    (tmp_path / "iam.tf").write_text('resource "aws_iam_policy" "bad" {}\n')
     monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
 
     with patch(
@@ -215,7 +215,7 @@ async def test_run_checkov_sarif_returns_none_when_sarif_file_missing(
     """A success exit code (0 or 1) with no results_sarif.sarif actually
     written is treated as a failure, not a silent empty result.
     """
-    (tmp_path / "iam.tf").write_text("resource \"aws_iam_policy\" \"bad\" {}\n")
+    (tmp_path / "iam.tf").write_text('resource "aws_iam_policy" "bad" {}\n')
     monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
 
     with patch(
@@ -230,7 +230,7 @@ async def test_run_checkov_sarif_returns_none_when_sarif_file_missing(
 async def test_run_checkov_sarif_returns_none_on_timeout(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "iam.tf").write_text("resource \"aws_iam_policy\" \"bad\" {}\n")
+    (tmp_path / "iam.tf").write_text('resource "aws_iam_policy" "bad" {}\n')
     monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
     monkeypatch.setattr("argus.precheck.terraform_scanner._CHECKOV_TIMEOUT_S", 0.01)
 

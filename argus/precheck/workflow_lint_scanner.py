@@ -98,9 +98,7 @@ async def run_actionlint_sarif(
     matching every other scanner's contract in this package.
     """
     if not actionlint_available():
-        logger.info(
-            "actionlint not on PATH (argus[prechecks] extra not installed) — skipping scan"
-        )
+        logger.info("actionlint not on PATH (argus[prechecks] extra not installed) — skipping scan")
         return None
 
     workflow_files = [

@@ -149,7 +149,12 @@ async def test_run_eslint_sarif_maps_severity_2_to_error(
             {
                 "filePath": f"{tmp_path}/bad.js",
                 "messages": [
-                    {"ruleId": "security/detect-eval-with-expression", "severity": 2, "message": "m", "line": 2}
+                    {
+                        "ruleId": "security/detect-eval-with-expression",
+                        "severity": 2,
+                        "message": "m",
+                        "line": 2,
+                    }
                 ],
             }
         )

@@ -63,7 +63,9 @@ def eslint_available() -> bool:
     return _ESLINT_BIN.is_file()
 
 
-async def run_eslint_sarif(worktree_path: str, changed_files: list[str]) -> list[SarifResult] | None:
+async def run_eslint_sarif(
+    worktree_path: str, changed_files: list[str]
+) -> list[SarifResult] | None:
     """Run the bundled eslint + eslint-plugin-security against the changed
     JS/TS files in ``changed_files`` that still exist on disk; return
     unclassified results.

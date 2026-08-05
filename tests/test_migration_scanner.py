@@ -27,7 +27,9 @@ def _mock_subprocess(stdout: bytes, stderr: bytes = b"", returncode: int = 0) ->
 def test_squawk_available_reflects_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("argus.precheck.migration_scanner.shutil.which", lambda _: None)
     assert squawk_available() is False
-    monkeypatch.setattr("argus.precheck.migration_scanner.shutil.which", lambda _: "/usr/bin/squawk")
+    monkeypatch.setattr(
+        "argus.precheck.migration_scanner.shutil.which", lambda _: "/usr/bin/squawk"
+    )
     assert squawk_available() is True
 
 

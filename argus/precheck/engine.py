@@ -603,9 +603,7 @@ async def run_precheck(
         if squawk_available():
             scans.append(run_squawk_sarif(worktree_path, changed_files))
         else:
-            logger.info(
-                "squawk not on PATH (argus[prechecks] extra not installed) — skipping scan"
-            )
+            logger.info("squawk not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
         if checkov_available():
             scans.append(run_checkov_sarif(worktree_path, changed_files))

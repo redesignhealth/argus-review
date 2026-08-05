@@ -116,9 +116,7 @@ async def test_run_precheck_runs_zizmor_even_without_custom_rules_dir(
     )
 
     with (
-        patch(
-            "argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[zizmor_hit])
-        ),
+        patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[zizmor_hit])),
         patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
     ):
         result = await run_precheck("/tmp/worktree")
@@ -143,9 +141,7 @@ async def test_run_precheck_merges_semgrep_and_zizmor_findings(
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=proc),
-        patch(
-            "argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[zizmor_hit])
-        ),
+        patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=[zizmor_hit])),
         patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
     ):
         result = await run_precheck("/tmp/worktree")
@@ -172,7 +168,9 @@ async def test_run_precheck_runs_trivy_even_without_custom_rules_dir(
     )
 
     with (
-        patch("argus.precheck.engine.run_trivy_secrets_sarif", new=AsyncMock(return_value=[trivy_hit])),
+        patch(
+            "argus.precheck.engine.run_trivy_secrets_sarif", new=AsyncMock(return_value=[trivy_hit])
+        ),
         patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
     ):
         result = await run_precheck("/tmp/worktree")
@@ -216,19 +214,13 @@ async def test_run_precheck_runs_squawk_actionlint_checkov_eslint_when_changed_f
     )
 
     with (
-        patch(
-            "argus.precheck.engine.run_squawk_sarif", new=AsyncMock(return_value=[squawk_hit])
-        ),
-        patch(
-            "argus.precheck.engine.run_checkov_sarif", new=AsyncMock(return_value=[checkov_hit])
-        ),
+        patch("argus.precheck.engine.run_squawk_sarif", new=AsyncMock(return_value=[squawk_hit])),
+        patch("argus.precheck.engine.run_checkov_sarif", new=AsyncMock(return_value=[checkov_hit])),
         patch(
             "argus.precheck.engine.run_actionlint_sarif",
             new=AsyncMock(return_value=[actionlint_hit]),
         ),
-        patch(
-            "argus.precheck.engine.run_eslint_sarif", new=AsyncMock(return_value=[eslint_hit])
-        ),
+        patch("argus.precheck.engine.run_eslint_sarif", new=AsyncMock(return_value=[eslint_hit])),
         patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
     ):
         result = await run_precheck(

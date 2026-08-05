@@ -77,9 +77,7 @@ async def test_run_actionlint_sarif_skips_files_that_dont_exist_on_disk(
     mock_exec.assert_not_called()
 
 
-async def test_run_actionlint_sarif_parses_hits(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_run_actionlint_sarif_parses_hits(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     workflows = tmp_path / ".github" / "workflows"
     workflows.mkdir(parents=True)
     (workflows / "ci.yml").write_text("name: ci\non: push\njobs: {}\n")

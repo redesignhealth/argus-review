@@ -108,8 +108,7 @@ async def run_checkov_sarif(
     tf_files = [
         f
         for f in changed_files
-        if f.endswith((".tf", ".tf.json"))
-        and os.path.isfile(os.path.join(worktree_path, f))
+        if f.endswith((".tf", ".tf.json")) and os.path.isfile(os.path.join(worktree_path, f))
     ]
     if not tf_files:
         return []
