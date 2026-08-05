@@ -91,10 +91,19 @@ section (the same mechanism already used for a killed/timed-out LLM
 reviewer session), so a scanner failure is visible in the rendered review
 comment, not just a backend log line. Still purely observability: nothing
 about the review's verdict, gating, or blocking behavior changes based on
-this. semgrep is not tracked here — `_run_semgrep_precheck` already
-collapses its own `None` into `[]` before this aggregation ever sees it
-(see that function's docstring for why); its own failures are only visible
-via the plain log line semgrep's own runner already emits.
+this.
+
+This does NOT close every gap, only the ones each scanner's own wrapper
+already reports as `None`. semgrep is not tracked here at all —
+`_run_semgrep_precheck` already collapses its own `None` into `[]` before
+this aggregation ever sees it (see that function's docstring for why); its
+own failures are only visible via the plain log line semgrep's own runner
+already emits. Less obviously, squawk/actionlint's JSON-parse-failure
+except clauses and Checkov's SARIF-parsing path all still return `[]`, not
+`None`, on a genuinely malformed-but-successfully-exited run — only THEIR
+OWN execution-error/exit-code/timeout failures are caught by this
+observability layer today; a parse failure specifically is still silently
+indistinguishable from "ran clean" for those three.
 
 ## Stock rule sources vs. custom/mined rules
 

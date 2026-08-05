@@ -60,17 +60,28 @@ class PrecheckResult:
     review at all until re-verified.
 
     ``failed_scanners`` names every scanner that returned ``None`` this run
-    (genuinely didn't complete -- crashed, timed out, unparseable output --
-    as opposed to running clean with zero hits). Observability only: this
-    module stays fail-open regardless (a failed scanner never blocks or
-    slows down a review, same as before), but a failure that was
-    previously indistinguishable from "ran clean" is now surfaced to the
-    caller so it can be made visible in the review comment/logs rather than
-    silently lost. Deliberately does NOT include semgrep:
-    ``_run_semgrep_precheck`` already collapses its own ``None`` into
-    ``[]`` before it reaches this aggregation (see that function's
-    docstring for why), so a semgrep failure is not observable at this
-    layer without a separate, larger change to that function's contract.
+    (genuinely didn't complete -- crashed, timed out, or hit its own
+    execution error, as opposed to running clean with zero hits).
+    Observability only: this module stays fail-open regardless (a failed
+    scanner never blocks or slows down a review, same as before), but a
+    failure that was previously indistinguishable from "ran clean" is now
+    surfaced to the caller so it can be made visible in the review
+    comment/logs rather than silently lost.
+
+    This does NOT cover every failure mode, only the ones each scanner's
+    own wrapper already reports as ``None``. Two known gaps, not yet
+    closed: semgrep is deliberately excluded here -- ``_run_semgrep_precheck``
+    already collapses its own ``None`` into ``[]`` before this aggregation
+    ever sees it (see that function's docstring for why), so a semgrep
+    failure needs a separate, larger change to become observable at this
+    layer. Less obviously, squawk/actionlint's ``except (json.JSONDecodeError,
+    TypeError)`` clauses (migration_scanner.py, workflow_lint_scanner.py) and
+    Checkov's SARIF-parsing path (``parse_semgrep_sarif``) all still return
+    ``[]``, not ``None``, on a genuine parse failure -- only THEIR OWN
+    execution-error/exit-code failures (a crash, a timeout, a missing
+    binary) are caught here. A malformed-but-successfully-exited run from
+    any of those three is still silently indistinguishable from "ran clean"
+    today.
     """
 
     candidate_findings: list[SarifResult] = field(default_factory=list)

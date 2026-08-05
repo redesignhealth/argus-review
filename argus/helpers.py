@@ -9,6 +9,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 from argus.pipeline_models import RawFinding, SystemReviewResult
 
@@ -158,14 +159,47 @@ def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str,
     ]
 
 
+def build_degraded_coverage_labels(
+    findings_models: list[SystemReviewResult], graph_result: dict[str, Any]
+) -> list[tuple[str, str]]:
+    """Combine failed LLM-reviewer sessions with failed precheck scanners
+    into one ``(label, reason)`` list for :func:`append_degraded_coverage_section`.
+
+    Pulled out of ``graph.run_review`` specifically so the exact state-key
+    lookup (``graph_result.get("precheck_scanner_failures", [])``) is
+    covered by a direct unit test -- that key is written on the producer
+    side by ``graph._node_precheck_rules`` as a literal string
+    (``update["precheck_scanner_failures"]``) and read here as another
+    literal string; a typo on either end would otherwise pass the full
+    test suite undetected, since nothing previously exercised this read
+    path end to end (``run_review`` itself has no dedicated test harness).
+    A typo in the producer's own literal is still only caught by
+    ``tests/test_graph_precheck.py``'s existing assertion on that exact
+    key -- this function closes the read side, not the write side.
+    """
+    failed_labels = failed_reviewer_labels(findings_models)
+    failed_labels += [
+        (f"precheck:{name}", "scanner did not complete this round")
+        for name in graph_result.get("precheck_scanner_failures", [])
+    ]
+    return failed_labels
+
+
 def append_degraded_coverage_section(
     review_comment: str, failed_labels: list[tuple[str, str]]
 ) -> str:
-    """Append a visible "Degraded coverage" section listing failed reviewers.
+    """Append a visible "Degraded coverage" section listing failed reviewers
+    and/or deterministic precheck scanners.
 
     No-op when ``failed_labels`` is empty. The markdown review body is not
     schema-frozen, so this is safe to append; it is purely additive to the
-    rendered comment and does not change any structured field.
+    rendered comment and does not change any structured field. Deliberately
+    worded to cover both LLM reviewer sessions (killed/timed out) and
+    precheck scanners (crashed/timed out/produced unparseable output) --
+    each entry's own ``reason`` string carries the specific detail, so the
+    shared intro paragraph only needs to say what both classes have in
+    common: something didn't complete, and the resulting silence isn't
+    evidence the area was actually clean.
     """
     if not failed_labels:
         return review_comment
@@ -173,9 +207,9 @@ def append_degraded_coverage_section(
     section = (
         "\n\n---\n\n"
         "### ⚠ Degraded coverage\n\n"
-        "The following reviewer session(s) did not complete (timeout or worker "
-        "crash) and reported 0 findings as a result, not because "
-        "the area was clean. Treat these areas as **not reviewed** this round:\n\n"
+        "The following did not complete this round and produced no findings "
+        "as a result, not because the area was clean. Treat these areas as "
+        "**not reviewed** this round:\n\n"
         f"{bullets}\n"
     )
     return review_comment + section

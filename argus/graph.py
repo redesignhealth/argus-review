@@ -37,7 +37,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
-from argus.helpers import append_degraded_coverage_section, failed_reviewer_labels
+from argus.helpers import append_degraded_coverage_section, build_degraded_coverage_labels
 from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
 
@@ -1416,9 +1416,13 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
         # Observability only -- see PrecheckResult's docstring: this module
         # stays fail-open regardless, but a scanner failure that was
         # previously indistinguishable from "ran clean" should still be
-        # visible somewhere. Consumed by _node_write_review, which appends
-        # it to the review comment via the same degraded-coverage pattern
-        # already used for killed/timed-out LLM reviewer sessions.
+        # visible somewhere. Consumed by run_review/_invoke_graph (not this
+        # node, and not _node_write_review -- that node runs and finalizes
+        # response.review_comment before this key's value is read; the
+        # actual read happens off the final graph state, after the graph
+        # has finished), which appends it to the review comment via the
+        # same degraded-coverage pattern already used for killed/timed-out
+        # LLM reviewer sessions.
         update["precheck_scanner_failures"] = result.failed_scanners
 
     if result.candidate_findings:
@@ -3014,11 +3018,9 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     # precheck.engine.run_precheck itself (this module stays fail-open
     # regardless of what's surfaced here) — this is the second, PR-visible
     # half of that same observability, not a duplicate warning path.
-    failed_labels = failed_reviewer_labels(findings_models)
-    failed_labels += [
-        (f"precheck:{name}", "scanner did not complete this round")
-        for name in result.get("precheck_scanner_failures", [])
-    ]
+    # See build_degraded_coverage_labels' own docstring for why the
+    # precheck_scanner_failures key lookup lives there, not inline here.
+    failed_labels = build_degraded_coverage_labels(findings_models, result)
     if failed_labels:
         logger.warning(
             "Degraded coverage: %d reviewer session(s)/scanner(s) did not complete and "

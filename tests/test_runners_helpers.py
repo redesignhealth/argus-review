@@ -10,6 +10,7 @@ from pathlib import Path
 
 from argus.helpers import (
     append_degraded_coverage_section,
+    build_degraded_coverage_labels,
     collect_reviewed_files,
     extract_changed_files,
     filter_diff_for_files,
@@ -286,6 +287,47 @@ class TestTimedOutReviewerLabels:
 
     def test_empty_results(self) -> None:
         assert failed_reviewer_labels([]) == []
+
+
+class TestBuildDegradedCoverageLabels:
+    """Regression coverage for the exact key lookup
+    (``graph_result.get("precheck_scanner_failures", [])``) that a typo on
+    either the producer side (``graph._node_precheck_rules``) or this read
+    side would otherwise let slip past the full test suite undetected --
+    see this function's own docstring for why it was pulled out of
+    ``graph.run_review`` specifically to make this testable in isolation.
+    """
+
+    def test_no_failures_of_either_kind_returns_empty(self) -> None:
+        results = [SystemReviewResult(system_group="g1", findings=[], files_explored=[])]
+        assert build_degraded_coverage_labels(results, {}) == []
+
+    def test_missing_key_treated_as_no_precheck_failures(self) -> None:
+        results = [SystemReviewResult(system_group="g1", findings=[], files_explored=[])]
+        assert build_degraded_coverage_labels(results, {"unrelated": "value"}) == []
+
+    def test_precheck_scanner_failures_become_labeled_and_reasoned(self) -> None:
+        results: list[SystemReviewResult] = []
+        graph_result = {"precheck_scanner_failures": ["zizmor", "trivy"]}
+        assert build_degraded_coverage_labels(results, graph_result) == [
+            ("precheck:zizmor", "scanner did not complete this round"),
+            ("precheck:trivy", "scanner did not complete this round"),
+        ]
+
+    def test_reviewer_and_precheck_failures_combine_reviewer_first(self) -> None:
+        results = [
+            SystemReviewResult(
+                system_group="specialist/orchestration::g2",
+                findings=[],
+                files_explored=[],
+                failure_reason="timeout",
+            ),
+        ]
+        graph_result = {"precheck_scanner_failures": ["zizmor"]}
+        assert build_degraded_coverage_labels(results, graph_result) == [
+            ("specialist/orchestration::g2", "timeout"),
+            ("precheck:zizmor", "scanner did not complete this round"),
+        ]
 
 
 class TestAppendDegradedCoverageSection:

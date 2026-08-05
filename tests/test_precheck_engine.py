@@ -131,8 +131,10 @@ async def test_run_precheck_reports_failed_scanner_by_name(
     named in ``PrecheckResult.failed_scanners`` -- this is the observability
     signal that lets a crashed/timed-out scanner be distinguished from one
     that ran clean, surfaced in the review comment via
-    ``graph._node_write_review``'s degraded-coverage section. This module
-    stays fail-open regardless: the failure must not affect
+    ``graph.run_review``'s degraded-coverage section (read off the final
+    graph state after the graph finishes, not by ``_node_write_review``
+    itself -- see the matching comment in ``_node_precheck_rules``). This
+    module stays fail-open regardless: the failure must not affect
     candidate_findings/verified_findings at all.
     """
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
@@ -156,6 +158,59 @@ async def test_run_precheck_no_failed_scanners_when_all_clean(
         result = await run_precheck("/tmp/worktree")
 
     assert result.failed_scanners == []
+
+
+async def test_run_precheck_reports_multiple_failed_scanners_sorted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two scanners failing in the same run must both be named, sorted --
+    not just whichever happened to be checked/gathered first. Stress-tests
+    the zip/name-pairing in the aggregation comprehension against more than
+    one failure at once.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.trivy_available", lambda: True)
+
+    with (
+        patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=None)),
+        patch("argus.precheck.engine.run_trivy_secrets_sarif", new=AsyncMock(return_value=None)),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert result.failed_scanners == ["trivy", "zizmor"]
+
+
+async def test_run_precheck_failed_scanner_coexists_with_real_findings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operationally relevant case: one scanner fails while another
+    produces real findings in the same run. Both must land on the same
+    PrecheckResult -- a failed scanner must never suppress or replace
+    findings from a scanner that succeeded.
+    """
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.trivy_available", lambda: True)
+
+    from argus.precheck.sarif import SarifResult
+
+    trivy_hit = SarifResult(
+        rule_id="trivy/github-pat", level="error", message="m", file="config.py", line=1
+    )
+
+    with (
+        patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=None)),
+        patch(
+            "argus.precheck.engine.run_trivy_secrets_sarif",
+            new=AsyncMock(return_value=[trivy_hit]),
+        ),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree")
+
+    assert [f.rule_id for f in result.candidate_findings] == ["trivy/github-pat"]
+    assert result.failed_scanners == ["zizmor"]
 
 
 async def test_run_precheck_merges_semgrep_and_zizmor_findings(
