@@ -113,6 +113,31 @@ async def test_run_actionlint_sarif_parses_hits(
     assert ".github/workflows/ci.yml" in mock_exec.call_args.args
 
 
+async def test_run_actionlint_sarif_uses_dash_dash_before_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirrors the equivalent regression test for squawk/eslint/checkov, for
+    consistency -- though actionlint's own files are always prefixed with
+    ".github/workflows/" (the scope filter above), so no argv token here can
+    itself start with "-" even if the bare filename does. "--" is added
+    anyway for defense in depth; verified empirically it doesn't change
+    actionlint's behavior or path echo.
+    """
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "-x.yml").write_text("name: ci\non: push\njobs: {}\n")
+    monkeypatch.setattr("argus.precheck.workflow_lint_scanner.actionlint_available", lambda: True)
+    proc = _mock_subprocess(_actionlint_json())
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        await run_actionlint_sarif(str(tmp_path), changed_files=[".github/workflows/-x.yml"])
+
+    args = mock_exec.call_args.args
+    assert "--" in args
+    dash_dash_index = args.index("--")
+    assert args[dash_dash_index + 1 :] == (".github/workflows/-x.yml",)
+
+
 async def test_run_actionlint_sarif_extracts_shellcheck_code(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -104,17 +104,38 @@ async def test_run_eslint_sarif_uses_dash_dash_before_files(
     offending file. "--" before the file list is what prevents that --
     regression test for its presence.
     """
-    (tmp_path / "-x.js").write_text("console.log(1);\n")
+    (tmp_path / "-x.js").write_text("exec(userInput);\n")
     monkeypatch.setattr("argus.precheck.js_scanner.eslint_available", lambda: True)
-    proc = _mock_subprocess(_eslint_json())
+    proc = _mock_subprocess(
+        _eslint_json(
+            {
+                "filePath": f"{tmp_path}/-x.js",
+                "messages": [
+                    {
+                        "ruleId": "security/detect-child-process",
+                        "severity": 1,
+                        "message": "Found child_process.exec()",
+                        "line": 1,
+                    }
+                ],
+            }
+        )
+    )
 
     with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
-        await run_eslint_sarif(str(tmp_path), changed_files=["-x.js"])
+        result = await run_eslint_sarif(str(tmp_path), changed_files=["-x.js"])
 
     args = mock_exec.call_args.args
     assert "--" in args
     dash_dash_index = args.index("--")
     assert args[dash_dash_index + 1 :] == ("-x.js",)
+
+    # Pin the argv change and engine.py's changed_set match together: the
+    # stripped `file` must be the exact bare path, or run_precheck's
+    # diff-scoping filter would silently drop this finding.
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].file == "-x.js"
 
 
 async def test_run_eslint_sarif_maps_severity_2_to_error(

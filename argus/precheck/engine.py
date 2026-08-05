@@ -522,27 +522,27 @@ async def run_precheck(
     arbitrarily, silently dropping real, in-scope findings alongside the
     noise. ``None`` (the default) applies no filtering -- used by callers
     that genuinely want whole-worktree results (this module's own tests; a
-    future non-PR-context caller). The live per-PR gate (see
-    ``graph._node_precheck_rules``) always derives and passes a list, but
-    that list is extracted from a unified diff that can itself be
-    truncated (GitHub compare diffs are fetched with a line cap) or miss a
-    path the extraction regex can't handle (e.g. one containing a space) --
-    an EMPTY list from that path means "extraction found nothing," not
-    "this PR touches zero files" (impossible for a real PR). Treating an
-    empty list the same as a real, non-empty scope would filter every
-    scanner's results down to nothing and silently disable the whole
-    precheck gate on exactly the large/unusual PRs most likely to trip
-    that extraction gap -- the opposite of this module's fail-open
-    philosophy. So only a genuinely non-empty ``changed_files`` list
-    activates scoping below; an empty list is treated the same as
-    ``None`` for the results-filtering step specifically (falls back to
-    whole-worktree results, still bounded by ``_MAX_RESULTS``), even
-    though it's still passed through to gate the changed-files-only
-    scanners (squawk/Checkov/actionlint/eslint), which no-op safely on an
-    empty list on their own. A finding with no ``file`` at all is dropped
-    when scoping is active -- there's no way to confirm it's in scope, and
-    this module's fail-open philosophy favors not blocking over
-    false-blocking.
+    future non-PR-context caller). An EMPTY list is treated as "nothing to
+    scan for this round" (a no-op, same as if every scanner had been
+    skipped) rather than as a real scope to filter against OR as license to
+    run every scanner unscoped: extraction returning an empty list from a
+    non-empty diff is, in practice, almost always a genuinely empty diff
+    (e.g. a comment-triggered re-review with no new commits since the last
+    round) rather than truncation -- GitHub compare-diff truncation keeps
+    the diff's *leading* lines, which almost always still contain at least
+    the first changed file's ``diff --git`` header, so truncation alone
+    essentially never drives extraction all the way down to zero files. An
+    earlier version of this fallback ran the whole-worktree scanners
+    (semgrep/zizmor/Trivy) unscoped whenever ``changed_files == []``, which
+    let their ``verified``-status findings reach the fast-fail gate
+    (``graph._node_precheck_fail``) based on pre-existing debt in files
+    this specific review round has no diff evidence relates to it at all --
+    fail-CLOSED for verified rules, the one direction this module's stated
+    fail-open philosophy forbids. No-op is the only response that's
+    genuinely safe when there's no reliable scope to check against. A
+    finding with no ``file`` at all is dropped when a real (non-empty)
+    scope is active -- there's no way to confirm it's in scope, and this
+    module's fail-open philosophy favors not blocking over false-blocking.
 
     Every scanner is a subprocess call with its own timeout (up to 120s
     each) -- run concurrently via ``asyncio.gather`` rather than
@@ -558,6 +558,19 @@ async def run_precheck(
     findings — this function only runs the scanners and classifies the
     results.
     """
+    if changed_files is not None and not changed_files:
+        # See this function's docstring: an empty (not None) changed_files
+        # list means "no relevant scope for this round" in practice, almost
+        # always a genuinely empty diff -- running scanners unscoped here
+        # would let verified findings fast-fail the PR based on files this
+        # round's diff never touched. No-op is the only safe response.
+        logger.info(
+            "changed_files was an empty list -- treating as no relevant "
+            "scope for this review round and skipping precheck scanning "
+            "entirely (see run_precheck's docstring)"
+        )
+        return PrecheckResult()
+
     scans: list[Coroutine[Any, Any, list[SarifResult] | None]] = [
         _run_semgrep_precheck(worktree_path)
     ]
@@ -608,7 +621,9 @@ async def run_precheck(
     scan_batches = await asyncio.gather(*scans)
     results: list[SarifResult] = [r for batch in scan_batches for r in (batch or [])]
 
-    if changed_files:
+    if changed_files is not None:
+        # Guaranteed non-empty here -- the empty-list case returns early
+        # above, before any scanner even runs.
         changed_set = set(changed_files)
         before = len(results)
         results = [r for r in results if r.file is not None and r.file in changed_set]
@@ -619,17 +634,6 @@ async def run_precheck(
                 len(results),
                 len(changed_set),
             )
-    elif changed_files is not None:
-        # changed_files == [] -- diff-derived extraction found no files despite
-        # a real PR diff existing (truncated diff, or a path the extraction
-        # regex can't handle). Don't apply the filter at all: see this
-        # function's docstring for why treating this the same as a real empty
-        # scope would silently disable the whole gate.
-        logger.warning(
-            "changed_files was an empty list -- skipping diff-scoping filter "
-            "rather than treating it as a real empty scope (results are "
-            "unscoped for this run, still bounded by _MAX_RESULTS)"
-        )
 
     if not results:
         return PrecheckResult()

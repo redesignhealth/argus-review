@@ -17,6 +17,35 @@ grandchild processes that can hold pipe file descriptors open after the
 direct child is killed) this shared helper does not, and migrating an
 already-shipped, already-tested function here carries more regression
 risk than benefit.
+
+Dash-prefixed-filename argument injection
+------------------------------------------
+Every scanner that takes a per-file argv list (js_scanner, migration_scanner,
+terraform_scanner, workflow_lint_scanner) faces the same risk: a changed
+file whose repo-root-relative path starts with "-" (e.g. a new top-level
+"-x.sql") can be parsed by the tool's own CLI as an unknown flag instead of
+a filename. Verified empirically per tool: squawk (clap) exits 2, a genuine
+parse error, not its findings-exit-code; eslint (yargs) prints "Invalid
+option" and produces no JSON output; Checkov (argparse, ``-f``/``--file``
+with ``nargs='+'``) errors "expected at least one argument". In every case
+this module's own ``is_success_exit``/JSON-parse-failure handling then
+treats the whole invocation as "didn't run" and fails open -- silently
+suppressing scanning for every OTHER file in the same batch too, not just
+the one with the odd name. actionlint is not actually exposed to this (its
+changed-file list is always ".github/workflows/"-prefixed, so no argv token
+can itself start with "-"), but gets the same guard anyway for consistency.
+
+Each affected module neutralizes this immediately before spawning its
+subprocess, at its own file-list-building call site (not centralized into
+one helper here, since the fix differs by parser): squawk/eslint/actionlint
+accept a bare ``"--"`` end-of-options separator before the file list;
+Checkov's argparse ``nargs='+'`` is NOT fixed by a bare ``"--"`` (verified
+empirically it still errors identically) and instead needs one repeated
+``"--file=<path>"`` token per file (the ``"="`` form makes argparse treat
+the whole token as opaque regardless of its contents). See each module's
+own file-list-building code for the exact argv shape, and
+``tests/test_precheck_engine_integration.py``-style live-binary tests (where
+present) for verification against the real tool rather than a mock.
 """
 
 from __future__ import annotations

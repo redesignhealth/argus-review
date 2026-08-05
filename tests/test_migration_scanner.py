@@ -104,15 +104,37 @@ async def test_run_squawk_sarif_uses_dash_dash_before_files(
     """
     (tmp_path / "-x.sql").write_text("select 1;\n")
     monkeypatch.setattr("argus.precheck.migration_scanner.squawk_available", lambda: True)
-    proc = _mock_subprocess(_squawk_json(), returncode=0)
+    proc = _mock_subprocess(
+        _squawk_json(
+            {
+                "file": "-x.sql",
+                "line": 0,
+                "column": 0,
+                "level": "Warning",
+                "message": "Missing `IF NOT EXISTS`",
+                "help": None,
+                "rule_name": "prefer-robust-stmts",
+                "column_end": 1,
+                "line_end": 0,
+            }
+        ),
+        returncode=1,
+    )
 
     with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
-        await run_squawk_sarif(str(tmp_path), changed_files=["-x.sql"])
+        result = await run_squawk_sarif(str(tmp_path), changed_files=["-x.sql"])
 
     args = mock_exec.call_args.args
     assert "--" in args
     dash_dash_index = args.index("--")
     assert args[dash_dash_index + 1 :] == ("-x.sql",)
+
+    # Pin the argv change and engine.py's changed_set match together: the
+    # echoed `file` must be the exact bare path, not "./-x.sql" or similar,
+    # or run_precheck's diff-scoping filter would silently drop this finding.
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].file == "-x.sql"
 
 
 async def test_run_squawk_sarif_excludes_noisy_style_rules(

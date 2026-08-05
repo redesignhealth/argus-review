@@ -137,15 +137,46 @@ async def test_run_checkov_sarif_uses_file_equals_form_not_bare_dash_f(
     (tmp_path / "-x.tf").write_text('resource "aws_iam_policy" "bad" {}\n')
     monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
 
+    sarif_bytes = json.dumps(
+        {
+            "runs": [
+                {
+                    "results": [
+                        {
+                            "ruleId": "CKV_AWS_63",
+                            "level": "error",
+                            "message": {"text": "hit for CKV_AWS_63"},
+                            "locations": [
+                                {
+                                    "physicalLocation": {
+                                        "artifactLocation": {"uri": "-x.tf"},
+                                        "region": {"startLine": 1},
+                                    }
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ]
+        }
+    ).encode()
+
     with patch(
         "asyncio.create_subprocess_exec",
-        side_effect=_mock_exec_writing_sarif(None, returncode=0),
+        side_effect=_mock_exec_writing_sarif(sarif_bytes, returncode=1),
     ) as mock_exec:
-        await run_checkov_sarif(str(tmp_path), changed_files=["-x.tf"])
+        result = await run_checkov_sarif(str(tmp_path), changed_files=["-x.tf"])
 
     args = mock_exec.call_args.args
     assert "--file=-x.tf" in args
     assert "-f" not in args
+
+    # Pin the argv change and engine.py's changed_set match together: the
+    # echoed `file` must be the exact bare path, or run_precheck's
+    # diff-scoping filter would silently drop this finding.
+    assert result is not None
+    assert len(result) == 1
+    assert result[0].file == "-x.tf"
 
 
 async def test_run_checkov_sarif_clean_scan_returns_empty_list(
