@@ -23,11 +23,15 @@ from argus.models import ReviewResponse, RiskLevel, Verdict
 from argus.pipeline_models import RawFinding, SystemReviewResult
 
 
-def _response(verdict: Verdict = Verdict.APPROVE) -> ReviewResponse:
+def _response(
+    verdict: Verdict = Verdict.APPROVE,
+    risk_level: RiskLevel = RiskLevel.LOW,
+    review_comment: str = "## Code Review\n\n**Verdict**: ✅ APPROVE | **Risk**: LOW\n\nLooks good.",
+) -> ReviewResponse:
     return ReviewResponse(
         verdict=verdict,
-        risk_level=RiskLevel.LOW,
-        review_comment="body",
+        risk_level=risk_level,
+        review_comment=review_comment,
     )
 
 
@@ -390,6 +394,44 @@ class TestApplyPrecheckScannerFailureGate:
         assert "trivy" in finding.description
         assert "zizmor" in finding.description
         assert finding.description.index("trivy") < finding.description.index("zizmor")
+
+    def test_rewrites_the_rendered_comments_verdict_line(self) -> None:
+        """Regression test: the structured verdict/risk_level/findings were
+        the only things mutated by an earlier version of this gate, leaving
+        the human-visible comment -- what cli.py actually posts to the PR
+        and persists to the DB -- still reading APPROVE. The comment must
+        reflect BLOCKING too, not just the structured response fields.
+        """
+        response = _response(
+            review_comment="## Code Review\n\n**Verdict**: ✅ APPROVE | **Risk**: LOW\n\nLooks good."
+        )
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+
+        assert "**Verdict**: 🚫 BLOCKING" in response.review_comment
+        assert "✅ APPROVE" not in response.review_comment
+        # The explanation must actually reach the PR-visible comment, not
+        # just the structured Finding -- that was the other half of the
+        # original bug.
+        assert "zizmor" in response.review_comment
+        assert "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE" in response.review_comment
+        # Original body content preserved, not replaced wholesale.
+        assert "Looks good." in response.review_comment
+
+    def test_risk_level_only_raised_never_downgraded(self) -> None:
+        """A response that already carries CRITICAL (e.g. from
+        _node_validate_blockings leaving APPROVE+CRITICAL) must not be
+        silently weakened to HIGH just because this gate also fired --
+        RiskLevel.CRITICAL ranks above HIGH, and this gate's own contract
+        is "only ever stricter, never looser."
+        """
+        response = _response(risk_level=RiskLevel.CRITICAL)
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert response.risk_level == RiskLevel.CRITICAL
+
+    def test_risk_level_raised_from_below_high(self) -> None:
+        response = _response(risk_level=RiskLevel.MEDIUM)
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert response.risk_level == RiskLevel.HIGH
 
 
 class TestAppendDegradedCoverageSection:

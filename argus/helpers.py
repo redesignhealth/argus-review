@@ -186,6 +186,19 @@ def build_degraded_coverage_labels(
     return failed_labels
 
 
+# Explicit ordering, not reliance on declaration order or enum identity:
+# RiskLevel is a plain str Enum with no intrinsic ordering of its own, so
+# this is the one place that ordering is defined and relied upon (by
+# apply_precheck_scanner_failure_gate, to raise risk_level monotonically
+# rather than overwrite it unconditionally).
+_RISK_LEVEL_ORDER: dict[RiskLevel, int] = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.CRITICAL: 3,
+}
+
+
 def apply_precheck_scanner_failure_gate(
     response: ReviewResponse,
     precheck_scanner_failures: list[str],
@@ -209,6 +222,23 @@ def apply_precheck_scanner_failure_gate(
     :func:`build_degraded_coverage_labels` was -- no dedicated test
     harness exists for that function as a whole, and this logic is
     directly unit-testable in isolation once separated from it.
+
+    Mutates ``response.review_comment`` too, not just the structured
+    ``verdict``/``risk_level``/``findings`` fields: the comment is what
+    ``cli.py`` actually posts to the PR and persists to the DB, rendered
+    *before* this gate ever runs, so leaving it untouched would let the
+    human-visible comment still read "APPROVE" while the structured
+    verdict says BLOCKING. Follows the same regex-rewrite pattern
+    ``graph._node_validate_blockings`` already uses for the same reason
+    (an LLM-authored comment's exact formatting varies -- bold wrapping,
+    emoji, pipe-delimited risk -- so this can't be a plain string
+    replace).
+
+    ``risk_level`` is raised, never overwritten: ``RiskLevel`` has a real
+    ordering (LOW < MEDIUM < HIGH < CRITICAL) and this gate must only ever
+    strengthen an assessment, matching its own "stricter, never looser"
+    contract -- an unconditional overwrite to HIGH would silently
+    downgrade an existing CRITICAL.
     """
     if (
         not precheck_scanner_failures
@@ -217,20 +247,22 @@ def apply_precheck_scanner_failure_gate(
     ):
         return False
     response.verdict = Verdict.BLOCKING
-    response.risk_level = RiskLevel.HIGH
+    if _RISK_LEVEL_ORDER[response.risk_level] < _RISK_LEVEL_ORDER[RiskLevel.HIGH]:
+        response.risk_level = RiskLevel.HIGH
+    note = (
+        "Precheck scanner(s) "
+        f"{', '.join(sorted(precheck_scanner_failures))} did not complete this "
+        "round (crashed, timed out, or hit an execution error). "
+        "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set, so this round cannot be "
+        "APPROVE without confirmed coverage from every configured scanner."
+    )
     response.findings.append(
         Finding(
             severity=Severity.BLOCKING,
             category="deterministic-precheck",
             file=None,
             line=None,
-            description=(
-                "Precheck scanner(s) "
-                f"{', '.join(sorted(precheck_scanner_failures))} did not complete this "
-                "round (crashed, timed out, or hit an execution error). "
-                "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set, so this round cannot be "
-                "APPROVE without confirmed coverage from every configured scanner."
-            ),
+            description=note,
             suggestion=(
                 "Re-run once the underlying scanner failure is resolved -- see this "
                 "round's logs (or the degraded-coverage section above) for which "
@@ -238,6 +270,19 @@ def apply_precheck_scanner_failure_gate(
             ),
         )
     )
+    # Same regex-rewrite pattern as _node_validate_blockings, and the same
+    # reason: an LLM-authored comment's exact formatting varies (bold
+    # wrapping, emoji, pipe-delimited risk), so this can't be a plain
+    # string replace. count=1 -- there's exactly one verdict header line
+    # to rewrite, and a broader replace risks touching a coincidental
+    # "**Verdict**:"-shaped line quoted elsewhere in the comment body.
+    response.review_comment = re.sub(
+        r"\*\*Verdict\*\*:.*?(?=\n|$)",
+        f"**Verdict**: 🚫 BLOCKING | **Risk**: {response.risk_level.value}",
+        response.review_comment,
+        count=1,
+    )
+    response.review_comment += f"\n\n---\n\n### 🚫 Verdict forced to BLOCKING\n\n{note}\n"
     return True
 
 
