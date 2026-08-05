@@ -193,6 +193,30 @@ async def test_run_eslint_sarif_returns_none_on_genuine_failure(
     assert result is None
 
 
+async def test_run_eslint_sarif_returns_none_on_unparseable_output_despite_exit_0(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """eslint's own dash-prefixed-filename argv-injection failure mode
+    (see scanner_utils.py's "Dash-prefixed-filename argument injection"
+    section): it prints a plain-text "Invalid option" error to stderr but
+    still EXITS 0, so is_success_exit reports success and this module's own
+    JSON-parse-failure except clause is what actually has to distinguish
+    "didn't really run" from "ran clean, zero findings". Regression test
+    for that distinction: must return None, not [] (an earlier version
+    misreported this exact case as a clean scan).
+    """
+    (tmp_path / "-x.js").write_text("console.log(1);\n")
+    monkeypatch.setattr("argus.precheck.js_scanner.eslint_available", lambda: True)
+    proc = _mock_subprocess(
+        b"", stderr=b"Invalid option '-e' - perhaps you meant '-c'?\n", returncode=0
+    )
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc):
+        result = await run_eslint_sarif(str(tmp_path), changed_files=["-x.js"])
+
+    assert result is None
+
+
 async def test_run_eslint_sarif_returns_none_on_timeout(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

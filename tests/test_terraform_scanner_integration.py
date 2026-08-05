@@ -15,7 +15,7 @@ import shutil
 import pytest
 
 from argus.precheck.scanner_utils import run_scanner_subprocess
-from argus.precheck.terraform_scanner import run_checkov_sarif
+from argus.precheck.terraform_scanner import _FINDINGS_EXIT_CODE, run_checkov_sarif
 
 pytestmark = pytest.mark.integration
 
@@ -85,13 +85,18 @@ async def test_real_checkov_bare_dash_dash_does_not_fix_dash_prefixed_filename(
     )
 
     # Checks rejection semantics (a genuine argparse error, distinct from
-    # both "clean scan" (0) and "findings exist" (_FINDINGS_EXIT_CODE, 1)),
-    # not an exact stderr string/code -- those details aren't guaranteed
-    # stable across the pinned `checkov>=3.3.0,<4.0.0` range's patch/minor
-    # releases, only that this argv shape keeps failing.
+    # both "clean scan" (0) and "findings exist" (_FINDINGS_EXIT_CODE)) via
+    # a content check that's more version-stable than an exact phrase/code,
+    # while still verifying this is specifically an ARGUMENT-parsing
+    # rejection (not e.g. a crash or an unrelated CLI error) -- those
+    # details aren't guaranteed stable across the pinned
+    # `checkov>=3.3.0,<4.0.0` range's patch/minor releases, only that this
+    # argv shape keeps being rejected as invalid.
     assert outcome is not None
-    _, _, returncode = outcome
-    assert returncode not in (0, 1)
+    _, stderr, returncode = outcome
+    assert returncode not in (0, _FINDINGS_EXIT_CODE)
+    lowered_stderr = stderr.lower()
+    assert b"argument" in lowered_stderr or b"usage:" in lowered_stderr
 
 
 async def test_real_checkov_scans_all_files_with_repeated_file_flag(tmp_path) -> None:

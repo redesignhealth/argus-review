@@ -419,7 +419,9 @@ async def test_run_precheck_drops_fileless_findings_when_scoped(
     assert result == PrecheckResult()
 
 
-async def test_run_precheck_empty_changed_files_is_a_full_noop() -> None:
+async def test_run_precheck_empty_changed_files_is_a_full_noop(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """``changed_files == []`` means "no relevant scope for this round" in
     practice (almost always a genuinely empty diff, e.g. a comment-triggered
     re-review with no new commits) -- NOT a signal to run every scanner
@@ -429,17 +431,27 @@ async def test_run_precheck_empty_changed_files_is_a_full_noop() -> None:
     reach the fast-fail gate based on pre-existing debt this round's diff
     never touched (fail-CLOSED for verified rules -- the one direction this
     module's fail-open philosophy forbids). No subprocess should even be
-    spawned; the result must be empty. No ``semgrep_available``/
-    ``resolve_rules_dir`` setup is needed here (unlike every other test in
-    this file) -- the early return this test pins happens before
-    ``_run_semgrep_precheck`` is ever reached, so mocking that path would
-    only be dead setup.
+    spawned; the result must be empty.
+
+    ``semgrep_available`` is explicitly mocked True (unlike a real "dead
+    setup" no-op) so ``mock_exec.assert_not_called()`` is self-contained --
+    without it, this assertion would only be meaningful on a machine
+    without the `prechecks` extras installed, passing vacuously in CI
+    (where semgrep/zizmor/trivy genuinely are on PATH) even if the early
+    return this test exists to pin were deleted entirely.
     """
-    with patch("asyncio.create_subprocess_exec") as mock_exec:
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+
+    with (
+        patch("asyncio.create_subprocess_exec") as mock_exec,
+        caplog.at_level("WARNING", logger="argus.precheck.engine"),
+    ):
         result = await run_precheck("/tmp/worktree", changed_files=[])
 
     assert result == PrecheckResult()
     mock_exec.assert_not_called()
+    assert "changed_files was an empty list" in caplog.text
+    assert all(r.levelname == "WARNING" for r in caplog.records)
 
 
 async def test_run_precheck_no_scoping_when_changed_files_is_none(
