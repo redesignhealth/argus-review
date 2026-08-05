@@ -427,6 +427,35 @@ async def test_run_precheck_drops_fileless_findings_when_scoped(
     assert result == PrecheckResult()
 
 
+async def test_run_precheck_empty_changed_files_does_not_disable_whole_gate(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``changed_files == []`` means diff-derived extraction found nothing
+    (a truncated diff, or a path the extraction regex can't handle) -- NOT
+    "this PR touches zero files" (impossible for a real PR). Treating it
+    the same as a real empty scope would filter every scanner's results to
+    nothing and silently disable the whole precheck gate on exactly the
+    large/unusual PRs most likely to trip that extraction gap. Regression
+    test for that bug: an empty (not None) changed_files list must fall
+    back to unscoped (whole-worktree) results, not an empty result.
+    """
+    (tmp_path / "rule.yml").write_text("rules: []\n")
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
+
+    proc = _mock_subprocess(
+        _sarif_bytes_with_files(("rule-a", "a.py"), ("rule-b", "unrelated/b.py"))
+    )
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=proc),
+        patch("argus.precheck.engine.select_rule_statuses", new=AsyncMock(return_value={})),
+    ):
+        result = await run_precheck("/tmp/worktree", changed_files=[])
+
+    assert sorted(f.rule_id for f in result.candidate_findings) == ["rule-a", "rule-b"]
+
+
 async def test_run_precheck_no_scoping_when_changed_files_is_none(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

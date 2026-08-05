@@ -120,6 +120,17 @@ async def _run_eslint_sarif_unguarded(
         "--format",
         "json",
         "--no-config-lookup",  # never merge the target repo's own eslint config
+        # "--" stops eslint's yargs-based parser from treating a changed file
+        # whose repo-root-relative path starts with "-" (e.g. a new top-level
+        # "-x.js") as an unknown flag -- verified empirically that without
+        # it, eslint errors ("Invalid option '-e'") and exits 0 with no
+        # output, which this module's JSON-parse step would otherwise
+        # silently treat as "ran clean, zero findings" for the WHOLE batch,
+        # not just the offending file. Confirmed "--" preserves the exact
+        # path in eslint's own JSON echo (absolute-resolved, same as every
+        # other file), so the existing prefix-stripping logic below is
+        # unaffected.
+        "--",
         *js_files,
     ]
 

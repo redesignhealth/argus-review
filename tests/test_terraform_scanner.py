@@ -118,8 +118,34 @@ async def test_run_checkov_sarif_parses_hits_and_namespaces_rule_id(
 
     call = mock_exec.call_args
     assert call.kwargs["cwd"] == str(tmp_path)
-    assert "iam.tf" in call.args
+    assert "--file=iam.tf" in call.args
     assert "-c" in call.args
+
+
+async def test_run_checkov_sarif_uses_file_equals_form_not_bare_dash_f(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed file whose repo-root-relative path starts with "-" (e.g. a
+    new top-level "-x.tf") would otherwise make Checkov's argparse `-f`
+    (nargs='+') stop consuming values at that token and error out
+    ("expected at least one argument") -- verified empirically that a bare
+    "--" separator does NOT fix this for argparse's nargs='+' the way it
+    does for squawk/eslint. "--file=<path>" (one flag per file, "=" form)
+    is the verified-safe alternative: argparse treats everything after "="
+    as one opaque token. Regression test for that argv shape.
+    """
+    (tmp_path / "-x.tf").write_text('resource "aws_iam_policy" "bad" {}\n')
+    monkeypatch.setattr("argus.precheck.terraform_scanner.checkov_available", lambda: True)
+
+    with patch(
+        "asyncio.create_subprocess_exec",
+        side_effect=_mock_exec_writing_sarif(None, returncode=0),
+    ) as mock_exec:
+        await run_checkov_sarif(str(tmp_path), changed_files=["-x.tf"])
+
+    args = mock_exec.call_args.args
+    assert "--file=-x.tf" in args
+    assert "-f" not in args
 
 
 async def test_run_checkov_sarif_clean_scan_returns_empty_list(

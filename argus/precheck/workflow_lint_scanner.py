@@ -136,7 +136,14 @@ async def _run_actionlint_sarif_unguarded(
     if not os.path.isabs(worktree_path):
         raise ValueError(f"worktree_path must be absolute, got {worktree_path!r}")
 
-    argv = ["actionlint", "--format", "{{json .}}", *workflow_files]
+    # workflow_files are always prefixed with ".github/workflows/" (the scope
+    # filter above), so none of these argv tokens can themselves start with
+    # "-" even if the bare filename does -- unlike squawk/checkov/eslint,
+    # this scanner isn't actually exposed to the dash-prefixed-filename
+    # argument-injection risk those modules guard against. "--" added anyway
+    # for defense in depth (verified empirically not to change actionlint's
+    # behavior or its path echo).
+    argv = ["actionlint", "--format", "{{json .}}", "--", *workflow_files]
 
     outcome = await run_scanner_subprocess(argv, cwd=worktree_path, timeout=_ACTIONLINT_TIMEOUT_S)
     if outcome is None:

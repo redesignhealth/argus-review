@@ -140,8 +140,25 @@ async def _run_checkov_sarif_unguarded(
     with tempfile.TemporaryDirectory() as output_dir:
         argv = [
             "checkov",
-            "-f",
-            *tf_files,
+            # One repeated "--file=<path>" per file, not "-f <path1> <path2>
+            # ...": Checkov's argparse `-f/--file` uses nargs='+', which
+            # stops consuming values at the first token that merely LOOKS
+            # like a flag (starts with "-") -- a changed file whose
+            # repo-root-relative path starts with "-" (e.g. a new top-level
+            # "-x.tf") would otherwise make argparse itself error out
+            # ("expected at least one argument") before Checkov ever runs,
+            # which this module's is_success_exit check then treats as a
+            # failure and fails open for the WHOLE batch, not just the
+            # offending file. A bare "--" separator does NOT fix this for
+            # argparse's nargs='+' the way it does for squawk/eslint's
+            # parsers -- verified empirically it still errors identically.
+            # "--file=<path>" (the "=" form, one flag per file) is the
+            # verified-safe alternative: argparse treats everything after
+            # "=" as a single opaque token regardless of its contents, and
+            # it preserves the exact bare relative path in Checkov's own
+            # SARIF echo (`artifactLocation.uri`), same as the space-
+            # separated form for a normal (non-dash-prefixed) path.
+            *(f"--file={f}" for f in tf_files),
             "--framework",
             "terraform",
             "-c",

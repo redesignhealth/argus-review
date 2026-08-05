@@ -94,6 +94,29 @@ async def test_run_eslint_sarif_parses_hits_and_strips_absolute_path(
     assert "--no-config-lookup" in call.args
 
 
+async def test_run_eslint_sarif_uses_dash_dash_before_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed file whose repo-root-relative path starts with "-" (e.g. a
+    new top-level "-x.js") would otherwise be parsed by eslint's yargs-based
+    CLI as an unknown flag (verified empirically: "Invalid option '-e'"),
+    silently producing no output for the WHOLE batch, not just the
+    offending file. "--" before the file list is what prevents that --
+    regression test for its presence.
+    """
+    (tmp_path / "-x.js").write_text("console.log(1);\n")
+    monkeypatch.setattr("argus.precheck.js_scanner.eslint_available", lambda: True)
+    proc = _mock_subprocess(_eslint_json())
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        await run_eslint_sarif(str(tmp_path), changed_files=["-x.js"])
+
+    args = mock_exec.call_args.args
+    assert "--" in args
+    dash_dash_index = args.index("--")
+    assert args[dash_dash_index + 1 :] == ("-x.js",)
+
+
 async def test_run_eslint_sarif_maps_severity_2_to_error(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

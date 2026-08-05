@@ -133,6 +133,16 @@ async def _run_squawk_sarif_unguarded(
     argv = ["squawk", "--reporter", "json"]
     for rule in _EXCLUDED_RULES:
         argv.extend(("--exclude", rule))
+    # "--" stops clap from treating a changed file whose repo-root-relative
+    # path starts with "-" (e.g. a new top-level "-x.sql") as an unknown
+    # flag -- verified empirically that without it, squawk exits 2 (a clap
+    # parse error, not _FINDINGS_EXIT_CODE) and is_success_exit's failure
+    # path then silently fails open, meaning a single maliciously- or even
+    # accidentally-named file would suppress squawk scanning for every
+    # OTHER file in this same PR too, not just its own. Confirmed "--"
+    # preserves the exact relative path in squawk's own JSON echo (its
+    # `file` field), so no downstream matching logic needs updating.
+    argv.append("--")
     argv.extend(sql_files)
 
     outcome = await run_scanner_subprocess(argv, cwd=worktree_path, timeout=_SQUAWK_TIMEOUT_S)

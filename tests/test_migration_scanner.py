@@ -92,6 +92,29 @@ async def test_run_squawk_sarif_parses_hits_and_corrects_line_index(
     assert "001_migration.sql" in mock_exec.call_args.args
 
 
+async def test_run_squawk_sarif_uses_dash_dash_before_files(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed file whose repo-root-relative path starts with "-" (e.g. a
+    new top-level "-x.sql") would otherwise be parsed by squawk's clap-based
+    CLI as an unknown flag, causing the whole invocation to error (verified
+    empirically: exit 2, not _FINDINGS_EXIT_CODE) and silently fail open
+    for every OTHER file in the same batch too. "--" before the file list
+    is what prevents that -- regression test for its presence.
+    """
+    (tmp_path / "-x.sql").write_text("select 1;\n")
+    monkeypatch.setattr("argus.precheck.migration_scanner.squawk_available", lambda: True)
+    proc = _mock_subprocess(_squawk_json(), returncode=0)
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        await run_squawk_sarif(str(tmp_path), changed_files=["-x.sql"])
+
+    args = mock_exec.call_args.args
+    assert "--" in args
+    dash_dash_index = args.index("--")
+    assert args[dash_dash_index + 1 :] == ("-x.sql",)
+
+
 async def test_run_squawk_sarif_excludes_noisy_style_rules(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

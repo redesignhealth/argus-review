@@ -514,19 +514,35 @@ async def run_precheck(
     project's own, as of this change) that hasn't wired up ARGUS_RULES_DIR
     yet.
 
-    ``changed_files``, when given, scopes findings to files this PR
-    actually touched (see ``helpers.extract_changed_files``) -- both
-    scanners here scan the WHOLE worktree, not just the diff, so without
-    this a repo with any pre-existing debt would surface it on every PR,
-    and _MAX_RESULTS below would then truncate that flood arbitrarily,
-    silently dropping real, in-scope findings alongside the noise. ``None``
-    (the default) applies no filtering -- used by callers that genuinely
-    want whole-worktree results (this module's own tests; a future
-    non-PR-context caller), and is NOT what the live per-PR gate passes
-    (see ``graph._node_precheck_rules``, which always derives and passes
-    the real list). A finding with no ``file`` at all is dropped when
-    scoping is active -- there's no way to confirm it's in scope, and this
-    module's fail-open philosophy favors not blocking over false-blocking.
+    ``changed_files``, when given and non-empty, scopes findings to files
+    this PR actually touched (see ``helpers.extract_changed_files``) --
+    both scanners here scan the WHOLE worktree, not just the diff, so
+    without this a repo with any pre-existing debt would surface it on
+    every PR, and _MAX_RESULTS below would then truncate that flood
+    arbitrarily, silently dropping real, in-scope findings alongside the
+    noise. ``None`` (the default) applies no filtering -- used by callers
+    that genuinely want whole-worktree results (this module's own tests; a
+    future non-PR-context caller). The live per-PR gate (see
+    ``graph._node_precheck_rules``) always derives and passes a list, but
+    that list is extracted from a unified diff that can itself be
+    truncated (GitHub compare diffs are fetched with a line cap) or miss a
+    path the extraction regex can't handle (e.g. one containing a space) --
+    an EMPTY list from that path means "extraction found nothing," not
+    "this PR touches zero files" (impossible for a real PR). Treating an
+    empty list the same as a real, non-empty scope would filter every
+    scanner's results down to nothing and silently disable the whole
+    precheck gate on exactly the large/unusual PRs most likely to trip
+    that extraction gap -- the opposite of this module's fail-open
+    philosophy. So only a genuinely non-empty ``changed_files`` list
+    activates scoping below; an empty list is treated the same as
+    ``None`` for the results-filtering step specifically (falls back to
+    whole-worktree results, still bounded by ``_MAX_RESULTS``), even
+    though it's still passed through to gate the changed-files-only
+    scanners (squawk/Checkov/actionlint/eslint), which no-op safely on an
+    empty list on their own. A finding with no ``file`` at all is dropped
+    when scoping is active -- there's no way to confirm it's in scope, and
+    this module's fail-open philosophy favors not blocking over
+    false-blocking.
 
     Every scanner is a subprocess call with its own timeout (up to 120s
     each) -- run concurrently via ``asyncio.gather`` rather than
@@ -592,7 +608,7 @@ async def run_precheck(
     scan_batches = await asyncio.gather(*scans)
     results: list[SarifResult] = [r for batch in scan_batches for r in (batch or [])]
 
-    if changed_files is not None:
+    if changed_files:
         changed_set = set(changed_files)
         before = len(results)
         results = [r for r in results if r.file is not None and r.file in changed_set]
@@ -603,6 +619,17 @@ async def run_precheck(
                 len(results),
                 len(changed_set),
             )
+    elif changed_files is not None:
+        # changed_files == [] -- diff-derived extraction found no files despite
+        # a real PR diff existing (truncated diff, or a path the extraction
+        # regex can't handle). Don't apply the filter at all: see this
+        # function's docstring for why treating this the same as a real empty
+        # scope would silently disable the whole gate.
+        logger.warning(
+            "changed_files was an empty list -- skipping diff-scoping filter "
+            "rather than treating it as a real empty scope (results are "
+            "unscoped for this run, still bounded by _MAX_RESULTS)"
+        )
 
     if not results:
         return PrecheckResult()
