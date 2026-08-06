@@ -37,7 +37,11 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
-from argus.helpers import append_degraded_coverage_section, failed_reviewer_labels
+from argus.helpers import (
+    append_degraded_coverage_section,
+    apply_precheck_scanner_failure_gate,
+    build_degraded_coverage_labels,
+)
 from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
 
@@ -241,6 +245,9 @@ class ReviewState(TypedDict, total=False):
     precheck_fast_fail: list[
         dict[str, Any]
     ]  # verified-rule hits: present only when short-circuiting
+    precheck_scanner_failures: list[
+        str
+    ]  # scanner names that returned None this round (crashed/timed out) -- observability only
 
 
 class ReviewerInput(TypedDict):
@@ -1380,6 +1387,7 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     Runs in parallel with ``_node_precheck_checks``: see that node's
     docstring for why they're split rather than sequenced in one body.
     """
+    from argus.helpers import extract_changed_files
     from argus.precheck.engine import run_precheck
     from argus.storage.precheck import CandidateFiring, log_candidate_firings
 
@@ -1391,7 +1399,9 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
     req = ReviewRequest.model_validate(state["request"])
 
     try:
-        result = await run_precheck(worktree_path)
+        result = await run_precheck(
+            worktree_path, changed_files=extract_changed_files(state["diff"])
+        )
     except Exception:  # noqa: BLE001 — precheck engine failure is not a review failure
         logger.warning("Deterministic precheck failed — proceeding without it", exc_info=True)
         return {}
@@ -1406,6 +1416,18 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
         update["precheck_findings"] = [f.as_finding_dict() for f in result.candidate_findings]
     if result.verified_findings:
         update["precheck_fast_fail"] = [f.as_storage_dict() for f in result.verified_findings]
+    if result.failed_scanners:
+        # Observability only -- see PrecheckResult's docstring: this module
+        # stays fail-open regardless, but a scanner failure that was
+        # previously indistinguishable from "ran clean" should still be
+        # visible somewhere. Consumed by run_review/_invoke_graph (not this
+        # node, and not _node_write_review -- that node runs and finalizes
+        # response.review_comment before this key's value is read; the
+        # actual read happens off the final graph state, after the graph
+        # has finished), which appends it to the review comment via the
+        # same degraded-coverage pattern already used for killed/timed-out
+        # LLM reviewer sessions.
+        update["precheck_scanner_failures"] = result.failed_scanners
 
     if result.candidate_findings:
         try:
@@ -2992,18 +3014,47 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
 
     response.usage.cost_usd = total_cost_usd
 
-    # Surface killed/timed-out reviewer sessions instead of letting them
-    # collapse silently into "0 findings" — both in the rendered markdown
-    # (not schema-frozen, safe to append to) and in the logs.
-    failed_labels = failed_reviewer_labels(findings_models)
+    # Surface killed/timed-out reviewer sessions AND crashed/timed-out
+    # deterministic precheck scanners instead of letting either collapse
+    # silently into "0 findings" — both in the rendered markdown (not
+    # schema-frozen, safe to append to) and in the logs. Precheck scanner
+    # failures were already logged once, loudly, inside
+    # precheck.engine.run_precheck itself (this module stays fail-open
+    # regardless of what's surfaced here) — this is the second, PR-visible
+    # half of that same observability, not a duplicate warning path.
+    # See build_degraded_coverage_labels' own docstring for why the
+    # precheck_scanner_failures key lookup lives there, not inline here.
+    failed_labels = build_degraded_coverage_labels(findings_models, result)
     if failed_labels:
         logger.warning(
-            "Degraded coverage: %d reviewer session(s) did not complete and reported 0 findings: %s",
+            "Degraded coverage: %d reviewer session(s)/scanner(s) did not complete and "
+            "reported 0 findings: %s",
             len(failed_labels),
             ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
         )
         response.review_comment = append_degraded_coverage_section(
             response.review_comment, failed_labels
+        )
+
+    # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
+    # own docstring (argus/config.py) for the fail-open-vs-fail-closed
+    # tradeoff, and apply_precheck_scanner_failure_gate's for why this is
+    # a helpers.py call rather than inline logic here. Deliberately keyed
+    # on precheck_scanner_failures alone, not the combined failed_labels
+    # above -- a killed/timed-out LLM reviewer session is a different
+    # failure class this flag was never scoped to.
+    precheck_scanner_failures = result.get("precheck_scanner_failures", [])
+    if apply_precheck_scanner_failure_gate(
+        response,
+        precheck_scanner_failures,
+        get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
+    ):
+        logger.warning(
+            "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set -- forced verdict to BLOCKING "
+            "(risk_level=%s) because %d precheck scanner(s) did not complete this round: %s",
+            response.risk_level.value,
+            len(precheck_scanner_failures),
+            ", ".join(precheck_scanner_failures),
         )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)

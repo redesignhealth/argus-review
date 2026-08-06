@@ -5,6 +5,18 @@ the directory pointed at by `ARGUS_RULES_DIR`, which takes priority over
 this one — are picked up by `argus.precheck.engine.run_precheck` and run
 against the PR worktree before the LLM pipeline runs.
 
+**Before authoring a custom rule here, check whether a stock source
+already covers it** — semgrep registry packs (`ARGUS_STOCK_SEMGREP_PACKS`),
+zizmor and actionlint (GitHub Actions), Trivy (secrets), squawk (Postgres
+migrations), Checkov (Terraform IAM), and eslint-plugin-security (JS/TS)
+all run independently of this directory and may already catch what you're
+about to hand-write, especially for well-known idioms (unpinned
+dependencies, hardcoded secrets, GitHub Actions script injection, unsafe
+migrations). This directory's real value is patterns specific to *this
+codebase's own* recurring mistakes, not things a general-purpose,
+externally-maintained tool already solves. See
+`docs/PRECHECKS.md`'s "Stock rule sources vs. custom/mined rules" section.
+
 ## Status lifecycle
 
 A rule's `id:` field is the key `argus.storage.precheck` uses to look up its

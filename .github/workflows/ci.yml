@@ -130,3 +130,12 @@ jobs:
         run: uv run semgrep --version
       - name: pytest (precheck engine integration -- real semgrep, no network/credentials)
         run: uv run pytest -m integration tests/test_precheck_engine_integration.py
+      - name: Verify checkov is installed
+        # Same guard as semgrep's above, and for the same reason: without
+        # this, a dropped `prechecks` extra would silently stop exercising
+        # tests/test_terraform_scanner_integration.py's real-binary path
+        # (that file itself pytest.skip()s, not fails, when checkov is
+        # missing from PATH) and CI would stay green throughout.
+        run: uv run checkov --version
+      - name: pytest (terraform scanner integration -- real checkov, no network/credentials)
+        run: uv run pytest -m integration tests/test_terraform_scanner_integration.py

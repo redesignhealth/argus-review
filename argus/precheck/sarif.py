@@ -1,11 +1,16 @@
-"""Minimal parser for semgrep's native ``--sarif`` (SARIF 2.1.0) output.
+"""Minimal parser for standard SARIF 2.1.0 output.
 
 Only extracts what the precheck engine needs (rule id, severity, file,
-line, message) — this is not a general-purpose SARIF library. Semgrep
-emits real SARIF 2.1.0 directly, so there's no custom normalization step
-on our side: this matches the industry-standard interchange format
-reviewdog/MegaLinter/DeepSource also converge on, buying free interop
-(e.g. GitHub's Code Scanning tab) if we ever want it later.
+line, message) — this is not a general-purpose SARIF library. Despite the
+function name (kept for now to avoid churning every existing call site),
+this parser makes no semgrep-specific assumptions -- it reads only
+standard SARIF fields, which is exactly what lets
+``argus.precheck.actions_scanner`` reuse it unchanged for zizmor's own
+``--format sarif`` output. Both tools emit real SARIF 2.1.0 directly, so
+there's no custom normalization step on our side: this matches the
+industry-standard interchange format reviewdog/MegaLinter/DeepSource also
+converge on, buying free interop (e.g. GitHub's Code Scanning tab) if we
+ever want it later.
 """
 
 from __future__ import annotations

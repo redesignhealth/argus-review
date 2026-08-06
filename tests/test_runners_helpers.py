@@ -5,18 +5,38 @@ These are security controls and parsing logic with no LLM dependency.
 
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from argus.helpers import (
+    _RISK_LEVEL_ORDER,
     append_degraded_coverage_section,
+    apply_precheck_scanner_failure_gate,
+    build_degraded_coverage_labels,
     collect_reviewed_files,
+    extract_changed_files,
     filter_diff_for_files,
     parse_review_result,
     sanitize_file_paths,
     failed_reviewer_labels,
 )
+from argus.models import ReviewResponse, RiskLevel, Verdict
 from argus.pipeline_models import RawFinding, SystemReviewResult
+
+
+def _response(
+    verdict: Verdict = Verdict.APPROVE,
+    risk_level: RiskLevel = RiskLevel.LOW,
+    review_comment: str = "## Code Review\n\n**Verdict**: ✅ APPROVE | **Risk**: LOW\n\nLooks good.",
+) -> ReviewResponse:
+    return ReviewResponse(
+        verdict=verdict,
+        risk_level=risk_level,
+        review_comment=review_comment,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +88,34 @@ class TestFilterDiffForFiles:
 
     def test_empty_files(self) -> None:
         assert filter_diff_for_files(self.SAMPLE_DIFF, []) == ""
+
+
+# ---------------------------------------------------------------------------
+# extract_changed_files
+# ---------------------------------------------------------------------------
+
+
+class TestExtractChangedFiles:
+    def test_extracts_both_sides_of_a_rename(self) -> None:
+        diff = (
+            "diff --git a/old_name.py b/new_name.py\n"
+            "--- a/old_name.py\n"
+            "+++ b/new_name.py\n"
+            "@@ -1 +1 @@\n"
+            "-x\n"
+            "+y\n"
+        )
+        assert extract_changed_files(diff) == ["new_name.py", "old_name.py"]
+
+    def test_dedupes_and_sorts(self) -> None:
+        result = extract_changed_files(TestFilterDiffForFiles.SAMPLE_DIFF)
+        assert result == ["src/main.py", "src/utils.py", "tests/test_main.py"]
+
+    def test_empty_diff_returns_empty_list(self) -> None:
+        assert extract_changed_files("") == []
+
+    def test_diff_with_no_file_headers_returns_empty_list(self) -> None:
+        assert extract_changed_files("not a real diff\njust text\n") == []
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +305,172 @@ class TestTimedOutReviewerLabels:
 
     def test_empty_results(self) -> None:
         assert failed_reviewer_labels([]) == []
+
+
+class TestBuildDegradedCoverageLabels:
+    """Regression coverage for the exact key lookup
+    (``graph_result.get("precheck_scanner_failures", [])``) that a typo on
+    either the producer side (``graph._node_precheck_rules``) or this read
+    side would otherwise let slip past the full test suite undetected --
+    see this function's own docstring for why it was pulled out of
+    ``graph.run_review`` specifically to make this testable in isolation.
+    """
+
+    def test_no_failures_of_either_kind_returns_empty(self) -> None:
+        results = [SystemReviewResult(system_group="g1", findings=[], files_explored=[])]
+        assert build_degraded_coverage_labels(results, {}) == []
+
+    def test_missing_key_treated_as_no_precheck_failures(self) -> None:
+        results = [SystemReviewResult(system_group="g1", findings=[], files_explored=[])]
+        assert build_degraded_coverage_labels(results, {"unrelated": "value"}) == []
+
+    def test_precheck_scanner_failures_become_labeled_and_reasoned(self) -> None:
+        results: list[SystemReviewResult] = []
+        graph_result = {"precheck_scanner_failures": ["zizmor", "trivy"]}
+        assert build_degraded_coverage_labels(results, graph_result) == [
+            ("precheck:zizmor", "scanner did not complete this round"),
+            ("precheck:trivy", "scanner did not complete this round"),
+        ]
+
+    def test_reviewer_and_precheck_failures_combine_reviewer_first(self) -> None:
+        results = [
+            SystemReviewResult(
+                system_group="specialist/orchestration::g2",
+                findings=[],
+                files_explored=[],
+                failure_reason="timeout",
+            ),
+        ]
+        graph_result = {"precheck_scanner_failures": ["zizmor"]}
+        assert build_degraded_coverage_labels(results, graph_result) == [
+            ("specialist/orchestration::g2", "timeout"),
+            ("precheck:zizmor", "scanner did not complete this round"),
+        ]
+
+
+class TestApplyPrecheckScannerFailureGate:
+    """ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is opt-in and off by default
+    -- see its docstring in argus/config.py for the fail-open-vs-fail-closed
+    tradeoff. This gate must only ever make the verdict stricter, never
+    looser, and must be a true no-op (no mutation) in every case where it
+    doesn't fire.
+    """
+
+    def test_noop_when_flag_off(self) -> None:
+        response = _response()
+        original_comment = response.review_comment
+        fired = apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=False)
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+        assert response.findings == []
+        assert response.review_comment == original_comment
+
+    def test_noop_when_no_failures(self) -> None:
+        response = _response()
+        original_comment = response.review_comment
+        fired = apply_precheck_scanner_failure_gate(response, [], block_on_failure=True)
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+        assert response.findings == []
+        assert response.review_comment == original_comment
+
+    def test_noop_when_already_blocking(self) -> None:
+        """Never touches a review that's already BLOCKING for its own
+        reasons -- this flag only ever strengthens, never re-derives, the
+        verdict.
+        """
+        response = _response(verdict=Verdict.BLOCKING)
+        original_comment = response.review_comment
+        fired = apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert fired is False
+        assert response.verdict == Verdict.BLOCKING
+        assert response.findings == []
+        assert response.review_comment == original_comment
+
+    def test_forces_blocking_when_flag_on_and_failures_present(self) -> None:
+        response = _response()
+        fired = apply_precheck_scanner_failure_gate(
+            response, ["zizmor", "trivy"], block_on_failure=True
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+        assert response.risk_level == RiskLevel.HIGH
+        assert len(response.findings) == 1
+        finding = response.findings[0]
+        assert finding.severity.value == "BLOCKING"
+        assert finding.category == "deterministic-precheck"
+        # Sorted, not insertion order -- deterministic regardless of which
+        # scanner's coroutine happened to finish first.
+        assert "trivy" in finding.description
+        assert "zizmor" in finding.description
+        assert finding.description.index("trivy") < finding.description.index("zizmor")
+
+    def test_rewrites_the_rendered_comments_verdict_line(self) -> None:
+        """Regression test: the structured verdict/risk_level/findings were
+        the only things mutated by an earlier version of this gate, leaving
+        the human-visible comment -- what cli.py actually posts to the PR
+        and persists to the DB -- still reading APPROVE. The comment must
+        reflect BLOCKING too, not just the structured response fields.
+        """
+        response = _response(
+            review_comment="## Code Review\n\n**Verdict**: ✅ APPROVE | **Risk**: LOW\n\nLooks good."
+        )
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+
+        assert "**Verdict**: 🚫 BLOCKING" in response.review_comment
+        assert "✅ APPROVE" not in response.review_comment
+        # The explanation must actually reach the PR-visible comment, not
+        # just the structured Finding -- that was the other half of the
+        # original bug.
+        assert "zizmor" in response.review_comment
+        assert "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE" in response.review_comment
+        # Original body content preserved, not replaced wholesale.
+        assert "Looks good." in response.review_comment
+
+    def test_risk_level_only_raised_never_downgraded(self) -> None:
+        """A response that already carries CRITICAL (e.g. from
+        _node_validate_blockings leaving APPROVE+CRITICAL) must not be
+        silently weakened to HIGH just because this gate also fired --
+        RiskLevel.CRITICAL ranks above HIGH, and this gate's own contract
+        is "only ever stricter, never looser."
+        """
+        response = _response(risk_level=RiskLevel.CRITICAL)
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert response.risk_level == RiskLevel.CRITICAL
+
+    def test_risk_level_raised_from_below_high(self) -> None:
+        response = _response(risk_level=RiskLevel.MEDIUM)
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert response.risk_level == RiskLevel.HIGH
+
+    def test_risk_level_already_high_stays_high(self) -> None:
+        """Exact-boundary case: HIGH is neither raised nor downgraded."""
+        response = _response(risk_level=RiskLevel.HIGH)
+        apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert response.risk_level == RiskLevel.HIGH
+
+    def test_warns_and_still_appends_note_when_comment_has_no_verdict_header(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """If review_comment doesn't contain a '**Verdict**:'-shaped line,
+        the re.subn rewrite can't find anything to rewrite -- this must not
+        silently no-op; it should log a warning and still append the
+        explanatory section so the forced-BLOCKING reason is visible
+        somewhere in the comment.
+        """
+        response = _response(review_comment="## Code Review\n\nNo header here at all.")
+        with caplog.at_level(logging.WARNING):
+            apply_precheck_scanner_failure_gate(response, ["zizmor"], block_on_failure=True)
+        assert "No header here at all." in response.review_comment
+        assert "Verdict forced to BLOCKING" in response.review_comment
+        assert any(
+            "no '**Verdict**:'-shaped line found" in record.message for record in caplog.records
+        )
+
+
+class TestRiskLevelOrderExhaustive:
+    def test_covers_every_risk_level(self) -> None:
+        assert set(_RISK_LEVEL_ORDER) == set(RiskLevel)
 
 
 class TestAppendDegradedCoverageSection:

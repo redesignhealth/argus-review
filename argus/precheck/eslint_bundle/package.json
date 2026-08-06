@@ -1,0 +1,9 @@
+{
+  "name": "argus-eslint-security-bundle",
+  "private": true,
+  "description": "Self-contained eslint + eslint-plugin-security install, bundled and invoked by argus.precheck.js_scanner -- independent of whatever eslint setup (or lack thereof) the target repo being reviewed has. See this directory's README.md.",
+  "dependencies": {
+    "eslint": "^9.0.0",
+    "eslint-plugin-security": "^3.0.0"
+  }
+}
