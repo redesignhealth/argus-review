@@ -38,6 +38,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 from langsmith import traceable
+from langsmith.run_helpers import LangSmithExtra, get_current_run_tree
 
 from argus.config import DEFAULT_ARGUS_SESSION_TIMEOUT_S, get_settings
 from argus.helpers import (
@@ -255,6 +256,38 @@ def _tool_result_size(content: str | list[dict[str, Any]] | None) -> int:
     return total
 
 
+def _context_ledger_path() -> str:
+    """Return the per-process local context-usage ledger path (TECH-4734 phase 2).
+
+    Sibling of the ``/tmp/argus-checkpoint-<pid>.db`` LangGraph checkpoint
+    (see graph.py) -- a fallback for diagnosing context thrashing when
+    LangSmith tracing is off (no LANGSMITH_API_KEY / LANGCHAIN_TRACING_V2).
+    Each reviewer session runs in its own spawned subprocess (see
+    _run_session_in_subprocess), so os.getpid() here is that subprocess's
+    pid, not the parent graph process's -- one ledger file per session.
+    Overridable for tests, same pattern as ARGUS_SQLITE_CHECKPOINT_PATH.
+    """
+    return os.environ.get(
+        "ARGUS_CONTEXT_LEDGER_PATH",
+        f"/tmp/argus-context-ledger-{os.getpid()}.jsonl",  # nosec B108
+    )
+
+
+def _append_context_ledger(record: dict[str, Any]) -> None:
+    """Best-effort append of one context-usage record to the local ledger.
+
+    Sizes/counts only (ts, label, msg_index, token counts) -- never prompt
+    or response content. IOError must never break a review: a full /tmp, a
+    permissions issue, or a concurrent-write race is a diagnostics-only
+    degradation, not a review failure.
+    """
+    try:
+        with open(_context_ledger_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        logger.debug("Failed to append to context-usage ledger", exc_info=True)
+
+
 @dataclass
 class SessionResult:
     """Rich return from _run_claude_session with timing and tool metadata."""
@@ -332,10 +365,28 @@ def _get_reviewer_executor() -> ThreadPoolExecutor:
 
 async def _run_session_isolated(**kwargs: Any) -> SessionResult:
     """Run _run_session_in_subprocess on a dedicated thread pool so concurrent
-    reviewer sessions do not queue behind the default asyncio executor."""
+    reviewer sessions do not queue behind the default asyncio executor.
+
+    TECH-4734 phase 2: the reviewer session itself runs in a spawned
+    subprocess (see _run_session_in_subprocess) with a fresh interpreter and
+    no shared contextvars, so the @traceable span _run_claude_session opens
+    there has no way to see the LangGraph node's run tree that is active
+    here, in the parent's asyncio task -- without help it starts a new root
+    trace instead of nesting under the graph-level trace. get_current_run_tree()
+    reads the ambient contextvar directly (no LangGraph/LangChain call
+    needed) and returns None when tracing is off, which serializes to no
+    headers and is a no-op for the child.
+    """
+    parent_run = get_current_run_tree()
+    langsmith_parent_headers = parent_run.to_headers() if parent_run is not None else None
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _get_reviewer_executor(), functools.partial(_run_session_in_subprocess, **kwargs)
+        _get_reviewer_executor(),
+        functools.partial(
+            _run_session_in_subprocess,
+            langsmith_parent_headers=langsmith_parent_headers,
+            **kwargs,
+        ),
     )
 
 
@@ -969,6 +1020,7 @@ def _run_session_in_subprocess(
     label: str,
     timeout_s: int = _SUBPROCESS_TIMEOUT_S,
     is_system_reviewer_role: bool = False,
+    langsmith_parent_headers: dict[str, str] | None = None,
 ) -> SessionResult:
     """Run a Claude Agent SDK session in a spawned process (clean event loop).
 
@@ -979,6 +1031,13 @@ def _run_session_in_subprocess(
     ``is_system_reviewer_role``: forwarded to ``_run_claude_session`` --
     see that function's docstring for why this must be an explicit,
     caller-declared role flag rather than inferred from ``model``.
+
+    ``langsmith_parent_headers`` (TECH-4734 phase 2) carries the serialized
+    parent LangSmith run tree (via RunTree.to_headers()) across the process
+    boundary -- plain str/str dict, safe for spawn's pickling of Process
+    args -- so the @traceable span opened inside the subprocess nests under
+    the caller's trace instead of starting an orphaned root trace. None when
+    tracing is off or there was no ambient run tree.
     """
     import multiprocessing as mp
 
@@ -1000,6 +1059,7 @@ def _run_session_in_subprocess(
             cwd,
             label,
             is_system_reviewer_role,
+            langsmith_parent_headers,
         ),
     )
     start = datetime.now(timezone.utc)
@@ -1040,6 +1100,7 @@ def _validator_worker(
     cwd: str,
     label: str,
     is_system_reviewer_role: bool = False,
+    langsmith_parent_headers: dict[str, str] | None = None,
 ) -> None:
     """Worker process: runs _run_claude_session with a fresh event loop."""
     import asyncio as _asyncio
@@ -1083,6 +1144,15 @@ def _validator_worker(
         from argus.config import get_settings
         from argus.runners import _run_claude_session
 
+        # TECH-4734 phase 2: re-attach the parent LangSmith run tree (if any)
+        # so the @traceable span below nests under the caller's trace instead
+        # of opening an orphaned root trace -- this subprocess has no shared
+        # contextvars with the parent. langsmith_extra["parent"] accepts a
+        # headers mapping directly (RunTree.from_headers under the hood); a
+        # None value is a no-op, same as omitting langsmith_extra entirely.
+        langsmith_extra: LangSmithExtra = (
+            {"parent": langsmith_parent_headers} if langsmith_parent_headers else {}
+        )
         session = await _run_claude_session(
             model=model,
             system_prompt=system_prompt,
@@ -1091,6 +1161,7 @@ def _validator_worker(
             label=label,
             repo_root=cwd,
             is_system_reviewer_role=is_system_reviewer_role,
+            langsmith_extra=langsmith_extra,
         )
         return session
 
@@ -1388,6 +1459,11 @@ async def _run_claude_session(
     # allowed, what options are set, or how the session runs.
     peak_context_tokens: int | None = None
     tool_use_names: dict[str, str] = {}  # tool_use_id -> tool name, for correlating results
+    # TECH-4734 phase 2: sizes/counts only, mirrored into the LangSmith run's
+    # metadata (below) and a local JSONL ledger for when tracing is off.
+    # Never content -- see module docstring on why (untrusted diff/PR data).
+    usage_records: list[dict[str, Any]] = []
+    tool_result_sizes: list[dict[str, Any]] = []
     async with ClaudeSDKClient(options=options) as client:
         await client.query(user_message)
         result_text = ""
@@ -1431,6 +1507,19 @@ async def _run_claude_session(
                     output_tokens,
                     context_total,
                 )
+                usage_record = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "label": label or "unlabeled",
+                    "msg_index": message_index,
+                    "input_tokens": input_tokens,
+                    "cache_read": cache_read_tokens,
+                    "cache_creation": cache_creation_tokens,
+                    "output_tokens": output_tokens,
+                    "context_total": context_total,
+                    "peak": peak_context_tokens,
+                }
+                usage_records.append(usage_record)
+                _append_context_ledger(usage_record)
             elif isinstance(message, UserMessage):
                 content = message.content
                 if isinstance(content, list):
@@ -1445,6 +1534,13 @@ async def _run_claude_session(
                                 tool_name,
                                 result_size,
                                 bool(block.is_error),
+                            )
+                            tool_result_sizes.append(
+                                {
+                                    "tool": tool_name,
+                                    "size_chars": result_size,
+                                    "is_error": bool(block.is_error),
+                                }
                             )
             elif isinstance(message, ResultMessage):
                 result_text = message.result or ""
@@ -1499,6 +1595,29 @@ async def _run_claude_session(
             logger.info("Context7 calls: %s", context7_calls)
         elif context7_api_key and context7_library_id:
             logger.warning("Context7 was available but agent made 0 Context7 calls")
+
+    # TECH-4734 phase 2: attach the usage data collected above to the
+    # LangSmith run for this session (this function is @traceable, so a run
+    # tree exists whenever tracing is on). get_current_run_tree() returns
+    # None when LANGSMITH_API_KEY/LANGCHAIN_TRACING_V2 aren't set -- guarded,
+    # never raises. Metadata only: sizes, counts, labels -- no prompt/response
+    # content, which may include untrusted diff content.
+    run_tree = get_current_run_tree()
+    if run_tree is not None:
+        try:
+            run_tree.add_metadata(
+                {
+                    "argus_context_usage": {
+                        "label": label or "unlabeled",
+                        "model": model,
+                        "peak_context_tokens": peak_context_tokens,
+                        "message_usage": usage_records,
+                        "tool_result_sizes": tool_result_sizes,
+                    }
+                }
+            )
+        except Exception:  # noqa: BLE001 — metadata attachment must never break a review
+            logger.debug("Failed to attach context-usage metadata to LangSmith run", exc_info=True)
 
     return SessionResult(
         result_text=result_text,

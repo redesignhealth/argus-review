@@ -697,6 +697,10 @@ class TestRunSessionIsolated:
             context7_key=None,
             cwd="/tmp/repo",
             label="test-isolated",
+            # TECH-4734 phase 2: propagated so the subprocess's @traceable span
+            # can nest under the caller's LangSmith trace. None here because
+            # tracing is off in tests (no ambient run tree to capture).
+            langsmith_parent_headers=None,
         )
 
 
