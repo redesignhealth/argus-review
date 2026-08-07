@@ -278,6 +278,10 @@ def _context_ledger_path(pid: int | None = None) -> str:
     itself. The parent process (_run_session_in_subprocess) instead passes
     the *child's* pid explicitly, since it needs this same template to clean
     up a killed child's ledger without inheriting the child's pid as its own.
+    Silently ignored when ARGUS_CONTEXT_LEDGER_PATH is pinned (there's only
+    one shared path in that mode) -- callers that care whether a resolved
+    path is actually per-pid or a pinned override must check
+    ARGUS_CONTEXT_LEDGER_PATH themselves, same as _try_unlink_ledger does.
     """
     return os.environ.get(
         "ARGUS_CONTEXT_LEDGER_PATH",
@@ -285,20 +289,26 @@ def _context_ledger_path(pid: int | None = None) -> str:
     )
 
 
-def _try_unlink_ledger(pid: int) -> None:
+def _try_unlink_ledger(ledger_path: str) -> None:
     """Best-effort removal of another process's context-usage ledger.
 
-    Used by the parent (_run_session_in_subprocess) to clean up a killed
-    child's ledger on paths where the child's own atexit-registered
-    _cleanup_ledger_file never ran (SIGKILL, crash) -- mirrors that
-    function's FileNotFoundError/other-OSError split so both cleanup sites
-    log consistently. A no-op (silently) when ARGUS_CONTEXT_LEDGER_PATH
+    Takes an already-resolved path rather than a pid: the parent
+    (_run_session_in_subprocess) must resolve this via
+    _context_ledger_path(p.pid) immediately after p.start(), before the
+    child can be reaped -- resolving from p.pid *after* p.join() risks the
+    OS having already recycled that pid onto an unrelated concurrent
+    reviewer subprocess (_run_session_isolated dispatches on a thread
+    pool), which would silently delete that other session's live ledger.
+
+    Mirrors _cleanup_ledger_file's FileNotFoundError/other-OSError split so
+    both cleanup sites log consistently. A no-op when ARGUS_CONTEXT_LEDGER_PATH
     pins an operator-chosen path, since that path is presumably meant to
-    persist for inspection.
+    persist for inspection -- callers must check this themselves before
+    resolving a path to pass in, since by the time this function runs there
+    is no pid left to assert against.
     """
     if "ARGUS_CONTEXT_LEDGER_PATH" in os.environ:
         return
-    ledger_path = _context_ledger_path(pid)
     try:
         os.unlink(ledger_path)
     except FileNotFoundError:
@@ -1122,6 +1132,20 @@ def _run_session_in_subprocess(
     start = datetime.now(timezone.utc)
     p.start()
     result_pipe_send.close()  # parent only reads
+    # Resolve the child's ledger path now, right after start(), while p.pid
+    # is guaranteed to still refer to this child. Resolving it after
+    # p.join() instead would race: once reaped, that pid is eligible for
+    # OS reuse by an unrelated concurrent reviewer subprocess
+    # (_run_session_isolated dispatches on a thread pool), and unlinking by
+    # a stale pid could silently delete that other session's live ledger.
+    # Skipped entirely when ARGUS_CONTEXT_LEDGER_PATH is pinned: there's no
+    # per-pid path to resolve in that mode, and _context_ledger_path asserts
+    # against being passed a pid while pinned.
+    ledger_path = (
+        _context_ledger_path(p.pid)
+        if p.pid is not None and "ARGUS_CONTEXT_LEDGER_PATH" not in os.environ
+        else None
+    )
 
     p.join(timeout=timeout_s)
 
@@ -1133,9 +1157,9 @@ def _run_session_in_subprocess(
         )
         # SIGKILL bypasses atexit entirely, so _validator_worker's own ledger
         # cleanup never runs on this path -- unlink here in the parent using
-        # the killed child's pid instead.
-        if p.pid is not None:
-            _try_unlink_ledger(p.pid)
+        # the path resolved above.
+        if ledger_path is not None:
+            _try_unlink_ledger(ledger_path)
         return _empty_session_result(
             model, duration_seconds=float(timeout_s), started_at=start, failure_reason="timeout"
         )
@@ -1146,11 +1170,12 @@ def _run_session_in_subprocess(
     logger.warning(
         "Validator subprocess [%s] exited with code %d, no result", label, p.exitcode or -1
     )
-    # Same atexit-bypass gap as the timeout branch above: a crashed worker
-    # (OOM kill, SIGSEGV, external SIGKILL) never runs its own atexit
-    # cleanup either, so the ledger leaks unless cleaned up here too.
-    if p.pid is not None:
-        _try_unlink_ledger(p.pid)
+    # Same atexit-bypass gap as the timeout branch above for hard-killed
+    # exits (OOM, SIGSEGV, external SIGKILL); idempotent-safe when atexit
+    # did run (e.g. an unhandled exception in the worker), since
+    # FileNotFoundError is silenced.
+    if ledger_path is not None:
+        _try_unlink_ledger(ledger_path)
     return _empty_session_result(model, failure_reason="worker_crashed")
 
 
