@@ -292,6 +292,160 @@ class TestUsageLoggingIsDefensive:
         assert result_log_calls[0].args[-2] == 10
 
 
+class TestLangSmithEnrichmentIsDefensive:
+    """TECH-4734 phase 2: LangSmith span enrichment and the local ledger fallback
+    must never break a review session, whether tracing is off or a write fails.
+    """
+
+    def test_tracing_off_does_not_raise(self) -> None:
+        """get_current_run_tree() returning None (tracing off) must be a no-op,
+        not an AttributeError from calling .add_metadata() on None."""
+        messages = [
+            AssistantMessage(
+                content=[TextBlock(text="a")],
+                model="claude-sonnet-4-6",
+                usage={"input_tokens": 100, "output_tokens": 5},
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=100,
+                duration_api_ms=90,
+                is_error=False,
+                num_turns=1,
+                session_id="sess-1",
+                usage={"input_tokens": 100},
+                model_usage=None,
+            ),
+        ]
+        with patch(f"{_RUNNERS_MODULE}.get_current_run_tree", return_value=None):
+            result = _run_session(messages)
+        assert result.result_text == ""
+
+    def test_run_tree_add_metadata_failure_does_not_raise(self) -> None:
+        """A LangSmith-side failure while attaching metadata (e.g. a client
+        error) must be swallowed -- observability enrichment is best-effort."""
+        messages = [
+            AssistantMessage(
+                content=[TextBlock(text="a")],
+                model="claude-sonnet-4-6",
+                usage={"input_tokens": 100, "output_tokens": 5},
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=100,
+                duration_api_ms=90,
+                is_error=False,
+                num_turns=1,
+                session_id="sess-1",
+                usage={"input_tokens": 100},
+                model_usage=None,
+            ),
+        ]
+        broken_run_tree = MagicMock()
+        broken_run_tree.add_metadata.side_effect = RuntimeError("langsmith unavailable")
+        with patch(f"{_RUNNERS_MODULE}.get_current_run_tree", return_value=broken_run_tree):
+            result = _run_session(messages)
+        assert result.result_text == ""
+        broken_run_tree.add_metadata.assert_called_once()
+
+    def test_ledger_write_failure_does_not_raise(self) -> None:
+        """A best-effort local-ledger append that hits an OSError (full disk,
+        permissions, concurrent-write race) must not surface to the caller."""
+        messages = [
+            AssistantMessage(
+                content=[TextBlock(text="a")],
+                model="claude-sonnet-4-6",
+                usage={"input_tokens": 100, "output_tokens": 5},
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=100,
+                duration_api_ms=90,
+                is_error=False,
+                num_turns=1,
+                session_id="sess-1",
+                usage={"input_tokens": 100},
+                model_usage=None,
+            ),
+        ]
+        # Fails open() only for the ledger path specifically, not module-wide:
+        # _append_context_ledger's OSError guard lives INSIDE that function's
+        # own body, so replacing the whole function (as an earlier version of
+        # this test did) bypasses that guard entirely and lets the OSError
+        # propagate uncaught -- exactly the "must not raise" behavior this
+        # test exists to verify. A real ledger path is threaded through so
+        # this shim only intercepts that one call, unlike a bare
+        # `patch(f"{_RUNNERS_MODULE}.open", side_effect=OSError(...))`, which
+        # would also silently mask any unrelated open() call added to
+        # runners.py in the future without this test noticing.
+        from argus.runners import _context_ledger_path
+
+        real_open = open
+        ledger_path = _context_ledger_path()
+
+        def _open_that_fails_for_ledger(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if file == ledger_path:
+                raise OSError("disk full")
+            return real_open(file, *args, **kwargs)
+
+        with patch(f"{_RUNNERS_MODULE}.open", side_effect=_open_that_fails_for_ledger, create=True):
+            result = _run_session(messages)
+        assert result.result_text == ""
+
+    def test_ledger_records_usage_fields(self, tmp_path: Any) -> None:
+        """The ledger line shape matches the spec: ts, label, msg_index, token
+        counts, context_total, peak -- and only ever those fields (no content)."""
+        import json
+
+        ledger_path = tmp_path / "ledger.jsonl"
+        messages = [
+            AssistantMessage(
+                content=[TextBlock(text="a")],
+                model="claude-sonnet-4-6",
+                usage={
+                    "input_tokens": 100,
+                    "cache_read_input_tokens": 50,
+                    "cache_creation_input_tokens": 10,
+                    "output_tokens": 5,
+                },
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=100,
+                duration_api_ms=90,
+                is_error=False,
+                num_turns=1,
+                session_id="sess-1",
+                usage={"input_tokens": 100},
+                model_usage=None,
+            ),
+        ]
+        with patch(f"{_RUNNERS_MODULE}._context_ledger_path", return_value=str(ledger_path)):
+            _run_session(messages)
+        lines = ledger_path.read_text().strip().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["label"] == "test-label"
+        assert record["msg_index"] == 1
+        assert record["input_tokens"] == 100
+        assert record["cache_read"] == 50
+        assert record["cache_creation"] == 10
+        assert record["output_tokens"] == 5
+        assert record["context_total"] == 160
+        assert record["peak"] == 160
+        assert set(record.keys()) == {
+            "ts",
+            "label",
+            "msg_index",
+            "input_tokens",
+            "cache_read",
+            "cache_creation",
+            "output_tokens",
+            "context_total",
+            "peak",
+        }
+
+
 class TestContext1mBetaAndStrictMcpConfig:
     """TECH-4732: sonnet reviewer sessions enable the Anthropic 1M-context
     beta and strict MCP config; the opus cross-cutting session gets

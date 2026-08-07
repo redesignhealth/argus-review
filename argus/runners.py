@@ -38,6 +38,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 from langsmith import traceable
+from langsmith.run_helpers import LangSmithExtra, get_current_run_tree
 
 from argus.config import DEFAULT_ARGUS_SESSION_TIMEOUT_S, get_settings
 from argus.helpers import (
@@ -255,6 +256,83 @@ def _tool_result_size(content: str | list[dict[str, Any]] | None) -> int:
     return total
 
 
+def _context_ledger_path(pid: int | None = None) -> str:
+    """Return the per-process local context-usage ledger path (TECH-4734 phase 2).
+
+    Sibling of the ``/tmp/argus-checkpoint-<pid>.db`` LangGraph checkpoint
+    (see graph.py). Written unconditionally on every message, regardless of
+    whether LangSmith tracing is on or off -- NOT gated on tracing state,
+    despite the "fallback for when tracing is off" framing an earlier
+    version of this comment used. It's useful either way: even with tracing
+    on, this is a plain local file a developer can `tail`/`grep` without a
+    LangSmith UI round-trip, and it costs nothing extra to keep writing it.
+    Each reviewer session runs in its own spawned subprocess (see
+    _run_session_in_subprocess), so os.getpid() here is that subprocess's
+    pid, not the parent graph process's -- one ledger file per session.
+    Overridable for tests, same pattern as ARGUS_SQLITE_CHECKPOINT_PATH; see
+    _validator_worker's atexit cleanup for when the default per-pid path is
+    removed.
+
+    ``pid``: defaults to the caller's own pid (os.getpid()), which is the
+    only correct choice when this runs inside the ledger-writing subprocess
+    itself. The parent process (_run_session_in_subprocess) instead passes
+    the *child's* pid explicitly, since it needs this same template to clean
+    up a killed child's ledger without inheriting the child's pid as its own.
+    Silently ignored when ARGUS_CONTEXT_LEDGER_PATH is pinned (there's only
+    one shared path in that mode) -- callers that care whether a resolved
+    path is actually per-pid or a pinned override must check
+    ARGUS_CONTEXT_LEDGER_PATH themselves, same as _try_unlink_ledger does.
+    """
+    return os.environ.get(
+        "ARGUS_CONTEXT_LEDGER_PATH",
+        f"/tmp/argus-context-ledger-{pid if pid is not None else os.getpid()}.jsonl",  # nosec B108
+    )
+
+
+def _try_unlink_ledger(ledger_path: str) -> None:
+    """Best-effort removal of another process's context-usage ledger.
+
+    Takes an already-resolved path rather than a pid: the parent
+    (_run_session_in_subprocess) must resolve this via
+    _context_ledger_path(p.pid) immediately after p.start(), before the
+    child can be reaped -- resolving from p.pid *after* p.join() risks the
+    OS having already recycled that pid onto an unrelated concurrent
+    reviewer subprocess (_run_session_isolated dispatches on a thread
+    pool), which would silently delete that other session's live ledger.
+
+    Mirrors _cleanup_ledger_file's FileNotFoundError/other-OSError split so
+    both cleanup sites log consistently. A no-op when ARGUS_CONTEXT_LEDGER_PATH
+    pins an operator-chosen path, since that path is presumably meant to
+    persist for inspection -- callers must check this themselves before
+    resolving a path to pass in, since by the time this function runs there
+    is no pid left to assert against.
+    """
+    if "ARGUS_CONTEXT_LEDGER_PATH" in os.environ:
+        return
+    try:
+        os.unlink(ledger_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not unlink context-usage ledger %s: %s", ledger_path, exc)
+
+
+def _append_context_ledger(record: dict[str, Any]) -> None:
+    """Best-effort append of one context-usage record to the local ledger.
+
+    Sizes/counts only (ts, label, msg_index, token counts) -- never prompt
+    or response content. Neither IOError nor a serialization failure may
+    break a review: a full /tmp, a permissions issue, a concurrent-write
+    race, or a future schema change introducing a non-JSON-serializable
+    field are all diagnostics-only degradations, not review failures.
+    """
+    try:
+        with open(_context_ledger_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except (OSError, TypeError):
+        logger.debug("Failed to append to context-usage ledger", exc_info=True)
+
+
 @dataclass
 class SessionResult:
     """Rich return from _run_claude_session with timing and tool metadata."""
@@ -332,10 +410,51 @@ def _get_reviewer_executor() -> ThreadPoolExecutor:
 
 async def _run_session_isolated(**kwargs: Any) -> SessionResult:
     """Run _run_session_in_subprocess on a dedicated thread pool so concurrent
-    reviewer sessions do not queue behind the default asyncio executor."""
+    reviewer sessions do not queue behind the default asyncio executor.
+
+    TECH-4734 phase 2: the reviewer session itself runs in a spawned
+    subprocess (see _run_session_in_subprocess) with a fresh interpreter and
+    no shared contextvars, so the @traceable span _run_claude_session opens
+    there has no way to see the LangGraph node's run tree that is active
+    here, in the parent's asyncio task -- without help it starts a new root
+    trace instead of nesting under the graph-level trace. get_current_run_tree()
+    reads the ambient contextvar directly (no LangGraph/LangChain call
+    needed) and returns None when tracing is off, which serializes to no
+    headers and is a no-op for the child.
+
+    Empirically verified (2026-08-07) against both this repo's pinned
+    versions (langsmith==0.9.8, langgraph==1.2.8, per uv.lock) and a newer
+    langsmith==0.10.16 that this contextvar IS populated here even though
+    this function -- and the LangGraph node that calls it -- are plain async
+    functions, not @traceable-decorated: a minimal repro (a bare async node
+    added to a compiled StateGraph, invoked with LANGCHAIN_TRACING_V2=true,
+    calling get_current_run_tree() directly inside the node body) returned a
+    real RunTree, not None, on both pins. LangGraph's own LangSmith
+    integration sets this contextvar per-node automatically; a node/helper
+    does not need its own @traceable wrapper to observe it. This directly
+    contradicts an earlier, plausible-sounding claim (raised and then
+    dismissed with this evidence in Argus's review of this PR) that
+    LangGraph only propagates via RunnableConfig/callback handlers and never
+    touches LangSmith's own contextvar -- re-verify if this package's
+    langsmith/langgraph pins ever change materially, since this behavior is
+    an integration detail of those two packages, not something this
+    codebase controls.
+    """
+    parent_run = get_current_run_tree()
+    langsmith_parent_headers = parent_run.to_headers() if parent_run is not None else None
+    logger.debug(
+        "LangSmith trace propagation: parent_run_id=%s has_headers=%s",
+        parent_run.id if parent_run is not None else None,
+        bool(langsmith_parent_headers),
+    )
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        _get_reviewer_executor(), functools.partial(_run_session_in_subprocess, **kwargs)
+        _get_reviewer_executor(),
+        functools.partial(
+            _run_session_in_subprocess,
+            langsmith_parent_headers=langsmith_parent_headers,
+            **kwargs,
+        ),
     )
 
 
@@ -969,6 +1088,7 @@ def _run_session_in_subprocess(
     label: str,
     timeout_s: int = _SUBPROCESS_TIMEOUT_S,
     is_system_reviewer_role: bool = False,
+    langsmith_parent_headers: dict[str, str] | None = None,
 ) -> SessionResult:
     """Run a Claude Agent SDK session in a spawned process (clean event loop).
 
@@ -979,6 +1099,13 @@ def _run_session_in_subprocess(
     ``is_system_reviewer_role``: forwarded to ``_run_claude_session`` --
     see that function's docstring for why this must be an explicit,
     caller-declared role flag rather than inferred from ``model``.
+
+    ``langsmith_parent_headers`` (TECH-4734 phase 2) carries the serialized
+    parent LangSmith run tree (via RunTree.to_headers()) across the process
+    boundary -- plain str/str dict, safe for spawn's pickling of Process
+    args -- so the @traceable span opened inside the subprocess nests under
+    the caller's trace instead of starting an orphaned root trace. None when
+    tracing is off or there was no ambient run tree.
     """
     import multiprocessing as mp
 
@@ -1000,11 +1127,26 @@ def _run_session_in_subprocess(
             cwd,
             label,
             is_system_reviewer_role,
+            langsmith_parent_headers,
         ),
     )
     start = datetime.now(timezone.utc)
     p.start()
     result_pipe_send.close()  # parent only reads
+    # Resolve the child's ledger path now, right after start(), while p.pid
+    # is guaranteed to still refer to this child. Resolving it after
+    # p.join() instead would race: once reaped, that pid is eligible for
+    # OS reuse by an unrelated concurrent reviewer subprocess
+    # (_run_session_isolated dispatches on a thread pool), and unlinking by
+    # a stale pid could silently delete that other session's live ledger.
+    # Skipped entirely when ARGUS_CONTEXT_LEDGER_PATH is pinned: there's no
+    # per-pid path to resolve in that mode, and _context_ledger_path asserts
+    # against being passed a pid while pinned.
+    ledger_path = (
+        _context_ledger_path(p.pid)
+        if p.pid is not None and "ARGUS_CONTEXT_LEDGER_PATH" not in os.environ
+        else None
+    )
 
     p.join(timeout=timeout_s)
 
@@ -1014,6 +1156,11 @@ def _run_session_in_subprocess(
         logger.warning(
             "Validator subprocess [%s] timed out after %ds; killed process group", label, timeout_s
         )
+        # SIGKILL bypasses atexit entirely, so _validator_worker's own ledger
+        # cleanup never runs on this path -- unlink here in the parent using
+        # the path resolved above.
+        if ledger_path is not None:
+            _try_unlink_ledger(ledger_path)
         return _empty_session_result(
             model, duration_seconds=float(timeout_s), started_at=start, failure_reason="timeout"
         )
@@ -1024,6 +1171,12 @@ def _run_session_in_subprocess(
     logger.warning(
         "Validator subprocess [%s] exited with code %d, no result", label, p.exitcode or -1
     )
+    # Same atexit-bypass gap as the timeout branch above for hard-killed
+    # exits (OOM, SIGSEGV, external SIGKILL); idempotent-safe when atexit
+    # did run (e.g. an unhandled exception in the worker), since
+    # FileNotFoundError is silenced.
+    if ledger_path is not None:
+        _try_unlink_ledger(ledger_path)
     return _empty_session_result(model, failure_reason="worker_crashed")
 
 
@@ -1040,9 +1193,11 @@ def _validator_worker(
     cwd: str,
     label: str,
     is_system_reviewer_role: bool = False,
+    langsmith_parent_headers: dict[str, str] | None = None,
 ) -> None:
     """Worker process: runs _run_claude_session with a fresh event loop."""
     import asyncio as _asyncio
+    import atexit
     import contextlib
     import os
 
@@ -1050,6 +1205,32 @@ def _validator_worker(
     # AND its grandchildren (the spawned claude CLI) as one group on timeout.
     with contextlib.suppress(OSError, AttributeError):
         os.setsid()
+
+    # Clean up this subprocess's context-usage ledger on exit -- mirrors
+    # graph.py's _cleanup_sqlite_files() gating (skip cleanup when the path
+    # is operator-pinned via the env var, same convention as
+    # ARGUS_SQLITE_CHECKPOINT_PATH): an operator who explicitly set
+    # ARGUS_CONTEXT_LEDGER_PATH presumably wants the file to persist for
+    # inspection, so only the default per-pid /tmp path is auto-removed.
+    # Registered here (not in _run_claude_session) since _context_ledger_path()
+    # resolves os.getpid() at call time, and this worker's pid is stable for
+    # its whole lifetime -- computing the path once, at registration, avoids
+    # any risk of the cleanup unlinking a different path than what was
+    # actually written to if something in between changed os.environ.
+    if "ARGUS_CONTEXT_LEDGER_PATH" not in os.environ:
+        _ledger_path_to_clean = _context_ledger_path()
+
+        def _cleanup_ledger_file() -> None:
+            try:
+                os.unlink(_ledger_path_to_clean)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(
+                    "Could not unlink context-usage ledger %s: %s", _ledger_path_to_clean, exc
+                )
+
+        atexit.register(_cleanup_ledger_file)
 
     # Set whichever credential the caller actually configured -- forcing
     # everything to ANTHROPIC_API_KEY would send a gateway/proxy bearer
@@ -1083,6 +1264,15 @@ def _validator_worker(
         from argus.config import get_settings
         from argus.runners import _run_claude_session
 
+        # TECH-4734 phase 2: re-attach the parent LangSmith run tree (if any)
+        # so the @traceable span below nests under the caller's trace instead
+        # of opening an orphaned root trace -- this subprocess has no shared
+        # contextvars with the parent. langsmith_extra["parent"] accepts a
+        # headers mapping directly (RunTree.from_headers under the hood); a
+        # None value is a no-op, same as omitting langsmith_extra entirely.
+        langsmith_extra: LangSmithExtra | None = (
+            {"parent": langsmith_parent_headers} if langsmith_parent_headers else None
+        )
         session = await _run_claude_session(
             model=model,
             system_prompt=system_prompt,
@@ -1091,6 +1281,7 @@ def _validator_worker(
             label=label,
             repo_root=cwd,
             is_system_reviewer_role=is_system_reviewer_role,
+            langsmith_extra=langsmith_extra,
         )
         return session
 
@@ -1198,10 +1389,21 @@ async def _run_claude_session(
     label: str = "",
     repo_root: str | None = None,
     is_system_reviewer_role: bool = False,
+    langsmith_extra: LangSmithExtra | None = None,
 ) -> SessionResult:
     """Run a single ClaudeSDKClient session. Returns a SessionResult with timing and tool metadata.
 
     Args:
+        langsmith_extra: NOT read by this function's body -- ``@traceable``'s
+            own wrapper intercepts this reserved kwarg name before the call
+            reaches here (the LangSmith SDK contract; see ``_validator_worker``,
+            which builds ``{"parent": langsmith_parent_headers}`` and passes it
+            here to reparent this span under the caller's trace). Declared
+            explicitly, rather than left implicit, so a future refactor of
+            this function's signature (e.g. to ``**kwargs``) or removal of
+            ``@traceable`` fails loudly at the call site instead of a
+            subprocess silently swallowing a ``TypeError`` as
+            ``worker_crashed`` and re-orphaning traces with no signal.
         repo_root: Working directory for the agent's Read/Glob/Grep calls.
             Should be the path to a SHA-pinned worktree provisioned by
             ``repo_provision.provisioned_worktree``. Falls back to the
@@ -1388,6 +1590,11 @@ async def _run_claude_session(
     # allowed, what options are set, or how the session runs.
     peak_context_tokens: int | None = None
     tool_use_names: dict[str, str] = {}  # tool_use_id -> tool name, for correlating results
+    # TECH-4734 phase 2: sizes/counts only, mirrored into the LangSmith run's
+    # metadata (below) and a local JSONL ledger for when tracing is off.
+    # Never content -- see module docstring on why (untrusted diff/PR data).
+    usage_records: list[dict[str, Any]] = []
+    tool_result_sizes: list[dict[str, Any]] = []
     async with ClaudeSDKClient(options=options) as client:
         await client.query(user_message)
         result_text = ""
@@ -1431,6 +1638,28 @@ async def _run_claude_session(
                     output_tokens,
                     context_total,
                 )
+                usage_record = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "label": label or "unlabeled",
+                    "msg_index": message_index,
+                    "input_tokens": input_tokens,
+                    "cache_read": cache_read_tokens,
+                    "cache_creation": cache_creation_tokens,
+                    "output_tokens": output_tokens,
+                    "context_total": context_total,
+                    "peak": peak_context_tokens,
+                }
+                usage_records.append(usage_record)
+                # asyncio.to_thread, not a bare call: this loop is a plain
+                # `async for`, and a synchronous open()+write() here would
+                # block the event loop for however long the write takes. No
+                # observed starvation today (this subprocess's event loop
+                # runs only this one coroutine), but the platform rule is
+                # "no sync I/O in async code" regardless of whether today's
+                # call graph happens to make it harmless, since that safety
+                # margin silently disappears the moment anything else (a
+                # heartbeat, a timeout watchdog) shares this loop.
+                await asyncio.to_thread(_append_context_ledger, usage_record)
             elif isinstance(message, UserMessage):
                 content = message.content
                 if isinstance(content, list):
@@ -1445,6 +1674,13 @@ async def _run_claude_session(
                                 tool_name,
                                 result_size,
                                 bool(block.is_error),
+                            )
+                            tool_result_sizes.append(
+                                {
+                                    "tool": tool_name,
+                                    "size_chars": result_size,
+                                    "is_error": bool(block.is_error),
+                                }
                             )
             elif isinstance(message, ResultMessage):
                 result_text = message.result or ""
@@ -1499,6 +1735,29 @@ async def _run_claude_session(
             logger.info("Context7 calls: %s", context7_calls)
         elif context7_api_key and context7_library_id:
             logger.warning("Context7 was available but agent made 0 Context7 calls")
+
+    # TECH-4734 phase 2: attach the usage data collected above to the
+    # LangSmith run for this session (this function is @traceable, so a run
+    # tree exists whenever tracing is on). get_current_run_tree() returns
+    # None when LANGSMITH_API_KEY/LANGCHAIN_TRACING_V2 aren't set -- guarded,
+    # never raises. Metadata only: sizes, counts, labels -- no prompt/response
+    # content, which may include untrusted diff content.
+    run_tree = get_current_run_tree()
+    if run_tree is not None:
+        try:
+            run_tree.add_metadata(
+                {
+                    "argus_context_usage": {
+                        "label": label or "unlabeled",
+                        "model": model,
+                        "peak_context_tokens": peak_context_tokens,
+                        "message_usage": usage_records,
+                        "tool_result_sizes": tool_result_sizes,
+                    }
+                }
+            )
+        except Exception:  # noqa: BLE001 -- metadata attachment must never break a review
+            logger.debug("Failed to attach context-usage metadata to LangSmith run", exc_info=True)
 
     return SessionResult(
         result_text=result_text,

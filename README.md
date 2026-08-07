@@ -214,6 +214,32 @@ The full configuration surface (storage URLs, prompt overrides, tracing,
 etc.) is documented where each feature is introduced below, and summarized
 in [`docs/STORAGE.md`](docs/STORAGE.md) for storage-specific variables.
 
+## Tracing reviewer sessions (optional)
+
+Every reviewer subagent session is wrapped in a LangSmith `@traceable`
+span. Tracing is off by default and turns on automatically the moment
+`LANGSMITH_API_KEY` is set — no flag, no code change. `LANGCHAIN_TRACING_V2=true`
+also activates it (the module docstring in `argus/runners.py` documents the
+same behavior) — useful if you're already in a LangChain-heavy environment
+where that variable is set ambiently:
+
+```bash
+export LANGSMITH_API_KEY=...
+export LANGSMITH_PROJECT=argus   # optional; defaults to LangSmith's own default project
+```
+
+Leaving `LANGSMITH_API_KEY` unset is the normal, fully-supported case —
+Argus runs identically either way, just without traces. There's nothing
+else to configure: no separate on/off switch, and nothing in Argus itself
+fails or degrades based on whether tracing is enabled.
+
+If you're proxying `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` through your own
+credential-vending layer (see [Managing secrets](#managing-secrets)),
+LangSmith isn't part of that Anthropic/OpenAI proxying by default — set
+`LANGSMITH_API_KEY` (and, if you're also proxying the LangSmith endpoint
+itself, `LANGSMITH_ENDPOINT`) the same way you'd set any other env var
+for this process.
+
 ## Connecting a database
 
 Argus needs somewhere to keep **round history** (so re-reviewing a PR knows
