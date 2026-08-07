@@ -321,14 +321,15 @@ def _append_context_ledger(record: dict[str, Any]) -> None:
     """Best-effort append of one context-usage record to the local ledger.
 
     Sizes/counts only (ts, label, msg_index, token counts) -- never prompt
-    or response content. IOError must never break a review: a full /tmp, a
-    permissions issue, or a concurrent-write race is a diagnostics-only
-    degradation, not a review failure.
+    or response content. Neither IOError nor a serialization failure may
+    break a review: a full /tmp, a permissions issue, a concurrent-write
+    race, or a future schema change introducing a non-JSON-serializable
+    field are all diagnostics-only degradations, not review failures.
     """
     try:
         with open(_context_ledger_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
-    except OSError:
+    except (OSError, TypeError):
         logger.debug("Failed to append to context-usage ledger", exc_info=True)
 
 
