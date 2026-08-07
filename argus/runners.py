@@ -383,21 +383,23 @@ async def _run_session_isolated(**kwargs: Any) -> SessionResult:
     needed) and returns None when tracing is off, which serializes to no
     headers and is a no-op for the child.
 
-    Empirically verified (2026-08-07, langsmith==0.10.16, this repo's pinned
-    langgraph) that this contextvar IS populated here even though this
-    function -- and the LangGraph node that calls it -- are plain async
+    Empirically verified (2026-08-07) against both this repo's pinned
+    versions (langsmith==0.9.8, langgraph==1.2.8, per uv.lock) and a newer
+    langsmith==0.10.16 that this contextvar IS populated here even though
+    this function -- and the LangGraph node that calls it -- are plain async
     functions, not @traceable-decorated: a minimal repro (a bare async node
     added to a compiled StateGraph, invoked with LANGCHAIN_TRACING_V2=true,
     calling get_current_run_tree() directly inside the node body) returned a
-    real RunTree, not None. LangGraph's own LangSmith integration sets this
-    contextvar per-node automatically; a node/helper does not need its own
-    @traceable wrapper to observe it. This directly contradicts an earlier,
-    plausible-sounding claim (raised and then dismissed with this evidence
-    in Argus's review of this PR) that LangGraph only propagates via
-    RunnableConfig/callback handlers and never touches LangSmith's own
-    contextvar -- re-verify if this package's langsmith/langgraph pins ever
-    change materially, since this behavior is an integration detail of
-    those two packages, not something this codebase controls.
+    real RunTree, not None, on both pins. LangGraph's own LangSmith
+    integration sets this contextvar per-node automatically; a node/helper
+    does not need its own @traceable wrapper to observe it. This directly
+    contradicts an earlier, plausible-sounding claim (raised and then
+    dismissed with this evidence in Argus's review of this PR) that
+    LangGraph only propagates via RunnableConfig/callback handlers and never
+    touches LangSmith's own contextvar -- re-verify if this package's
+    langsmith/langgraph pins ever change materially, since this behavior is
+    an integration detail of those two packages, not something this
+    codebase controls.
     """
     parent_run = get_current_run_tree()
     langsmith_parent_headers = parent_run.to_headers() if parent_run is not None else None
@@ -1101,6 +1103,15 @@ def _run_session_in_subprocess(
         logger.warning(
             "Validator subprocess [%s] timed out after %ds; killed process group", label, timeout_s
         )
+        # SIGKILL bypasses atexit entirely, so _validator_worker's own ledger
+        # cleanup never runs on this path -- unlink here in the parent using
+        # the killed child's pid instead. Same ARGUS_CONTEXT_LEDGER_PATH
+        # opt-out as _validator_worker: an operator-pinned path is left alone.
+        if "ARGUS_CONTEXT_LEDGER_PATH" not in os.environ and p.pid is not None:
+            try:
+                os.unlink(f"/tmp/argus-context-ledger-{p.pid}.jsonl")  # nosec B108
+            except OSError:
+                pass
         return _empty_session_result(
             model, duration_seconds=float(timeout_s), started_at=start, failure_reason="timeout"
         )
@@ -1204,8 +1215,8 @@ def _validator_worker(
         # contextvars with the parent. langsmith_extra["parent"] accepts a
         # headers mapping directly (RunTree.from_headers under the hood); a
         # None value is a no-op, same as omitting langsmith_extra entirely.
-        langsmith_extra: LangSmithExtra = (
-            {"parent": langsmith_parent_headers} if langsmith_parent_headers else {}
+        langsmith_extra: LangSmithExtra | None = (
+            {"parent": langsmith_parent_headers} if langsmith_parent_headers else None
         )
         session = await _run_claude_session(
             model=model,

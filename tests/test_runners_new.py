@@ -9,9 +9,12 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import signal
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -474,6 +477,50 @@ class TestRunSessionInSubprocess:
         mock_process.kill.assert_called_once()
         assert result.failure_reason == "timeout"
 
+    def test_timeout_cleans_up_ledger_file_bypassing_atexit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """SIGKILL bypasses atexit entirely, so _validator_worker's own
+        ledger cleanup (registered via atexit.register) never runs when the
+        subprocess is killed after a timeout. The parent must unlink the
+        ledger itself using the killed child's pid, or the file leaks into
+        /tmp forever."""
+        monkeypatch.delenv("ARGUS_CONTEXT_LEDGER_PATH", raising=False)
+        mock_process = MagicMock()
+        mock_process.is_alive.return_value = True
+        mock_process.pid = 424242
+
+        mock_ctx = MagicMock()
+        mock_ctx.Pipe.return_value = (MagicMock(), MagicMock())
+        mock_ctx.Process.return_value = mock_process
+
+        ledger_path = f"/tmp/argus-context-ledger-{mock_process.pid}.jsonl"  # nosec B108
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+
+        try:
+            with (
+                patch("multiprocessing.get_context", return_value=mock_ctx),
+                patch("argus.runners.os.getpgid", return_value=mock_process.pid),
+                patch("argus.runners.os.killpg"),
+            ):
+                from argus.runners import _run_session_in_subprocess
+
+                _run_session_in_subprocess(
+                    model="claude-sonnet-4-6",
+                    system_prompt="test",
+                    user_message="test",
+                    anthropic_api_key="test-key",
+                    context7_key=None,
+                    cwd="/tmp/repo",
+                    label="test",
+                )
+
+            assert not os.path.exists(ledger_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(ledger_path)
+
     def test_custom_timeout_s_overrides_default(self) -> None:
         """A caller-supplied ``timeout_s`` (from settings.ARGUS_SESSION_TIMEOUT)
         is passed to ``Process.join`` instead of the module default, and the
@@ -620,13 +667,67 @@ class TestValidatorWorker:
         assert sent_value.failure_reason == "worker_crashed"
         mock_pipe.close.assert_called_once()
 
+    def test_registers_ledger_cleanup_when_path_not_pinned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The atexit.register(_cleanup_ledger_file) branch in
+        _validator_worker is unreachable under the suite's session-wide
+        ARGUS_CONTEXT_LEDGER_PATH=os.devnull autouse fixture (see
+        conftest.py's _redirect_context_ledger_to_devnull), since that
+        fixture makes the "not pinned" guard always false. Explicitly
+        delete the env var for this one test so the real branch runs, and
+        verify both that atexit.register fires and that the registered
+        callback actually unlinks the ledger file (success path) without
+        raising when the file is already gone (FileNotFoundError path)."""
+        monkeypatch.delenv("ARGUS_CONTEXT_LEDGER_PATH", raising=False)
+        mock_pipe = MagicMock()
+        registered: list[Any] = []
+
+        with (
+            patch(
+                f"{_RUNNERS_MODULE}._run_claude_session",
+                new_callable=AsyncMock,
+                return_value=_make_session_result("ok", 0.01),
+            ),
+            patch(f"{_RUNNERS_MODULE}.get_settings", return_value=MagicMock()),
+            patch("atexit.register", side_effect=lambda fn: registered.append(fn)),
+        ):
+            from argus.runners import _context_ledger_path, _validator_worker
+
+            _validator_worker(
+                result_pipe=mock_pipe,
+                model="claude-sonnet-4-6",
+                system_prompt="test",
+                user_message="test",
+                anthropic_api_key="test-key",
+                anthropic_auth_token=None,
+                context7_key=None,
+                context7_library_id=None,
+                context7_base_url=None,
+                cwd="/tmp/repo",
+                label="test",
+            )
+            ledger_path = _context_ledger_path()
+
+        assert len(registered) == 1
+        cleanup_fn = registered[0]
+
+        # Success path: file exists, gets unlinked.
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        cleanup_fn()
+        assert not os.path.exists(ledger_path)
+
+        # FileNotFoundError path: already gone, must not raise.
+        cleanup_fn()
+
     def test_forwards_langsmith_parent_headers_as_langsmith_extra(self) -> None:
-        """End-to-end coverage for the full propagation chain (flagged by
-        Argus's review of this PR): a non-None langsmith_parent_headers must
-        reach _run_claude_session as langsmith_extra={"parent": headers}. A
-        positional-argument mismatch in the mp.Process args tuple (e.g. after
-        a future hand-merge with other runners.py plumbing) would otherwise
-        silently re-orphan traces with no CI signal."""
+        """A non-None langsmith_parent_headers passed to _validator_worker
+        must reach _run_claude_session as langsmith_extra={"parent": headers}.
+        This exercises _validator_worker's own parameter handling only --
+        see test_process_args_tuple_matches_validator_worker_signature below
+        for the separate mp.Process args-tuple ordering, which this test does
+        not cover."""
         mock_pipe = MagicMock()
         expected_headers = {"langsmith-trace": "test-parent-id"}
 
@@ -659,9 +760,10 @@ class TestValidatorWorker:
 
     def test_omits_langsmith_extra_when_no_parent_headers(self) -> None:
         """When langsmith_parent_headers is None (tracing off, or no ambient
-        run tree), langsmith_extra must be an empty dict, not {"parent": None}
-        -- a non-empty dict with a None parent would be treated by @traceable
-        as an explicit (invalid) parent rather than "no parent"."""
+        run tree), langsmith_extra must be None, not {} -- @traceable treats
+        an explicitly-passed {} differently from an omitted/None kwarg for
+        its own auto-parent-detection fallback, so the two are not
+        interchangeable."""
         mock_pipe = MagicMock()
 
         with (
@@ -689,7 +791,70 @@ class TestValidatorWorker:
                 langsmith_parent_headers=None,
             )
 
-        assert mock_run_claude.call_args.kwargs["langsmith_extra"] == {}
+        assert mock_run_claude.call_args.kwargs["langsmith_extra"] is None
+
+    def test_process_args_tuple_matches_validator_worker_signature(self) -> None:
+        """_run_session_in_subprocess builds the mp.Process args tuple
+        positionally; _validator_worker's parameters are keyword-friendly
+        but the tuple itself has no names to catch a reordering. Assert the
+        tuple's shape directly against _validator_worker's actual signature
+        so a future hand-edit to either site that drifts the positional
+        order fails loudly here instead of silently misdirecting arguments
+        (e.g. sending is_system_reviewer_role where cwd is expected)."""
+        import inspect
+
+        from argus.runners import _validator_worker
+
+        mock_process = MagicMock()
+        mock_process.is_alive.return_value = False
+
+        mock_recv = MagicMock()
+        mock_recv.poll.return_value = True
+        mock_recv.recv.return_value = _make_session_result("ok", 0.01)
+
+        mock_ctx = MagicMock()
+        mock_ctx.Pipe.return_value = (mock_recv, MagicMock())
+        mock_ctx.Process.return_value = mock_process
+
+        with patch("multiprocessing.get_context", return_value=mock_ctx):
+            from argus.runners import _run_session_in_subprocess
+
+            _run_session_in_subprocess(
+                model="claude-sonnet-4-6",
+                system_prompt="sys",
+                user_message="msg",
+                anthropic_api_key="test-key",
+                context7_key="ctx7-key",
+                context7_library_id="lib-id",
+                context7_base_url="https://example.com",
+                cwd="/tmp/repo",
+                label="test-label",
+                is_system_reviewer_role=True,
+                langsmith_parent_headers={"langsmith-trace": "abc"},
+            )
+
+        call_kwargs = mock_ctx.Process.call_args.kwargs
+        assert call_kwargs["target"] is _validator_worker
+        args_tuple = call_kwargs["args"]
+
+        # args[0] is the pipe end, not a _validator_worker parameter -- the
+        # remaining positions must line up 1:1 with _validator_worker's
+        # parameters (excluding result_pipe) in declared order.
+        worker_params = list(inspect.signature(_validator_worker).parameters)[1:]
+        assert len(args_tuple) - 1 == len(worker_params)
+
+        by_name = dict(zip(worker_params, args_tuple[1:]))
+        assert by_name["model"] == "claude-sonnet-4-6"
+        assert by_name["system_prompt"] == "sys"
+        assert by_name["user_message"] == "msg"
+        assert by_name["anthropic_api_key"] == "test-key"
+        assert by_name["context7_key"] == "ctx7-key"
+        assert by_name["context7_library_id"] == "lib-id"
+        assert by_name["context7_base_url"] == "https://example.com"
+        assert by_name["cwd"] == "/tmp/repo"
+        assert by_name["label"] == "test-label"
+        assert by_name["is_system_reviewer_role"] is True
+        assert by_name["langsmith_parent_headers"] == {"langsmith-trace": "abc"}
 
 
 # ---------------------------------------------------------------------------
