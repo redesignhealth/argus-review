@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_OPUS
+from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_OPUS
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -77,6 +77,14 @@ _SYSTEM_REVIEWER_MODEL = CLAUDE_DEFAULT
 # Opus, not frontier (Fable): evals showed no measurable quality gain from
 # frontier on this stage, at ~2x the per-token cost.
 _CROSS_CUTTING_MODEL = CLAUDE_OPUS
+# Whether the system reviewer's current model (following any
+# --specialist-model/ARGUS_SPECIALIST_MODEL override) still matches the one
+# pin the 1M-context beta (see _run_claude_session) was empirically verified
+# against. Computed once here from the two constants above, not re-derived
+# per-call from `model` string equality -- see _run_claude_session's
+# is_system_reviewer_role docstring for why a string-equality gate can't be
+# made sound once overrides exist.
+_SYSTEM_REVIEWER_UNOVERRIDDEN = _SYSTEM_REVIEWER_MODEL == ALIAS_MAP["claude-default"]
 _MAX_TURNS = 30
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned
 # worktree has been provisioned (e.g. local dev runs, tests, subprocess
@@ -419,6 +427,7 @@ async def run_system_reviewer(
 
     session = await _run_session_isolated(
         model=_SYSTEM_REVIEWER_MODEL,
+        is_system_reviewer_role=True,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -507,6 +516,7 @@ async def run_specialist_reviewer(
 
     session = await _run_session_isolated(
         model=_SYSTEM_REVIEWER_MODEL,
+        is_system_reviewer_role=True,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -642,6 +652,7 @@ async def run_tests_and_docs_reviewer(
 
     session = await _run_session_isolated(
         model=_SYSTEM_REVIEWER_MODEL,
+        is_system_reviewer_role=True,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -712,6 +723,7 @@ async def run_feedback_verifier(
     # (resolved/unresolved/regressed) - volume-oriented like system reviewers.
     session = await _run_session_isolated(
         model=_SYSTEM_REVIEWER_MODEL,
+        is_system_reviewer_role=True,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -841,6 +853,7 @@ async def run_blocking_validator(
 
     session = await _run_session_isolated(
         model=_SYSTEM_REVIEWER_MODEL,
+        is_system_reviewer_role=True,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -902,12 +915,17 @@ def _run_session_in_subprocess(
     cwd: str,
     label: str,
     timeout_s: int = _SUBPROCESS_TIMEOUT_S,
+    is_system_reviewer_role: bool = False,
 ) -> SessionResult:
     """Run a Claude Agent SDK session in a spawned process (clean event loop).
 
     ``timeout_s`` defaults to the module constant for callers (mostly tests)
     that don't have a Settings instance; production runners pass
     ``settings.ARGUS_SESSION_TIMEOUT`` explicitly.
+
+    ``is_system_reviewer_role``: forwarded to ``_run_claude_session`` --
+    see that function's docstring for why this must be an explicit,
+    caller-declared role flag rather than inferred from ``model``.
     """
     import multiprocessing as mp
 
@@ -928,6 +946,7 @@ def _run_session_in_subprocess(
             context7_base_url,
             cwd,
             label,
+            is_system_reviewer_role,
         ),
     )
     start = datetime.now(timezone.utc)
@@ -967,6 +986,7 @@ def _validator_worker(
     context7_base_url: str | None,
     cwd: str,
     label: str,
+    is_system_reviewer_role: bool = False,
 ) -> None:
     """Worker process: runs _run_claude_session with a fresh event loop."""
     import asyncio as _asyncio
@@ -1017,6 +1037,7 @@ def _validator_worker(
             settings=get_settings(),
             label=label,
             repo_root=cwd,
+            is_system_reviewer_role=is_system_reviewer_role,
         )
         return session
 
@@ -1123,6 +1144,7 @@ async def _run_claude_session(
     settings: Any,
     label: str = "",
     repo_root: str | None = None,
+    is_system_reviewer_role: bool = False,
 ) -> SessionResult:
     """Run a single ClaudeSDKClient session. Returns a SessionResult with timing and tool metadata.
 
@@ -1134,6 +1156,21 @@ async def _run_claude_session(
             both in tests and in production: graph.py invokes the pipeline
             with worktree_path=None for review requests that carry neither a
             SHA nor a PR number, and that None flows through to every reviewer.
+        is_system_reviewer_role: Whether this call is one of the system-
+            reviewer-role sessions (system reviewer, specialist reviewer,
+            coverage/dismissal-matching validators -- see call sites passing
+            ``model=_SYSTEM_REVIEWER_MODEL``), as opposed to the
+            cross-cutting/opus session. Declared explicitly by the caller
+            rather than inferred by comparing ``model`` against
+            ``_SYSTEM_REVIEWER_MODEL`` inside this function: once
+            ARGUS_SPECIALIST_MODEL/ARGUS_FRONTIER_MODEL can repoint either
+            role's model, two DIFFERENT roles' resolved model strings can
+            collide (e.g. --frontier-model set to the same value as the
+            unoverridden system-reviewer pin), and a string-equality check
+            can no longer tell them apart -- exactly the two round-3 Argus
+            findings this parameter exists to fix. Only the caller genuinely
+            knows its own role; only the caller can pass a decision that a
+            model-value collision cannot fool.
     """
     # Reviewer callers already resolve repo_root, so this is normally a no-op;
     # routing through the same helper keeps the fallback + warning consistent
@@ -1223,8 +1260,45 @@ async def _run_claude_session(
     # Cost note: tokens beyond 200k bill at the long-context premium; that's
     # acceptable against the status quo of thrashing sessions that cost
     # $1.5-2.2 each and produce zero findings.
+    #
+    # Gate is role-based (the caller-declared `is_system_reviewer_role`
+    # parameter), NOT a `model == _SYSTEM_REVIEWER_MODEL`/
+    # `model == _CROSS_CUTTING_MODEL` string comparison. Two earlier
+    # string-equality attempts both broke once ARGUS_SPECIALIST_MODEL/
+    # ARGUS_FRONTIER_MODEL (argus/llm/models.py) could repoint either
+    # role's model at runtime:
+    #   - `model == _SYSTEM_REVIEWER_MODEL` alone (the original condition)
+    #     would attach this beta to WHATEVER model ARGUS_SPECIALIST_MODEL
+    #     currently points at, extending an unverified-for-that-model
+    #     billing/compatibility risk far past the one pin this was
+    #     validated against.
+    #   - `model == ALIAS_MAP["claude-default"]` alone (a later, over-
+    #     corrected fix) decoupled the gate entirely from the override: the
+    #     system reviewer silently LOST this beta under any
+    #     --specialist-model override (reinstating the TECH-4734
+    #     autocompact-thrashing problem this beta exists to fix), and worse,
+    #     `model == _SYSTEM_REVIEWER_MODEL and model == ALIAS_MAP["claude-default"]`
+    #     (the very next fix attempt) could STILL mis-fire for cross-cutting:
+    #     if --frontier-model happened to be set to the same value as the
+    #     unoverridden system-reviewer pin, `_CROSS_CUTTING_MODEL` collided
+    #     with `_SYSTEM_REVIEWER_MODEL` and the cross-cutting call received
+    #     the beta anyway, despite the opus-specific risk called out two
+    #     paragraphs up. Every one of these was a variant of inferring
+    #     "which role is this call" from data (a model string) that
+    #     overrides can make ambiguous. Only the caller genuinely knows its
+    #     own role; passing that decision down explicitly is the only fix
+    #     that can't be defeated by a future override collision.
+    _attach_1m_context_beta = is_system_reviewer_role and _SYSTEM_REVIEWER_UNOVERRIDDEN
+    if is_system_reviewer_role and not _attach_1m_context_beta:
+        logger.info(
+            "1M-context beta withheld: system reviewer model %r diverges from the "
+            "validated pin %r (ARGUS_SPECIALIST_MODEL override active) -- "
+            "autocompact may thrash on long reviews under this override.",
+            model,
+            ALIAS_MAP["claude-default"],
+        )
     betas: list[Literal["context-1m-2025-08-07"]] = (
-        ["context-1m-2025-08-07"] if model == _SYSTEM_REVIEWER_MODEL else []
+        ["context-1m-2025-08-07"] if _attach_1m_context_beta else []
     )
     options = ClaudeAgentOptions(
         cwd=effective_root,

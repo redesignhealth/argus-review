@@ -42,7 +42,7 @@ from argus.helpers import (
     apply_precheck_scanner_failure_gate,
     build_degraded_coverage_labels,
 )
-from argus.llm.models import CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
+from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
 
 from langchain.chat_models import init_chat_model
@@ -813,17 +813,65 @@ def _build_coverage_messages(
 # ---------------------------------------------------------------------------
 
 
-_TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = frozenset(
-    {
-        # Derived from the registry constants (not hardcoded literals) so this
-        # set tracks ALIAS_MAP automatically if claude-frontier/claude-default
-        # are ever re-pinned. Confirmed live: both currently reject an
-        # explicit `temperature` with invalid_request_error "temperature is
-        # deprecated for this model". claude-haiku-4-5 (CLAUDE_MINI) accepts
-        # it fine, so is deliberately not included here.
-        CLAUDE_FRONTIER,
-        CLAUDE_DEFAULT,
-    }
+_TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
+    frozenset(
+        {
+            # Union of ALIAS_MAP's fixed pins AND the (possibly overridden)
+            # CLAUDE_FRONTIER/CLAUDE_DEFAULT constants -- deliberately NOT the
+            # fixed pins alone. An earlier version of this set used only the
+            # fixed pins, on the theory that the empirical verification below
+            # was never run against an arbitrary override value. That created
+            # a real regression: `run_preflight_check` calls
+            # `_get_llm(f"anthropic:{CLAUDE_DEFAULT}", temperature=0)`, so
+            # setting ARGUS_SPECIALIST_MODEL=claude-sonnet-5 (the *previous*
+            # default, and a highly plausible rollback choice -- it's also
+            # used as an override value in this suite's own tests) resolved
+            # CLAUDE_DEFAULT to a model no longer in a fixed-pins-only set,
+            # forwarding `temperature=0` to a model verified to hard-reject
+            # it. The union keeps both invariants: the two fixed pins always
+            # strip temperature regardless of what CLAUDE_DEFAULT/
+            # CLAUDE_FRONTIER currently resolve to (the `ALIAS_MAP[...]`
+            # terms below), AND the currently active override resolution is
+            # covered too if it happens to land on one of THOSE SAME two
+            # fixed pins under a different alias (the `CLAUDE_FRONTIER`/
+            # `CLAUDE_DEFAULT` terms below duplicate the `ALIAS_MAP[...]`
+            # terms whenever no override is active, and diverge from them
+            # only when one is). This does NOT protect an override to a
+            # model outside both sets, e.g. claude-opus-5 -- an arbitrary,
+            # never-tested override can still 400 on temperature; that's an
+            # inherent limit of a hardcoded verified-model list, not
+            # something this union claims to solve.
+            #
+            # Confirmed live against claude-sonnet-5 and claude-fable-5 (both
+            # reject an explicit `temperature` with invalid_request_error
+            # "temperature is deprecated for this model"). claude-sonnet-4-6
+            # (the claude-default pin as of this comment) has NOT yet been
+            # independently re-verified against a live call -- kept in this
+            # set on the assumption Anthropic's temperature deprecation
+            # applies across the Sonnet line, not per-checkpoint; re-verify
+            # empirically and correct this comment if that assumption turns
+            # out wrong. claude-haiku-4-5 (CLAUDE_MINI) accepts it fine, so
+            # is deliberately not included here -- see the explicit
+            # exclusion below for why "not included" alone isn't enough.
+            ALIAS_MAP["claude-frontier"],
+            ALIAS_MAP["claude-default"],
+            CLAUDE_FRONTIER,
+            CLAUDE_DEFAULT,
+        }
+    )
+    # Explicit exclusion, not just an absent literal: without this, an
+    # override that happens to land CLAUDE_DEFAULT/CLAUDE_FRONTIER on
+    # CLAUDE_MINI's own resolved value (e.g. `--specialist-model
+    # claude-haiku-4-5`, used directly by this suite's own tests) would pull
+    # that value into the union above via the CLAUDE_DEFAULT/CLAUDE_FRONTIER
+    # terms, and then _match_dismissals's `_get_llm(f"anthropic:{CLAUDE_MINI}",
+    # temperature=0)` call would have ITS temperature silently stripped too
+    # -- a real, silent determinism regression in a call site that has
+    # nothing to do with the override, caught in Argus round 3 review of
+    # this PR. `- {CLAUDE_MINI}` guarantees CLAUDE_MINI's resolved value can
+    # never end up in this set regardless of what any other alias happens to
+    # resolve to.
+    - {CLAUDE_MINI}
 )
 
 

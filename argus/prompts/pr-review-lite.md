@@ -21,7 +21,7 @@ Review only the changed code for these issues:
 - Blocking I/O calls in async functions (e.g. `requests` instead of `httpx`)
 
 ### Model Registry
-- Hardcoded LLM model strings (e.g. `"claude-sonnet-5"`, `"gpt-5.4-mini"`) — must use constants from `argus.llm.models` (`CLAUDE_DEFAULT`, `CLAUDE_FRONTIER`, `CLAUDE_OPUS`, `CLAUDE_MINI`, `GPT_MINI`)
+- Hardcoded LLM model strings (e.g. `"claude-sonnet-5"`, `"gpt-5.4-mini"`) — must use constants from `argus.llm.models` (`CLAUDE_DEFAULT`, `CLAUDE_FRONTIER`, `CLAUDE_OPUS`, `CLAUDE_MINI`, `GPT_MINI`). This targets model-SELECTION code (a call site choosing which model to use); it does not apply to `claude-sonnet-5` appearing as a `--specialist-model`/`ARGUS_SPECIALIST_MODEL` CLI/env override value, or in docs/tests demonstrating that override — `claude-sonnet-5` (the previous `CLAUDE_DEFAULT` pin) remains a valid override value even though it's no longer the hardcoded default.
 
 ## Out of Scope
 Do NOT flag: security deep-dives, performance analysis, test coverage gaps, architectural concerns, code style preferences, or cross-file integration issues. Those require a full Argus review.

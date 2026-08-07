@@ -67,7 +67,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
     from argus.config import Settings
@@ -210,6 +210,41 @@ async def run(request: "ReviewRequest") -> "ReviewResponse":
     return await run_review(request, flow_run_id=None)
 
 
+# Sentinel distinguishing "--specialist-model/--frontier-model not passed at
+# all" from "explicitly passed as an empty string" (to clear an
+# already-set ARGUS_SPECIALIST_MODEL/ARGUS_FRONTIER_MODEL in the parent
+# shell). A plain ``default=os.environ.get(...)`` can't tell these apart:
+# both an omitted flag and an explicit ``--specialist-model ""`` would
+# resolve to the same falsy value, so ``if args.specialist_model:`` in
+# ``_run_review`` silently treated the explicit-clear case as a no-op.
+_MODEL_OVERRIDE_UNSET: Final = object()
+
+
+def _apply_model_override_flag(env_var: str, value: object) -> None:
+    """Apply a --specialist-model/--frontier-model CLI value to its env var.
+
+    ``value`` is ``_MODEL_OVERRIDE_UNSET`` when the flag wasn't passed at
+    all -- leave the ambient env var (if any) untouched, since
+    ``argus.llm.models`` will read it directly regardless of whether this
+    function re-sets it. An explicit empty string clears an already-set env
+    var (see ``_MODEL_OVERRIDE_UNSET``'s comment for why this needs its own
+    sentinel rather than a plain falsy check). Any other explicit value sets
+    the env var.
+    """
+    if value is _MODEL_OVERRIDE_UNSET:
+        return
+    if value == "":
+        os.environ.pop(env_var, None)
+        return
+    if not isinstance(value, str):
+        # Not just a defensive check: `assert` is stripped under -O/
+        # PYTHONOPTIMIZE, which would silently degrade this into a bare
+        # TypeError from os.environ.__setitem__ instead of naming which
+        # override flag/env var got a non-string value.
+        raise TypeError(f"{env_var} override must be a string, got {value!r}")
+    os.environ[env_var] = value
+
+
 def _add_review_args(parser: argparse.ArgumentParser) -> None:
     repo_group = parser.add_mutually_exclusive_group()
     repo_group.add_argument(
@@ -287,6 +322,34 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
             "./.argus/prompts/, ~/.config/argus/prompts/) and force the "
             "packaged prompts only. For CI/official runs that must not pick "
             "up a developer's local override by accident."
+        ),
+    )
+    parser.add_argument(
+        "--specialist-model",
+        dest="specialist_model",
+        default=_MODEL_OVERRIDE_UNSET,
+        help=(
+            "Override the model used by the system reviewer, specialist "
+            "reviewers, the writer, and the lite-review path (default: "
+            "claude-sonnet-4-6, or ARGUS_SPECIALIST_MODEL if already set in "
+            "the environment). Same effect as setting ARGUS_SPECIALIST_MODEL. "
+            "Pass an empty string to clear an already-set "
+            "ARGUS_SPECIALIST_MODEL for this run."
+        ),
+    )
+    parser.add_argument(
+        "--frontier-model",
+        dest="frontier_model",
+        default=_MODEL_OVERRIDE_UNSET,
+        help=(
+            "Override the model used by the planner, coverage check, and "
+            "cross-cutting reviewer (defaults: claude-fable-5 for the first "
+            "two, claude-opus-5 for cross-cutting -- note this one flag "
+            "collapses both onto the SAME model when set, moving "
+            "cross-cutting off its cheaper default; or ARGUS_FRONTIER_MODEL "
+            "if already set in the environment). Same effect as setting "
+            "ARGUS_FRONTIER_MODEL. Pass an empty string to clear an "
+            "already-set ARGUS_FRONTIER_MODEL for this run."
         ),
     )
 
@@ -499,6 +562,8 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 
     if args.no_prompt_overrides:
         os.environ["ARGUS_NO_PROMPT_OVERRIDES"] = "1"
+    _apply_model_override_flag("ARGUS_SPECIALIST_MODEL", args.specialist_model)
+    _apply_model_override_flag("ARGUS_FRONTIER_MODEL", args.frontier_model)
 
     _check_prerequisites()
 
