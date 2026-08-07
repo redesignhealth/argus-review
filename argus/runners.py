@@ -260,12 +260,18 @@ def _context_ledger_path() -> str:
     """Return the per-process local context-usage ledger path (TECH-4734 phase 2).
 
     Sibling of the ``/tmp/argus-checkpoint-<pid>.db`` LangGraph checkpoint
-    (see graph.py) -- a fallback for diagnosing context thrashing when
-    LangSmith tracing is off (no LANGSMITH_API_KEY / LANGCHAIN_TRACING_V2).
+    (see graph.py). Written unconditionally on every message, regardless of
+    whether LangSmith tracing is on or off -- NOT gated on tracing state,
+    despite the "fallback for when tracing is off" framing an earlier
+    version of this comment used. It's useful either way: even with tracing
+    on, this is a plain local file a developer can `tail`/`grep` without a
+    LangSmith UI round-trip, and it costs nothing extra to keep writing it.
     Each reviewer session runs in its own spawned subprocess (see
     _run_session_in_subprocess), so os.getpid() here is that subprocess's
     pid, not the parent graph process's -- one ledger file per session.
-    Overridable for tests, same pattern as ARGUS_SQLITE_CHECKPOINT_PATH.
+    Overridable for tests, same pattern as ARGUS_SQLITE_CHECKPOINT_PATH; see
+    _validator_worker's atexit cleanup for when the default per-pid path is
+    removed.
     """
     return os.environ.get(
         "ARGUS_CONTEXT_LEDGER_PATH",
@@ -376,9 +382,30 @@ async def _run_session_isolated(**kwargs: Any) -> SessionResult:
     reads the ambient contextvar directly (no LangGraph/LangChain call
     needed) and returns None when tracing is off, which serializes to no
     headers and is a no-op for the child.
+
+    Empirically verified (2026-08-07, langsmith==0.10.16, this repo's pinned
+    langgraph) that this contextvar IS populated here even though this
+    function -- and the LangGraph node that calls it -- are plain async
+    functions, not @traceable-decorated: a minimal repro (a bare async node
+    added to a compiled StateGraph, invoked with LANGCHAIN_TRACING_V2=true,
+    calling get_current_run_tree() directly inside the node body) returned a
+    real RunTree, not None. LangGraph's own LangSmith integration sets this
+    contextvar per-node automatically; a node/helper does not need its own
+    @traceable wrapper to observe it. This directly contradicts an earlier,
+    plausible-sounding claim (raised and then dismissed with this evidence
+    in Argus's review of this PR) that LangGraph only propagates via
+    RunnableConfig/callback handlers and never touches LangSmith's own
+    contextvar -- re-verify if this package's langsmith/langgraph pins ever
+    change materially, since this behavior is an integration detail of
+    those two packages, not something this codebase controls.
     """
     parent_run = get_current_run_tree()
     langsmith_parent_headers = parent_run.to_headers() if parent_run is not None else None
+    logger.debug(
+        "LangSmith trace propagation: parent_run_id=%s has_headers=%s",
+        parent_run.id if parent_run is not None else None,
+        bool(langsmith_parent_headers),
+    )
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _get_reviewer_executor(),
@@ -1104,6 +1131,7 @@ def _validator_worker(
 ) -> None:
     """Worker process: runs _run_claude_session with a fresh event loop."""
     import asyncio as _asyncio
+    import atexit
     import contextlib
     import os
 
@@ -1111,6 +1139,32 @@ def _validator_worker(
     # AND its grandchildren (the spawned claude CLI) as one group on timeout.
     with contextlib.suppress(OSError, AttributeError):
         os.setsid()
+
+    # Clean up this subprocess's context-usage ledger on exit -- mirrors
+    # graph.py's _cleanup_sqlite_files() gating (skip cleanup when the path
+    # is operator-pinned via the env var, same convention as
+    # ARGUS_SQLITE_CHECKPOINT_PATH): an operator who explicitly set
+    # ARGUS_CONTEXT_LEDGER_PATH presumably wants the file to persist for
+    # inspection, so only the default per-pid /tmp path is auto-removed.
+    # Registered here (not in _run_claude_session) since _context_ledger_path()
+    # resolves os.getpid() at call time, and this worker's pid is stable for
+    # its whole lifetime -- computing the path once, at registration, avoids
+    # any risk of the cleanup unlinking a different path than what was
+    # actually written to if something in between changed os.environ.
+    if "ARGUS_CONTEXT_LEDGER_PATH" not in os.environ:
+        _ledger_path_to_clean = _context_ledger_path()
+
+        def _cleanup_ledger_file() -> None:
+            try:
+                os.unlink(_ledger_path_to_clean)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning(
+                    "Could not unlink context-usage ledger %s: %s", _ledger_path_to_clean, exc
+                )
+
+        atexit.register(_cleanup_ledger_file)
 
     # Set whichever credential the caller actually configured -- forcing
     # everything to ANTHROPIC_API_KEY would send a gateway/proxy bearer
@@ -1269,10 +1323,21 @@ async def _run_claude_session(
     label: str = "",
     repo_root: str | None = None,
     is_system_reviewer_role: bool = False,
+    langsmith_extra: LangSmithExtra | None = None,
 ) -> SessionResult:
     """Run a single ClaudeSDKClient session. Returns a SessionResult with timing and tool metadata.
 
     Args:
+        langsmith_extra: NOT read by this function's body -- ``@traceable``'s
+            own wrapper intercepts this reserved kwarg name before the call
+            reaches here (the LangSmith SDK contract; see ``_validator_worker``,
+            which builds ``{"parent": langsmith_parent_headers}`` and passes it
+            here to reparent this span under the caller's trace). Declared
+            explicitly, rather than left implicit, so a future refactor of
+            this function's signature (e.g. to ``**kwargs``) or removal of
+            ``@traceable`` fails loudly at the call site instead of a
+            subprocess silently swallowing a ``TypeError`` as
+            ``worker_crashed`` and re-orphaning traces with no signal.
         repo_root: Working directory for the agent's Read/Glob/Grep calls.
             Should be the path to a SHA-pinned worktree provisioned by
             ``repo_provision.provisioned_worktree``. Falls back to the
@@ -1519,7 +1584,16 @@ async def _run_claude_session(
                     "peak": peak_context_tokens,
                 }
                 usage_records.append(usage_record)
-                _append_context_ledger(usage_record)
+                # asyncio.to_thread, not a bare call: this loop is a plain
+                # `async for`, and a synchronous open()+write() here would
+                # block the event loop for however long the write takes. No
+                # observed starvation today (this subprocess's event loop
+                # runs only this one coroutine), but the platform rule is
+                # "no sync I/O in async code" regardless of whether today's
+                # call graph happens to make it harmless, since that safety
+                # margin silently disappears the moment anything else (a
+                # heartbeat, a timeout watchdog) shares this loop.
+                await asyncio.to_thread(_append_context_ledger, usage_record)
             elif isinstance(message, UserMessage):
                 content = message.content
                 if isinstance(content, list):
@@ -1616,7 +1690,7 @@ async def _run_claude_session(
                     }
                 }
             )
-        except Exception:  # noqa: BLE001 — metadata attachment must never break a review
+        except Exception:  # noqa: BLE001 -- metadata attachment must never break a review
             logger.debug("Failed to attach context-usage metadata to LangSmith run", exc_info=True)
 
     return SessionResult(

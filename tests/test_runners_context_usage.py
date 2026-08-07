@@ -368,7 +368,27 @@ class TestLangSmithEnrichmentIsDefensive:
                 model_usage=None,
             ),
         ]
-        with patch(f"{_RUNNERS_MODULE}.open", side_effect=OSError("disk full"), create=True):
+        # Fails open() only for the ledger path specifically, not module-wide:
+        # _append_context_ledger's OSError guard lives INSIDE that function's
+        # own body, so replacing the whole function (as an earlier version of
+        # this test did) bypasses that guard entirely and lets the OSError
+        # propagate uncaught -- exactly the "must not raise" behavior this
+        # test exists to verify. A real ledger path is threaded through so
+        # this shim only intercepts that one call, unlike a bare
+        # `patch(f"{_RUNNERS_MODULE}.open", side_effect=OSError(...))`, which
+        # would also silently mask any unrelated open() call added to
+        # runners.py in the future without this test noticing.
+        from argus.runners import _context_ledger_path
+
+        real_open = open
+        ledger_path = _context_ledger_path()
+
+        def _open_that_fails_for_ledger(file: Any, *args: Any, **kwargs: Any) -> Any:
+            if file == ledger_path:
+                raise OSError("disk full")
+            return real_open(file, *args, **kwargs)
+
+        with patch(f"{_RUNNERS_MODULE}.open", side_effect=_open_that_fails_for_ledger, create=True):
             result = _run_session(messages)
         assert result.result_text == ""
 

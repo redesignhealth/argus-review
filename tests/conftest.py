@@ -53,6 +53,32 @@ def _disable_live_langsmith_tracing() -> Iterator[None]:
                 os.environ[name] = value
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _redirect_context_ledger_to_devnull() -> Iterator[None]:
+    """Redirect the TECH-4734 phase 2 context-usage ledger to /dev/null for
+    the whole test session.
+
+    ``_append_context_ledger`` (argus/runners.py) is called unconditionally
+    from every message in a real ``_run_claude_session`` message loop, not
+    gated on tracing state (see that function's docstring) -- any test that
+    drives such a loop would otherwise write real lines to
+    ``/tmp/argus-context-ledger-<pytest-pid>.jsonl`` and leave them there
+    permanently, the same class of test-pollution
+    ``_disable_live_langsmith_tracing`` above exists to prevent for tracing.
+    ``/dev/null`` accepts writes and discards them, so this is a true no-op
+    rather than a redirected-but-still-accumulating tmp file.
+    """
+    saved = os.environ.get("ARGUS_CONTEXT_LEDGER_PATH")
+    os.environ["ARGUS_CONTEXT_LEDGER_PATH"] = os.devnull
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("ARGUS_CONTEXT_LEDGER_PATH", None)
+        else:
+            os.environ["ARGUS_CONTEXT_LEDGER_PATH"] = saved
+
+
 def _mock_settings_impl(node: pytest.Item, monkeypatch: pytest.MonkeyPatch) -> None:
     """The actual logic behind the ``_mock_settings`` fixture below.
 

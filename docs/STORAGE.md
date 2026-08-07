@@ -177,6 +177,12 @@ a SQLite file for LangGraph checkpoints (a per-run temp file by default, or
 `ARGUS_SQLITE_CHECKPOINT_PATH` if you want it pinned to survive across
 runs — for example, to inspect a failed pipeline's mid-run state).
 
+Each reviewer subprocess also writes a per-session context-usage ledger
+(sizes/counts only, never prompt/response content) to a per-pid temp file,
+auto-removed on subprocess exit — override the path with
+`ARGUS_CONTEXT_LEDGER_PATH` if you want it to persist (the file is written
+unconditionally, regardless of whether LangSmith tracing is also enabled).
+
 This is the zero-configuration path: `argus review owner/repo --pr 123`
 with only `ANTHROPIC_API_KEY`, `GITHUB_TOKEN_RO`, and `OPENAI_API_KEY` set
 works end to end, including round-2 verification of round-1 findings,

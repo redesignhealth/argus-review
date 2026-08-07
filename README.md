@@ -218,7 +218,10 @@ in [`docs/STORAGE.md`](docs/STORAGE.md) for storage-specific variables.
 
 Every reviewer subagent session is wrapped in a LangSmith `@traceable`
 span. Tracing is off by default and turns on automatically the moment
-`LANGSMITH_API_KEY` is set — no flag, no code change:
+`LANGSMITH_API_KEY` is set — no flag, no code change. `LANGCHAIN_TRACING_V2=true`
+also activates it (the module docstring in `argus/runners.py` documents the
+same behavior) — useful if you're already in a LangChain-heavy environment
+where that variable is set ambiently:
 
 ```bash
 export LANGSMITH_API_KEY=...

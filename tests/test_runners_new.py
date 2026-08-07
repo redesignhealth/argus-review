@@ -620,6 +620,77 @@ class TestValidatorWorker:
         assert sent_value.failure_reason == "worker_crashed"
         mock_pipe.close.assert_called_once()
 
+    def test_forwards_langsmith_parent_headers_as_langsmith_extra(self) -> None:
+        """End-to-end coverage for the full propagation chain (flagged by
+        Argus's review of this PR): a non-None langsmith_parent_headers must
+        reach _run_claude_session as langsmith_extra={"parent": headers}. A
+        positional-argument mismatch in the mp.Process args tuple (e.g. after
+        a future hand-merge with other runners.py plumbing) would otherwise
+        silently re-orphan traces with no CI signal."""
+        mock_pipe = MagicMock()
+        expected_headers = {"langsmith-trace": "test-parent-id"}
+
+        with (
+            patch(
+                f"{_RUNNERS_MODULE}._run_claude_session",
+                new_callable=AsyncMock,
+                return_value=_make_session_result("ok", 0.01),
+            ) as mock_run_claude,
+            patch(f"{_RUNNERS_MODULE}.get_settings", return_value=MagicMock()),
+        ):
+            from argus.runners import _validator_worker
+
+            _validator_worker(
+                result_pipe=mock_pipe,
+                model="claude-sonnet-4-6",
+                system_prompt="test",
+                user_message="test",
+                anthropic_api_key="test-key",
+                anthropic_auth_token=None,
+                context7_key=None,
+                context7_library_id=None,
+                context7_base_url=None,
+                cwd="/tmp/repo",
+                label="test",
+                langsmith_parent_headers=expected_headers,
+            )
+
+        assert mock_run_claude.call_args.kwargs["langsmith_extra"] == {"parent": expected_headers}
+
+    def test_omits_langsmith_extra_when_no_parent_headers(self) -> None:
+        """When langsmith_parent_headers is None (tracing off, or no ambient
+        run tree), langsmith_extra must be an empty dict, not {"parent": None}
+        -- a non-empty dict with a None parent would be treated by @traceable
+        as an explicit (invalid) parent rather than "no parent"."""
+        mock_pipe = MagicMock()
+
+        with (
+            patch(
+                f"{_RUNNERS_MODULE}._run_claude_session",
+                new_callable=AsyncMock,
+                return_value=_make_session_result("ok", 0.01),
+            ) as mock_run_claude,
+            patch(f"{_RUNNERS_MODULE}.get_settings", return_value=MagicMock()),
+        ):
+            from argus.runners import _validator_worker
+
+            _validator_worker(
+                result_pipe=mock_pipe,
+                model="claude-sonnet-4-6",
+                system_prompt="test",
+                user_message="test",
+                anthropic_api_key="test-key",
+                anthropic_auth_token=None,
+                context7_key=None,
+                context7_library_id=None,
+                context7_base_url=None,
+                cwd="/tmp/repo",
+                label="test",
+                langsmith_parent_headers=None,
+            )
+
+        assert mock_run_claude.call_args.kwargs["langsmith_extra"] == {}
+
 
 # ---------------------------------------------------------------------------
 # _run_session_isolated: dedicated executor routing
@@ -702,6 +773,40 @@ class TestRunSessionIsolated:
             # tracing is off in tests (no ambient run tree to capture).
             langsmith_parent_headers=None,
         )
+
+    @pytest.mark.asyncio
+    async def test_captures_and_forwards_parent_run_headers_when_tracing_active(self) -> None:
+        """The non-None get_current_run_tree() path -- the actual core of the
+        TECH-4734 phase 2 fix -- had zero test coverage before this test
+        (flagged by Argus's review of this PR): every other test here only
+        exercises langsmith_parent_headers=None (tracing off). Without this,
+        a regression that silently drops the captured headers before they
+        reach _run_session_in_subprocess would go undetected by CI."""
+        expected_headers = {"langsmith-trace": "test-parent-id"}
+        mock_run_tree = MagicMock()
+        mock_run_tree.to_headers.return_value = expected_headers
+
+        with (
+            patch(f"{_RUNNERS_MODULE}.get_current_run_tree", return_value=mock_run_tree),
+            patch(
+                f"{_RUNNERS_MODULE}._run_session_in_subprocess",
+                return_value=_make_session_result("isolated result", 0.07),
+            ) as mock_subprocess,
+        ):
+            from argus.runners import _run_session_isolated
+
+            await _run_session_isolated(
+                model="claude-sonnet-4-6",
+                system_prompt="test",
+                user_message="hello",
+                anthropic_api_key="test-key",
+                context7_key=None,
+                cwd="/tmp/repo",
+                label="test-isolated",
+            )
+
+        mock_run_tree.to_headers.assert_called_once()
+        assert mock_subprocess.call_args.kwargs["langsmith_parent_headers"] == expected_headers
 
 
 # ---------------------------------------------------------------------------
