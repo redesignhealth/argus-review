@@ -484,17 +484,21 @@ class TestRunSessionInSubprocess:
         ledger cleanup (registered via atexit.register) never runs when the
         subprocess is killed after a timeout. The parent must unlink the
         ledger itself using the killed child's pid, or the file leaks into
-        /tmp forever."""
+        /tmp forever. Uses _context_ledger_path(pid) (the same helper the
+        production code calls) rather than duplicating the path template,
+        so this test can't silently drift from the real path scheme."""
         monkeypatch.delenv("ARGUS_CONTEXT_LEDGER_PATH", raising=False)
+        from argus.runners import _context_ledger_path
+
         mock_process = MagicMock()
         mock_process.is_alive.return_value = True
-        mock_process.pid = 424242
+        mock_process.pid = os.getpid() * 100_000 + 1  # unique per test run
 
         mock_ctx = MagicMock()
         mock_ctx.Pipe.return_value = (MagicMock(), MagicMock())
         mock_ctx.Process.return_value = mock_process
 
-        ledger_path = f"/tmp/argus-context-ledger-{mock_process.pid}.jsonl"  # nosec B108
+        ledger_path = _context_ledger_path(mock_process.pid)
         with open(ledger_path, "w", encoding="utf-8") as f:
             f.write("{}\n")
 
@@ -516,6 +520,94 @@ class TestRunSessionInSubprocess:
                     label="test",
                 )
 
+            assert not os.path.exists(ledger_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(ledger_path)
+
+    def test_timeout_ledger_cleanup_skipped_when_path_pinned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator-pinned ARGUS_CONTEXT_LEDGER_PATH must not be unlinked
+        by the timeout-cleanup path -- it's presumably kept around
+        intentionally for inspection, same convention as the worker's own
+        atexit guard."""
+        pinned_path = "/tmp/argus-pinned-ledger-for-test.jsonl"  # nosec B108
+        monkeypatch.setenv("ARGUS_CONTEXT_LEDGER_PATH", pinned_path)
+        with open(pinned_path, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+
+        mock_process = MagicMock()
+        mock_process.is_alive.return_value = True
+        mock_process.pid = 555555
+
+        mock_ctx = MagicMock()
+        mock_ctx.Pipe.return_value = (MagicMock(), MagicMock())
+        mock_ctx.Process.return_value = mock_process
+
+        try:
+            with (
+                patch("multiprocessing.get_context", return_value=mock_ctx),
+                patch("argus.runners.os.getpgid", return_value=mock_process.pid),
+                patch("argus.runners.os.killpg"),
+            ):
+                from argus.runners import _run_session_in_subprocess
+
+                _run_session_in_subprocess(
+                    model="claude-sonnet-4-6",
+                    system_prompt="test",
+                    user_message="test",
+                    anthropic_api_key="test-key",
+                    context7_key=None,
+                    cwd="/tmp/repo",
+                    label="test",
+                )
+
+            assert os.path.exists(pinned_path)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(pinned_path)
+
+    def test_worker_crashed_also_cleans_up_ledger_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The worker_crashed branch (process exited with no pipe result --
+        OOM kill, SIGSEGV, external SIGKILL) has the exact same atexit-bypass
+        gap as the timeout branch, so it must clean up the ledger too."""
+        monkeypatch.delenv("ARGUS_CONTEXT_LEDGER_PATH", raising=False)
+        from argus.runners import _context_ledger_path
+
+        mock_process = MagicMock()
+        mock_process.is_alive.return_value = False
+        mock_process.exitcode = -9
+        mock_process.pid = os.getpid() * 100_000 + 2  # unique per test run
+
+        mock_recv = MagicMock()
+        mock_recv.poll.return_value = False
+
+        mock_ctx = MagicMock()
+        mock_ctx.Pipe.return_value = (mock_recv, MagicMock())
+        mock_ctx.Process.return_value = mock_process
+
+        ledger_path = _context_ledger_path(mock_process.pid)
+        with open(ledger_path, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+
+        try:
+            with patch("multiprocessing.get_context", return_value=mock_ctx):
+                from argus.runners import _run_session_in_subprocess
+
+                result = _run_session_in_subprocess(
+                    model="claude-sonnet-4-6",
+                    system_prompt="test",
+                    user_message="test",
+                    anthropic_api_key="test-key",
+                    context7_key=None,
+                    cwd="/tmp/repo",
+                    label="test",
+                )
+
+            assert result.failure_reason == "worker_crashed"
             assert not os.path.exists(ledger_path)
         finally:
             with contextlib.suppress(FileNotFoundError):
@@ -760,10 +852,11 @@ class TestValidatorWorker:
 
     def test_omits_langsmith_extra_when_no_parent_headers(self) -> None:
         """When langsmith_parent_headers is None (tracing off, or no ambient
-        run tree), langsmith_extra must be None, not {} -- @traceable treats
-        an explicitly-passed {} differently from an omitted/None kwarg for
-        its own auto-parent-detection fallback, so the two are not
-        interchangeable."""
+        run tree), langsmith_extra must be None, not {}. The installed SDK
+        actually normalizes both identically (`langsmith_extra = langsmith_extra
+        or LangSmithExtra()` in run_helpers.py), so this isn't a behavioral
+        fix -- None is used purely for consistency with _run_claude_session's
+        declared `LangSmithExtra | None = None` default."""
         mock_pipe = MagicMock()
 
         with (

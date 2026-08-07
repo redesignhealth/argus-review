@@ -256,7 +256,7 @@ def _tool_result_size(content: str | list[dict[str, Any]] | None) -> int:
     return total
 
 
-def _context_ledger_path() -> str:
+def _context_ledger_path(pid: int | None = None) -> str:
     """Return the per-process local context-usage ledger path (TECH-4734 phase 2).
 
     Sibling of the ``/tmp/argus-checkpoint-<pid>.db`` LangGraph checkpoint
@@ -272,11 +272,39 @@ def _context_ledger_path() -> str:
     Overridable for tests, same pattern as ARGUS_SQLITE_CHECKPOINT_PATH; see
     _validator_worker's atexit cleanup for when the default per-pid path is
     removed.
+
+    ``pid``: defaults to the caller's own pid (os.getpid()), which is the
+    only correct choice when this runs inside the ledger-writing subprocess
+    itself. The parent process (_run_session_in_subprocess) instead passes
+    the *child's* pid explicitly, since it needs this same template to clean
+    up a killed child's ledger without inheriting the child's pid as its own.
     """
     return os.environ.get(
         "ARGUS_CONTEXT_LEDGER_PATH",
-        f"/tmp/argus-context-ledger-{os.getpid()}.jsonl",  # nosec B108
+        f"/tmp/argus-context-ledger-{pid if pid is not None else os.getpid()}.jsonl",  # nosec B108
     )
+
+
+def _try_unlink_ledger(pid: int) -> None:
+    """Best-effort removal of another process's context-usage ledger.
+
+    Used by the parent (_run_session_in_subprocess) to clean up a killed
+    child's ledger on paths where the child's own atexit-registered
+    _cleanup_ledger_file never ran (SIGKILL, crash) -- mirrors that
+    function's FileNotFoundError/other-OSError split so both cleanup sites
+    log consistently. A no-op (silently) when ARGUS_CONTEXT_LEDGER_PATH
+    pins an operator-chosen path, since that path is presumably meant to
+    persist for inspection.
+    """
+    if "ARGUS_CONTEXT_LEDGER_PATH" in os.environ:
+        return
+    ledger_path = _context_ledger_path(pid)
+    try:
+        os.unlink(ledger_path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.warning("Could not unlink context-usage ledger %s: %s", ledger_path, exc)
 
 
 def _append_context_ledger(record: dict[str, Any]) -> None:
@@ -1105,13 +1133,9 @@ def _run_session_in_subprocess(
         )
         # SIGKILL bypasses atexit entirely, so _validator_worker's own ledger
         # cleanup never runs on this path -- unlink here in the parent using
-        # the killed child's pid instead. Same ARGUS_CONTEXT_LEDGER_PATH
-        # opt-out as _validator_worker: an operator-pinned path is left alone.
-        if "ARGUS_CONTEXT_LEDGER_PATH" not in os.environ and p.pid is not None:
-            try:
-                os.unlink(f"/tmp/argus-context-ledger-{p.pid}.jsonl")  # nosec B108
-            except OSError:
-                pass
+        # the killed child's pid instead.
+        if p.pid is not None:
+            _try_unlink_ledger(p.pid)
         return _empty_session_result(
             model, duration_seconds=float(timeout_s), started_at=start, failure_reason="timeout"
         )
@@ -1122,6 +1146,11 @@ def _run_session_in_subprocess(
     logger.warning(
         "Validator subprocess [%s] exited with code %d, no result", label, p.exitcode or -1
     )
+    # Same atexit-bypass gap as the timeout branch above: a crashed worker
+    # (OOM kill, SIGSEGV, external SIGKILL) never runs its own atexit
+    # cleanup either, so the ledger leaks unless cleaned up here too.
+    if p.pid is not None:
+        _try_unlink_ledger(p.pid)
     return _empty_session_result(model, failure_reason="worker_crashed")
 
 
