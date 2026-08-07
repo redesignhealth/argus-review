@@ -34,7 +34,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from argus.graph import _get_llm
+from argus.graph import _TEMPERATURE_UNSUPPORTED_MODELS, _get_llm
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 
 
@@ -109,6 +109,45 @@ def _temperature_unsupported_models_under_override(overridden_default: str) -> f
             overridden_default,
         }
     ) - {CLAUDE_MINI}
+
+
+def test_helper_matches_real_formula_when_unoverridden() -> None:
+    """The hand-copied helper above is only trustworthy if it's actually
+    asserted equal to the real argus.graph._TEMPERATURE_UNSUPPORTED_MODELS
+    at least once -- otherwise a future edit to the real formula could
+    silently diverge from every regression test using the helper while they
+    all stay green. Uses CLAUDE_DEFAULT (the live, unoverridden value) as
+    the "overridden_default" argument, since in the no-override case
+    CLAUDE_DEFAULT *is* what the real formula's own CLAUDE_DEFAULT term
+    resolves to."""
+    assert _temperature_unsupported_models_under_override(CLAUDE_DEFAULT) == (
+        _TEMPERATURE_UNSUPPORTED_MODELS
+    )
+
+
+def test_temperature_guard_still_applies_for_a_never_seen_override_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely novel model id (not a fixed ALIAS_MAP pin, not CLAUDE_MINI)
+    must still land in the guard set via the CLAUDE_DEFAULT term -- this is
+    the exact scenario the (now-corrected) misleading comment on
+    _TEMPERATURE_UNSUPPORTED_MODELS used to claim was NOT covered."""
+    overridden_set = _temperature_unsupported_models_under_override("claude-sonnet-9-9")
+    assert "claude-sonnet-9-9" in overridden_set
+
+    with (
+        monkeypatch.context() as m,
+        patch("argus.graph.get_settings", return_value=_patched_settings()),
+        patch("argus.graph.init_chat_model") as mock_init_chat_model,
+    ):
+        m.setattr("argus.graph._TEMPERATURE_UNSUPPORTED_MODELS", overridden_set)
+        from argus.graph import _get_llm as _get_llm_live
+
+        _get_llm_live("anthropic:claude-sonnet-9-9", temperature=0)
+
+    mock_init_chat_model.assert_called_once()
+    _, kwargs = mock_init_chat_model.call_args
+    assert "temperature" not in kwargs
 
 
 def test_temperature_guard_still_applies_when_specialist_model_overridden(

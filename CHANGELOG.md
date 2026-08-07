@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--specialist-model`/`ARGUS_SPECIALIST_MODEL` and `--frontier-model`/`ARGUS_FRONTIER_MODEL`
+  CLI flags/env vars to override the reviewer models per run.
+  `--specialist-model` overrides the system reviewer, specialist reviewers,
+  writer, and lite-review path; `--frontier-model` overrides both the
+  planner/coverage tier and the cross-cutting reviewer together. Pass an
+  empty string to clear an already-set override for one run.
+
+### Changed
+
+- The default `claude-default` model pin (`CLAUDE_DEFAULT`) moved from
+  `claude-sonnet-5` to `claude-sonnet-4-6`.
+
 ## [0.1.4] - 2026-08-06
 
 ### Added

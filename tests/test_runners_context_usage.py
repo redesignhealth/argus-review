@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -444,3 +445,66 @@ class TestContext1mBetaAndStrictMcpConfig:
         )
         assert options.betas == []
         assert options.strict_mcp_config is True
+
+
+class TestOneTimeImportLogs:
+    """The 1M-context-beta-withheld and cross-cutting-tier-shift signals are
+    logged once at module import time (see argus/runners.py, right after
+    _SYSTEM_REVIEWER_UNOVERRIDDEN is computed), not per-session -- an
+    earlier per-call version of the beta-withheld log was flagged as both
+    too quiet (debug) and too loud (info x 5 call sites x N rounds) across
+    successive Argus reviews of this PR. Reloading argus.runners here is
+    the correct tool for exactly this case, unlike the per-call gating
+    logic tested above: the behavior under test IS the module-import-time
+    side effect, not a re-derivable-without-reload runtime decision.
+    """
+
+    def test_warns_once_when_specialist_model_overridden(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import importlib
+
+        import argus.llm.models as models_module
+        import argus.runners as runners_module
+
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-haiku-4-5")
+        try:
+            importlib.reload(models_module)
+            with caplog.at_level("WARNING", logger=_RUNNERS_MODULE):
+                importlib.reload(runners_module)
+            assert any("1M-context beta withheld" in record.message for record in caplog.records)
+        finally:
+            monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+            importlib.reload(models_module)
+            importlib.reload(runners_module)
+
+    def test_does_not_warn_when_unoverridden(self, caplog: pytest.LogCaptureFixture) -> None:
+        import importlib
+
+        import argus.runners as runners_module
+
+        with caplog.at_level("WARNING", logger=_RUNNERS_MODULE):
+            importlib.reload(runners_module)
+        assert not any("1M-context beta withheld" in record.message for record in caplog.records)
+
+    def test_warns_once_when_frontier_model_moves_cross_cutting_off_default(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import importlib
+
+        import argus.llm.models as models_module
+        import argus.runners as runners_module
+
+        monkeypatch.setenv("ARGUS_FRONTIER_MODEL", "claude-fable-5")
+        try:
+            importlib.reload(models_module)
+            with caplog.at_level("WARNING", logger=_RUNNERS_MODULE):
+                importlib.reload(runners_module)
+            assert any(
+                "Cross-cutting reviewer moved off its default model" in record.message
+                for record in caplog.records
+            )
+        finally:
+            monkeypatch.delenv("ARGUS_FRONTIER_MODEL", raising=False)
+            importlib.reload(models_module)
+            importlib.reload(runners_module)

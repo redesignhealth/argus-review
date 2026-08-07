@@ -78,13 +78,66 @@ _SYSTEM_REVIEWER_MODEL = CLAUDE_DEFAULT
 # frontier on this stage, at ~2x the per-token cost.
 _CROSS_CUTTING_MODEL = CLAUDE_OPUS
 # Whether the system reviewer's current model (following any
-# --specialist-model/ARGUS_SPECIALIST_MODEL override) still matches the one
-# pin the 1M-context beta (see _run_claude_session) was empirically verified
-# against. Computed once here from the two constants above, not re-derived
-# per-call from `model` string equality -- see _run_claude_session's
-# is_system_reviewer_role docstring for why a string-equality gate can't be
-# made sound once overrides exist.
+# --specialist-model/ARGUS_SPECIALIST_MODEL override) still matches
+# ALIAS_MAP["claude-default"] -- the fixed pin the 1M-context beta (see
+# _run_claude_session) was empirically verified against. Computed once here
+# from the two constants above, not re-derived per-call from `model` string
+# equality -- see _run_claude_session's is_system_reviewer_role docstring
+# for why a string-equality gate can't be made sound once overrides exist.
+#
+# Caveat shared with argus/graph.py's _TEMPERATURE_UNSUPPORTED_MODELS
+# comment: the empirical verification below was run against whatever
+# ALIAS_MAP["claude-default"] resolved to on 2026-07-31 (claude-sonnet-5 at
+# the time), NOT specifically against claude-sonnet-4-6 (the pin as of this
+# comment, after this same diff's default bump). Gating on the alias means
+# the beta keeps applying across future pin bumps automatically, without a
+# fresh re-verification each time -- the alternative (pinning this gate to
+# the literal claude-sonnet-5 string instead) would have silently withheld
+# the beta from the system reviewer's new default entirely, reinstating the
+# TECH-4734 autocompact-thrashing problem for the common no-override case.
+# Tracking the alias was the deliberate tradeoff; re-verify the beta
+# empirically against the current pin whenever ALIAS_MAP["claude-default"]
+# moves, and correct this comment if a future pin ever fails the probe
+# described below.
 _SYSTEM_REVIEWER_UNOVERRIDDEN = _SYSTEM_REVIEWER_MODEL == ALIAS_MAP["claude-default"]
+
+# Logged once at import time, not per-session (an earlier per-call version
+# of this log was flagged twice in opposite directions: too quiet at debug,
+# too loud at info-per-call across 5 reviewer-role call sites x N rounds).
+# The withheld case is the one with a real cost/quality consequence
+# (TECH-4734 autocompact thrashing), so it's WARNING; the enabled case is
+# DEBUG since it's simply confirming the common, unoverridden default.
+if not _SYSTEM_REVIEWER_UNOVERRIDDEN:
+    logger.warning(
+        "1M-context beta withheld for this process: system reviewer model %r "
+        "diverges from the validated pin %r (ARGUS_SPECIALIST_MODEL override "
+        "active) -- autocompact may thrash on long reviews under this override.",
+        _SYSTEM_REVIEWER_MODEL,
+        ALIAS_MAP["claude-default"],
+    )
+else:
+    logger.debug(
+        "1M-context beta enabled for the system reviewer role (model=%r, unoverridden).",
+        _SYSTEM_REVIEWER_MODEL,
+    )
+
+# Same one-time-at-import treatment for the other silent-cost-shift this
+# override mechanism can cause: --frontier-model/ARGUS_FRONTIER_MODEL
+# repoints both CLAUDE_FRONTIER and CLAUDE_OPUS (see argus/llm/models.py),
+# so a frontier override picked for planning/coverage purposes also moves
+# the cross-cutting reviewer off its cheaper Opus default with no other
+# runtime signal that happened.
+if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
+    logger.warning(
+        "Cross-cutting reviewer moved off its default model %r onto %r due to "
+        "ARGUS_FRONTIER_MODEL -- this env var/--frontier-model repoints both "
+        "the frontier tier and the cross-cutting model together, so a "
+        "frontier override for planning purposes also moves cross-cutting "
+        "off its cheaper Opus default.",
+        ALIAS_MAP["claude-opus"],
+        _CROSS_CUTTING_MODEL,
+    )
+
 _MAX_TURNS = 30
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned
 # worktree has been provisioned (e.g. local dev runs, tests, subprocess
@@ -1289,14 +1342,13 @@ async def _run_claude_session(
     #     own role; passing that decision down explicitly is the only fix
     #     that can't be defeated by a future override collision.
     _attach_1m_context_beta = is_system_reviewer_role and _SYSTEM_REVIEWER_UNOVERRIDDEN
-    if is_system_reviewer_role and not _attach_1m_context_beta:
-        logger.info(
-            "1M-context beta withheld: system reviewer model %r diverges from the "
-            "validated pin %r (ARGUS_SPECIALIST_MODEL override active) -- "
-            "autocompact may thrash on long reviews under this override.",
-            model,
-            ALIAS_MAP["claude-default"],
-        )
+    # Logged once at module import time (see _SYSTEM_REVIEWER_UNOVERRIDDEN's
+    # definition above), not per-call here: this decision is fixed for the
+    # whole process, so a per-session log would just repeat the same fact
+    # once per reviewer session (5 call sites x N rounds) for zero
+    # additional signal -- high-volume noise an earlier version of this
+    # comment/log pair was flagged for twice, in opposite directions (too
+    # quiet at debug, too loud at info-per-call).
     betas: list[Literal["context-1m-2025-08-07"]] = (
         ["context-1m-2025-08-07"] if _attach_1m_context_beta else []
     )

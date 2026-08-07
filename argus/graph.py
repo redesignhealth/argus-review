@@ -831,16 +831,26 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
             # it. The union keeps both invariants: the two fixed pins always
             # strip temperature regardless of what CLAUDE_DEFAULT/
             # CLAUDE_FRONTIER currently resolve to (the `ALIAS_MAP[...]`
-            # terms below), AND the currently active override resolution is
-            # covered too if it happens to land on one of THOSE SAME two
-            # fixed pins under a different alias (the `CLAUDE_FRONTIER`/
-            # `CLAUDE_DEFAULT` terms below duplicate the `ALIAS_MAP[...]`
-            # terms whenever no override is active, and diverge from them
-            # only when one is). This does NOT protect an override to a
-            # model outside both sets, e.g. claude-opus-5 -- an arbitrary,
-            # never-tested override can still 400 on temperature; that's an
-            # inherent limit of a hardcoded verified-model list, not
-            # something this union claims to solve.
+            # terms below), AND the CLAUDE_FRONTIER/CLAUDE_DEFAULT terms
+            # unconditionally cover whatever the ACTIVE override currently
+            # resolves to, since those two constants ARE that resolution
+            # (they duplicate the `ALIAS_MAP[...]` terms whenever no
+            # override is active, and diverge from them only when one is).
+            # The practical consequence is the OPPOSITE of "an override
+            # outside this set can still 400 on temperature" -- every
+            # CLAUDE_DEFAULT/CLAUDE_FRONTIER override value is always inside
+            # this set by construction (the one exception being the explicit
+            # CLAUDE_MINI exclusion below), so `_get_llm` unconditionally
+            # STRIPS `temperature` for whatever model an override currently
+            # points at. That is the real, undocumented tradeoff: an
+            # override to a model that would actually have accepted
+            # `temperature` fine (unlike the two fixed pins this was
+            # verified against) gets it silently suppressed anyway, trading
+            # a hypothetical 400 for a real, silent loss of determinism on
+            # any never-tested override. Not something this union claims to
+            # solve either way -- there is no way to know an untested
+            # override's real temperature support without calling the
+            # provider.
             #
             # Confirmed live against claude-sonnet-5 and claude-fable-5 (both
             # reject an explicit `temperature` with invalid_request_error
@@ -864,7 +874,7 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
     # CLAUDE_MINI's own resolved value (e.g. `--specialist-model
     # claude-haiku-4-5`, used directly by this suite's own tests) would pull
     # that value into the union above via the CLAUDE_DEFAULT/CLAUDE_FRONTIER
-    # terms, and then _match_dismissals's `_get_llm(f"anthropic:{CLAUDE_MINI}",
+    # terms, and then _apply_dismissals's `_get_llm(f"anthropic:{CLAUDE_MINI}",
     # temperature=0)` call would have ITS temperature silently stripped too
     # -- a real, silent determinism regression in a call site that has
     # nothing to do with the override, caught in Argus round 3 review of

@@ -17,8 +17,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from argus.pipeline_models import (
+    FeedbackVerificationResult,
     FileEntry,
     FindingValidationResult,
+    PriorFinding,
+    PriorReviewContext,
     ReviewPlan,
     SystemGroup,
     SystemReviewResult,
@@ -123,6 +126,10 @@ class TestRunTestsAndDocsReviewer:
         mock_session.assert_called_once()
         call_kwargs = mock_session.call_args.kwargs
         assert call_kwargs["label"] == "tests-and-docs"
+        # is_system_reviewer_role must reach _run_session_in_subprocess unchanged --
+        # a silent drop at this call site would withhold the 1M-context beta from
+        # this reviewer role with no other test catching it.
+        assert call_kwargs["is_system_reviewer_role"] is True
 
     @pytest.mark.asyncio
     async def test_timed_out_session_marks_result_and_agent_run(self) -> None:
@@ -725,7 +732,7 @@ class TestRunBlockingValidator:
                 f"{_RUNNERS_MODULE}._run_session_isolated",
                 new_callable=AsyncMock,
                 return_value=session,
-            ),
+            ) as mock_session_isolated,
         ):
             from argus.runners import run_blocking_validator
 
@@ -737,6 +744,10 @@ class TestRunBlockingValidator:
 
         assert isinstance(result, FindingValidationResult)
         assert len(result.items) == 1
+        # is_system_reviewer_role must reach _run_session_isolated unchanged --
+        # a silent drop at this call site would withhold the 1M-context beta from
+        # this reviewer role with no other test catching it.
+        assert mock_session_isolated.call_args.kwargs["is_system_reviewer_role"] is True
         assert agent_run is not None
         # duration and cost must flow from the SessionResult to AgentRunData.
         assert agent_run.duration_seconds == 17.5
@@ -835,3 +846,147 @@ class TestLargeFileReadDirectiveWiring:
             assert "_LARGE_FILE_READ_DIRECTIVE" in source, (
                 f"{func.__name__} is missing the large-file-read directive"
             )
+
+
+# ---------------------------------------------------------------------------
+# is_system_reviewer_role forwarding across all six reviewer entry points
+# ---------------------------------------------------------------------------
+
+
+class TestIsSystemReviewerRoleForwarding:
+    """Each of the six public run_* reviewer functions must forward (or
+    correctly omit) is_system_reviewer_role to _run_session_isolated exactly
+    once. run_tests_and_docs_reviewer and run_blocking_validator already have
+    this assertion added to their existing happy-path tests above; the
+    remaining four (run_system_reviewer, run_specialist_reviewer,
+    run_feedback_verifier, run_cross_cutting_reviewer) had no direct test
+    coverage at all before this class -- a silent drop at any of these five
+    True call sites would withhold the 1M-context beta from that role with
+    nothing catching it; a silent True at the one False call site
+    (run_cross_cutting_reviewer) would extend an opus-unverified
+    billing/compatibility risk to the cross-cutting session.
+    """
+
+    def _settings(self) -> MagicMock:
+        settings = MagicMock()
+        settings.CONTEXT7_API_KEY = None
+        settings.ARGUS_CONTEXT7_LIBRARY_ID = None
+        settings.ARGUS_CONTEXT7_BASE_URL = None
+        settings.ARGUS_SESSION_TIMEOUT = 600
+        settings.ANTHROPIC_API_KEY = "sk-test"
+        settings.ANTHROPIC_AUTH_TOKEN = None
+        return settings
+
+    @pytest.mark.asyncio
+    async def test_run_system_reviewer_passes_true(self) -> None:
+        group = SystemGroup(name="backend", files=["src/app.py"], conventions="", review_focus="")
+        session = _make_session_result("", cost_usd=0.0)
+
+        with (
+            patch(f"{_RUNNERS_MODULE}.fetch_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch(
+                f"{_RUNNERS_MODULE}._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=session,
+            ) as mock_session,
+        ):
+            from argus.runners import run_system_reviewer
+
+            await run_system_reviewer(
+                group=group,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=self._settings(),
+                repo_root="/tmp/fake-repo",
+            )
+
+        assert mock_session.call_args.kwargs["is_system_reviewer_role"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_specialist_reviewer_passes_true(self) -> None:
+        group = SystemGroup(name="backend", files=["src/app.py"], conventions="", review_focus="")
+        session = _make_session_result("", cost_usd=0.0)
+
+        with (
+            patch(f"{_RUNNERS_MODULE}.fetch_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch(
+                f"{_RUNNERS_MODULE}._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=session,
+            ) as mock_session,
+        ):
+            from argus.runners import run_specialist_reviewer
+
+            await run_specialist_reviewer(
+                specialist="security",
+                group=group,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=self._settings(),
+                repo_root="/tmp/fake-repo",
+            )
+
+        assert mock_session.call_args.kwargs["is_system_reviewer_role"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_feedback_verifier_passes_true(self) -> None:
+        prior_context = PriorReviewContext(
+            review_id="00000000-0000-0000-0000-000000000000",
+            reviewed_sha="a" * 40,
+            findings=[
+                PriorFinding(severity="BLOCKING", description="SQL injection risk"),
+            ],
+        )
+        session = _make_session_result("", cost_usd=0.0)
+
+        with (
+            patch(f"{_RUNNERS_MODULE}.fetch_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch(
+                f"{_RUNNERS_MODULE}._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=session,
+            ) as mock_session,
+        ):
+            from argus.runners import run_feedback_verifier
+
+            result, _ = await run_feedback_verifier(
+                prior_context=prior_context,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=self._settings(),
+                repo_root="/tmp/fake-repo",
+            )
+
+        assert isinstance(result, FeedbackVerificationResult)
+        assert mock_session.call_args.kwargs["is_system_reviewer_role"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_cross_cutting_reviewer_omits_true(self) -> None:
+        """The one call site that must NOT pass is_system_reviewer_role=True:
+        cross-cutting is the opus session this whole role-based gate exists
+        to protect from an unverified-for-opus 1M-context beta."""
+        plan = ReviewPlan(
+            system_groups=[
+                SystemGroup(name="backend", files=["src/app.py"], conventions="", review_focus=""),
+            ],
+            cross_cutting_concerns=["test coverage"],
+            file_manifest=[FileEntry(path="src/app.py", change_type="modified")],
+        )
+        session = _make_session_result("", cost_usd=0.0)
+
+        with (
+            patch(f"{_RUNNERS_MODULE}.fetch_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch(
+                f"{_RUNNERS_MODULE}._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=session,
+            ) as mock_session,
+        ):
+            from argus.runners import run_cross_cutting_reviewer
+
+            await run_cross_cutting_reviewer(
+                plan=plan,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=self._settings(),
+                repo_root="/tmp/fake-repo",
+            )
+
+        call_kwargs = mock_session.call_args.kwargs
+        assert call_kwargs.get("is_system_reviewer_role", False) is False

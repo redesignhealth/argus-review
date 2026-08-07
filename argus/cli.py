@@ -562,8 +562,6 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 
     if args.no_prompt_overrides:
         os.environ["ARGUS_NO_PROMPT_OVERRIDES"] = "1"
-    _apply_model_override_flag("ARGUS_SPECIALIST_MODEL", args.specialist_model)
-    _apply_model_override_flag("ARGUS_FRONTIER_MODEL", args.frontier_model)
 
     _check_prerequisites()
 
@@ -573,6 +571,19 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
         logger.error("Failed to load settings: %s", exc)
         sys.exit(1)
     _check_settings(settings)
+
+    # Applied AFTER _load_settings(), not before: _load_settings() calls
+    # load_dotenv_early(..., override=False), which repopulates any env var
+    # that is CURRENTLY ABSENT from a .env file. An explicit
+    # --specialist-model ""/--frontier-model "" clears the var by popping it
+    # (see _apply_model_override_flag) -- applying that pop before the
+    # dotenv reload would let a .env file defining the same var silently
+    # resurrect it right before argus.llm.models is ever imported, defeating
+    # the documented "clear an already-set override for this run" behavior.
+    # Running these calls last, after every other env-mutating step in this
+    # function, is what makes them the actual final word on these two vars.
+    _apply_model_override_flag("ARGUS_SPECIALIST_MODEL", args.specialist_model)
+    _apply_model_override_flag("ARGUS_FRONTIER_MODEL", args.frontier_model)
 
     from argus.models import ReviewRequest
 

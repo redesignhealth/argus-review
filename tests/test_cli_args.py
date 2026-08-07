@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from typing import Any
 
 import pytest
 
@@ -207,8 +208,11 @@ class TestModelOverrideFlags:
 class TestApplyModelOverrideFlag:
     """``_apply_model_override_flag`` -- the env-var-setting behavior that
     ``_run_review`` applies to a parsed --specialist-model/--frontier-model
-    value before ``argus.llm.models`` is ever imported. Covers the actual
-    runtime behavior added to cli.py, not just argparse-level parsing."""
+    value before ``argus.llm.models`` is ever imported, and AFTER
+    ``_load_settings()``'s dotenv reload (see
+    test_clear_survives_dotenv_reload_when_applied_after_load_settings below
+    for why that ordering specifically matters). Covers the actual runtime
+    behavior added to cli.py, not just argparse-level parsing."""
 
     def test_unset_sentinel_leaves_env_var_untouched(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from argus.cli import _MODEL_OVERRIDE_UNSET, _apply_model_override_flag
@@ -258,6 +262,69 @@ class TestApplyModelOverrideFlag:
 
         with pytest.raises(TypeError, match="ARGUS_SPECIALIST_MODEL"):
             _apply_model_override_flag("ARGUS_SPECIALIST_MODEL", 123)
+
+    def test_clear_survives_dotenv_reload_when_applied_after_load_settings(
+        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression test for a BLOCKING Argus finding: an explicit
+        --specialist-model "" clears the env var by popping it, but
+        _load_settings() calls load_dotenv_early(..., override=False), which
+        repopulates any var CURRENTLY ABSENT from a .env file. Applying the
+        clear before that reload would let a .env file defining the same var
+        silently resurrect it right before argus.llm.models is imported --
+        completely defeating the documented "clear an already-set override"
+        behavior. _run_review fixes this by applying
+        _apply_model_override_flag AFTER _load_settings(), not before; this
+        test exercises that exact ordering directly (dotenv reload, then the
+        clear), rather than asserting on _run_review's source layout.
+        """
+        from argus.cli import _apply_model_override_flag
+        from argus.dotenv_utils import load_dotenv_early
+
+        (tmp_path / ".env").write_text("ARGUS_SPECIALIST_MODEL=claude-sonnet-5\n")
+        # Absent, not pre-set: load_dotenv(override=False) only fills in a var
+        # that is CURRENTLY ABSENT -- it never overwrites one already present,
+        # so starting from "already set" wouldn't exercise the resurrection
+        # path at all. Absent is also the realistic starting state right
+        # after --specialist-model "" has popped it (the scenario this
+        # ordering fix protects).
+        monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+
+        # Simulate _run_review's fixed ordering: the dotenv reload happens
+        # first (as it does inside _load_settings()) -- since the var is
+        # absent, this legitimately populates it from .env, exactly as it
+        # would for any other developer relying on their .env file.
+        load_dotenv_early(start=tmp_path, env_filename=".env")
+        assert os.environ["ARGUS_SPECIALIST_MODEL"] == "claude-sonnet-5"
+        # ...and only then does the explicit clear run, so it's the last
+        # word on this var regardless of what the .env file just set. Under
+        # the old (buggy) ordering -- clear first, from an already-absent
+        # var, then dotenv reload -- this same .env content would have
+        # resurrected the var right back after the "clear".
+        _apply_model_override_flag("ARGUS_SPECIALIST_MODEL", "")
+
+        assert "ARGUS_SPECIALIST_MODEL" not in os.environ
+
+    def test_apply_model_override_flag_calls_come_after_load_settings_in_source(self) -> None:
+        """Cheap source-order tripwire, in addition to the behavioral
+        regression test above: if a future edit moves the
+        _apply_model_override_flag calls back before _load_settings() in
+        _run_review, this fails immediately rather than waiting for someone
+        to notice a resurrected override in the wild."""
+        import inspect
+
+        from argus.cli import _run_review
+
+        source = inspect.getsource(_run_review)
+        load_settings_pos = source.index("_load_settings()")
+        first_override_call_pos = source.index(
+            '_apply_model_override_flag("ARGUS_SPECIALIST_MODEL"'
+        )
+        assert load_settings_pos < first_override_call_pos, (
+            "_apply_model_override_flag calls must come after _load_settings() "
+            "in _run_review, or a .env file can resurrect a cleared override "
+            "(see test_clear_survives_dotenv_reload_when_applied_after_load_settings)"
+        )
 
 
 class TestPromptsSubcommand:
