@@ -87,6 +87,25 @@ class Settings(BaseSettings):
             have been BLOCKING anyway -- it only ever makes the verdict
             stricter, never looser.
         ARGUS_REPO_CACHE: Mirror-clone cache directory.
+        ARGUS_SPECIALIST_MODEL: Override the model used by the system
+            reviewer, specialist reviewers, the writer, and the lite-review
+            path (``argus.llm.models.CLAUDE_DEFAULT``, default
+            ``claude-sonnet-4-6``). Set via ``--specialist-model``; read
+            directly from ``os.environ`` by ``argus.llm.models`` at import
+            time (module-level constant resolution, not a per-request
+            Settings lookup), so this field is never actually read off a
+            ``Settings`` instance anywhere in the codebase -- unlike
+            ``ARGUS_NO_PROMPT_OVERRIDES`` above, which genuinely is
+            (``prompts_runtime.override_dirs`` reads
+            ``settings.ARGUS_NO_PROMPT_OVERRIDES``). It's declared here
+            purely for documentation/discoverability, same as any other
+            env var this class's docstring covers.
+        ARGUS_FRONTIER_MODEL: Override the model used by the planner,
+            coverage check, and cross-cutting reviewer
+            (``argus.llm.models.CLAUDE_FRONTIER`` / ``CLAUDE_OPUS``). Set via
+            ``--frontier-model``; same read pattern (and same
+            documentation-only Settings field) as ``ARGUS_SPECIALIST_MODEL``
+            above.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
         ARGUS_CONTEXT7_BASE_URL: Override for Context7's MCP endpoint
@@ -128,6 +147,8 @@ class Settings(BaseSettings):
     ARGUS_STOCK_SEMGREP_PACKS: str | None = None
     ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE: bool = False
     ARGUS_REPO_CACHE: str | None = None
+    ARGUS_SPECIALIST_MODEL: str | None = None
+    ARGUS_FRONTIER_MODEL: str | None = None
 
     LANGSMITH_API_KEY: str | None = None
     LANGSMITH_PROJECT: str | None = None

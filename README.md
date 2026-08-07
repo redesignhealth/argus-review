@@ -151,6 +151,25 @@ argus review owner/repo --pr 123 --post --commit-status
 # Dismiss a finding before the next round
 argus review owner/repo --pr 123 --dismiss "B2 -- pre-existing, not from this PR"
 
+# Override the reviewer models (or set ARGUS_SPECIALIST_MODEL/ARGUS_FRONTIER_MODEL instead).
+# --frontier-model controls both the planner/coverage tier AND the cross-cutting
+# reviewer -- claude-fable-5 here is already the planner/coverage default, but
+# it also moves cross-cutting OFF its cheaper claude-opus-5 default onto fable-5.
+# Cost note: --specialist-model here also moves the highest-volume path (system
+# reviewer, specialists, writer, lite-review) onto the pricier Opus tier -- both
+# flags in this example trade cost for reasoning headroom, don't use them together
+# as a low-cost default. Any non-empty --specialist-model value also withholds
+# the 1M-context beta from that same highest-volume path, since the beta is
+# only verified against the unoverridden default (autocompact may thrash on
+# long reviews under this override -- see argus/runners.py for the tradeoff).
+argus review owner/repo --pr 123 --specialist-model claude-opus-5 --frontier-model claude-fable-5
+
+# Clear an already-set ARGUS_SPECIALIST_MODEL/ARGUS_FRONTIER_MODEL for just this
+# run by passing an empty string -- useful when the env var is set globally
+# (e.g. in your shell profile or CI) but you want one invocation to use the
+# hardcoded default instead.
+argus review owner/repo --pr 123 --specialist-model ""
+
 # Inspect and export the packaged prompts
 argus prompts list
 argus prompts export ./my-prompts

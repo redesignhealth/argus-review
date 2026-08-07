@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -308,7 +309,7 @@ class TestContext1mBetaAndStrictMcpConfig:
     (long-context premium billing, beta-header handling) for no benefit.
     """
 
-    def _run(self, model: str) -> MagicMock:
+    def _run(self, model: str, *, is_system_reviewer_role: bool = False) -> MagicMock:
         messages: list[Any] = [
             ResultMessage(
                 subtype="success",
@@ -338,19 +339,72 @@ class TestContext1mBetaAndStrictMcpConfig:
                     settings=_settings(),
                     label="test-label",
                     repo_root="/tmp/fake-repo",
+                    is_system_reviewer_role=is_system_reviewer_role,
                 )
             )
         return mock_options
 
     def test_betas_and_strict_mcp_config_for_sonnet(self) -> None:
-        mock_options = self._run(CLAUDE_DEFAULT)
+        mock_options = self._run(CLAUDE_DEFAULT, is_system_reviewer_role=True)
         assert mock_options.call_args.kwargs["betas"] == ["context-1m-2025-08-07"]
         assert mock_options.call_args.kwargs["strict_mcp_config"] is True
 
     def test_strict_mcp_config_but_no_beta_for_opus(self) -> None:
-        mock_options = self._run(CLAUDE_OPUS)
+        mock_options = self._run(CLAUDE_OPUS, is_system_reviewer_role=False)
         assert mock_options.call_args.kwargs["betas"] == []
         assert mock_options.call_args.kwargs["strict_mcp_config"] is True
+
+    def test_no_beta_for_non_system_reviewer_role_even_with_default_model(self) -> None:
+        """A call that passes the system-reviewer's own default model value
+        but declares is_system_reviewer_role=False must never get the beta --
+        this is what makes the gate role-based rather than model-string-based
+        (see _run_claude_session's docstring)."""
+        mock_options = self._run(CLAUDE_DEFAULT, is_system_reviewer_role=False)
+        assert mock_options.call_args.kwargs["betas"] == []
+
+    def test_no_beta_when_specialist_model_overridden(self, monkeypatch: Any) -> None:
+        """Regression test for the round-2 Argus finding on this PR: the
+        beta gate must require BOTH the system-reviewer role AND that the
+        reviewer model hasn't been overridden away from the validated pin.
+        Gating on role alone (ignoring divergence) would attach this beta to
+        whatever ARGUS_SPECIALIST_MODEL points at, extending an
+        unverified-for-that-model billing/compatibility risk.
+
+        Patches the module-level `_SYSTEM_REVIEWER_UNOVERRIDDEN` flag
+        directly rather than reloading argus.llm.models/argus.runners under
+        a real ARGUS_SPECIALIST_MODEL env var: a full reload re-executes
+        argus.runners' module-level side effects (the _REVIEWER_EXECUTOR
+        singleton) well beyond what this test needs -- flagged as fragile in
+        Argus's round-3 review of this PR. The env var's actual effect on
+        _SYSTEM_REVIEWER_UNOVERRIDDEN's resolution is independently covered
+        by tests/test_llm_models_override.py.
+        """
+        monkeypatch.setattr(f"{_RUNNERS_MODULE}._SYSTEM_REVIEWER_UNOVERRIDDEN", False)
+        mock_options = self._run(CLAUDE_DEFAULT, is_system_reviewer_role=True)
+        assert mock_options.call_args.kwargs["betas"] == []
+
+    def test_no_beta_for_cross_cutting_even_when_model_collides_with_default_pin(self) -> None:
+        """Regression test for a round-3 Argus finding on this PR: an earlier
+        gate (`model == _SYSTEM_REVIEWER_MODEL and model ==
+        ALIAS_MAP["claude-default"]`) was still a model-string comparison, so
+        if --frontier-model happened to be set to the SAME value as the
+        unoverridden system-reviewer default pin, `_CROSS_CUTTING_MODEL`
+        collided with `_SYSTEM_REVIEWER_MODEL` and the cross-cutting call
+        received the beta anyway -- exactly the opus-specific
+        billing/compatibility risk the surrounding comment says must never
+        happen. The role-based gate (is_system_reviewer_role, declared by
+        the caller, never inferred from `model`) cannot be fooled by this
+        collision: passing CLAUDE_DEFAULT's own value (simulating the
+        collision) with is_system_reviewer_role=False -- exactly what the
+        cross-cutting call site always passes, regardless of what model
+        value _CROSS_CUTTING_MODEL resolves to -- must still withhold the
+        beta. This is mechanically the same assertion as
+        test_no_beta_for_non_system_reviewer_role_even_with_default_model
+        above; kept as its own named test since it documents a specific,
+        previously-real regression rather than a general property.
+        """
+        mock_options = self._run(CLAUDE_DEFAULT, is_system_reviewer_role=False)
+        assert mock_options.call_args.kwargs["betas"] == []
 
     def test_real_claude_agent_options_accepts_betas_and_strict_mcp_config(self) -> None:
         """Construct the REAL ClaudeAgentOptions (not mocked) with the exact
@@ -391,3 +445,66 @@ class TestContext1mBetaAndStrictMcpConfig:
         )
         assert options.betas == []
         assert options.strict_mcp_config is True
+
+
+class TestOneTimeImportLogs:
+    """The 1M-context-beta-withheld and cross-cutting-tier-shift signals are
+    logged once at module import time (see argus/runners.py, right after
+    _SYSTEM_REVIEWER_UNOVERRIDDEN is computed), not per-session -- an
+    earlier per-call version of the beta-withheld log was flagged as both
+    too quiet (debug) and too loud (info x 5 call sites x N rounds) across
+    successive Argus reviews of this PR. Reloading argus.runners here is
+    the correct tool for exactly this case, unlike the per-call gating
+    logic tested above: the behavior under test IS the module-import-time
+    side effect, not a re-derivable-without-reload runtime decision.
+    """
+
+    def test_warns_once_when_specialist_model_overridden(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import importlib
+
+        import argus.llm.models as models_module
+        import argus.runners as runners_module
+
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-haiku-4-5")
+        try:
+            importlib.reload(models_module)
+            with caplog.at_level("WARNING", logger=_RUNNERS_MODULE):
+                importlib.reload(runners_module)
+            assert any("1M-context beta withheld" in record.message for record in caplog.records)
+        finally:
+            monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+            importlib.reload(models_module)
+            importlib.reload(runners_module)
+
+    def test_does_not_warn_when_unoverridden(self, caplog: pytest.LogCaptureFixture) -> None:
+        import importlib
+
+        import argus.runners as runners_module
+
+        with caplog.at_level("WARNING", logger=_RUNNERS_MODULE):
+            importlib.reload(runners_module)
+        assert not any("1M-context beta withheld" in record.message for record in caplog.records)
+
+    def test_warns_once_when_frontier_model_moves_cross_cutting_off_default(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import importlib
+
+        import argus.llm.models as models_module
+        import argus.runners as runners_module
+
+        monkeypatch.setenv("ARGUS_FRONTIER_MODEL", "claude-fable-5")
+        try:
+            importlib.reload(models_module)
+            with caplog.at_level("WARNING", logger=_RUNNERS_MODULE):
+                importlib.reload(runners_module)
+            assert any(
+                "Cross-cutting reviewer moved off its default model" in record.message
+                for record in caplog.records
+            )
+        finally:
+            monkeypatch.delenv("ARGUS_FRONTIER_MODEL", raising=False)
+            importlib.reload(models_module)
+            importlib.reload(runners_module)

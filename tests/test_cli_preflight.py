@@ -154,6 +154,7 @@ class TestRunReviewConnectivityErrorExit:
         import shutil
         from unittest.mock import MagicMock, patch
 
+        from argus.cli import _MODEL_OVERRIDE_UNSET
         from argus.storage.resolver import HistoryBackendConnectivityError
 
         monkeypatch.setattr(shutil, "which", _which_stub({"git", "claude"}))
@@ -166,6 +167,8 @@ class TestRunReviewConnectivityErrorExit:
             pr=42,
             sha=None,
             no_prompt_overrides=False,
+            specialist_model=_MODEL_OVERRIDE_UNSET,
+            frontier_model=_MODEL_OVERRIDE_UNSET,
             base_ref=None,
             dismiss=[],
             post=False,
