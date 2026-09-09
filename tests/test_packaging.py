@@ -85,6 +85,19 @@ def test_wheel_contains_precheck_rules_readme(built_wheel_path: Path) -> None:
 
 
 @pytest.mark.packaging
+def test_wheel_contains_bench_default_toml(built_wheel_path: Path) -> None:
+    """argus/bench_default.toml is a runtime resource (argus.bench.
+    _load_packaged_default reads it via importlib.resources) -- a future
+    hatchling config change that silently drops non-.md package data
+    would break every review at runtime with no test failure, unlike the
+    prompt .md files above, which already have this guard.
+    """
+    with zipfile.ZipFile(built_wheel_path) as z:
+        packaged = [n for n in z.namelist() if n == "argus/bench_default.toml"]
+    assert packaged == ["argus/bench_default.toml"]
+
+
+@pytest.mark.packaging
 def test_wheel_does_not_contain_schema_sql(built_wheel_path: Path) -> None:
     """schema/*.sql ships in the repo/sdist only, not the installable wheel.
 
@@ -162,6 +175,59 @@ def test_wheel_version_is_pep440_compliant(built_wheel_path: Path) -> None:
     from packaging.version import Version
 
     Version(version)  # raises InvalidVersion if malformed
+
+
+@pytest.mark.packaging
+def test_argus_importable_without_gemini_extra() -> None:
+    """`argus` must not unconditionally import `google.genai`/`google_genai`
+    anywhere in its always-imported path.
+
+    The "gemini" bench platform (argus.bench.Platform, PLATFORM_RUNNERS) is
+    wired into the config surface, but the real runner isn't implemented
+    yet (Track 3, blocked on a separate repo) -- `google-genai` is only an
+    OPTIONAL dependency (`[project.optional-dependencies] gemini`), not a
+    hard one. If some future edit added an unconditional top-level
+    `import google.genai`, every user who installed plain `argus-code-review`
+    (no `[gemini]` extra) would fail on `import argus` at all, not just when
+    actually trying to use the Gemini platform.
+
+    Simulates "google-genai isn't installed" by blocking the import at the
+    interpreter level (rather than needing a second, extra-less venv) and
+    then importing every module this repo ships, fresh, in a subprocess.
+    """
+    modules_to_import = [
+        "argus",
+        "argus.bench",
+        "argus.runners",
+        "argus.gemini_cache",
+        "argus.config",
+        "argus.cli",
+        "argus.graph",
+        "argus.llm.models",
+    ]
+    script = (
+        "import builtins\n"
+        "_real_import = builtins.__import__\n"
+        "def _blocking_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
+        "    top = name.split('.', 1)[0]\n"
+        "    if top in ('google', 'google_genai'):\n"
+        "        raise ImportError(f'blocked for test: {name}')\n"
+        "    return _real_import(name, globals, locals, fromlist, level)\n"
+        "builtins.__import__ = _blocking_import\n"
+        + "\n".join(f"import {m}" for m in modules_to_import)
+        + "\nprint('IMPORT_OK')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"importing argus failed with google.genai blocked "
+        f"(gemini extra simulated absent):\nstdout={result.stdout}\nstderr={result.stderr}"
+    )
+    assert "IMPORT_OK" in result.stdout
 
 
 @pytest.mark.packaging

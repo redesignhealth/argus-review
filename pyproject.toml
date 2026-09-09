@@ -146,6 +146,15 @@ prechecks = [
 # constraints simultaneously; there's no genuine incompatibility for uv to
 # fork around, just a tighter shared pin.
 
+# Not a hard dependency: the "gemini" bench platform (argus.gemini_runner,
+# dispatched via argus.bench's Platform enum and PLATFORM_RUNNERS dict) is
+# opt-in only -- the packaged default bench always resolves to "claude-sdk"
+# and never imports google-genai. Install this extra only if you actually
+# point a role at platform = "gemini" via a bench.toml override.
+gemini = [
+    "google-genai>=1.55,<2",
+]
+
 [project.scripts]
 argus = "argus.cli:main"
 

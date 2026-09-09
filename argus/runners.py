@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from argus import bench
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_OPUS
 from claude_agent_sdk import (
     AssistantMessage,
@@ -597,9 +598,18 @@ async def run_system_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    # Bench resolution: "system-generalist" is the bulk-bucket role shared by
+    # every generalist-shaped leaf reviewer (see argus.bench module
+    # docstring). Gap-fill reviewers reuse this exact function (they dispatch
+    # through the same reviewer_type="system" path in graph.py), so they
+    # pick up the same resolved entry with no separate role needed. With the
+    # packaged default bench, bench_entry.platform == "claude-sdk" and
+    # bench_entry.model resolves to exactly _SYSTEM_REVIEWER_MODEL — this
+    # branch is a behavior-preserving no-op for a default install.
+    bench_entry = bench.resolve("system-generalist")
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -610,6 +620,7 @@ async def run_system_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label=f"system:{group.name}",
+        is_system_reviewer_role=True,
     )
     result = _parse_review_result(session.result_text, group.name)
     result.cost_usd = session.cost_usd
