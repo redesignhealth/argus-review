@@ -36,9 +36,22 @@ content-size requirement a short prompt plus this small a toolset might
 not clear, so any exception raised while creating/reusing a cache is
 caught, logged, and treated exactly like ``entry.caching == "off"`` --
 never allowed to fail the review itself. When a cache IS active, the
-per-request ``system_instruction``/``tools`` are deliberately NOT also
-sent (the API rejects duplicating what a ``cached_content`` reference
-already carries).
+per-request ``system_instruction``/``tools``/``tool_config`` are
+deliberately NOT also sent -- the live API rejects a request that
+carries ANY of the three alongside ``cached_content=`` with
+``400 INVALID_ARGUMENT: CachedContent can not be used with
+GenerateContent request setting system_instruction, tools or
+tool_config``. An earlier version of this module treated
+``tool_config`` as a safe-to-combine per-request directive (unlike the
+other two) on the theory that it configures *how* the model calls
+tools rather than *what* tools/instructions it has -- that assumption
+was wrong and was only caught by a real end-to-end run against the
+live API (mocked unit tests never exercise this validation). The
+forced-ANY-mode directive (see ``_FORCE_TOOL_CONFIG``) is instead baked
+into the cache itself at creation time, via
+``CreateCachedContentConfig.tool_config`` (which the SDK does support),
+so it's still enforced on every cached request even though the
+per-request config can no longer carry it.
 
 Timeout: ``asyncio.wait_for`` wraps the whole session against the
 effective timeout (an explicit ``timeout_s`` argument, when supplied by
@@ -73,10 +86,17 @@ Other implementation notes:
   types.FunctionCallingConfig(mode="ANY"))`` -- Gemini's default AUTO mode
   otherwise lets the model follow the shared system prompt's "return
   findings as fenced JSON text" instruction (written for the Claude path)
-  literally, silently reporting zero findings. As a second, belt-and-
-  suspenders layer, a turn with no function calls still attempts to parse
-  ``response.text`` as that same fenced-JSON shape and feeds any findings
-  found there into the sink before treating the turn as terminal.
+  literally, silently reporting zero findings. On an UNCACHED request this
+  is sent directly in the per-request ``GenerateContentConfig``; on a
+  CACHED request it cannot be (the live API rejects ``tool_config``
+  alongside ``cached_content=``, exactly like ``system_instruction``/
+  ``tools`` -- see the caching paragraph below), so it's instead baked
+  into the cache itself at creation time via
+  ``CreateCachedContentConfig.tool_config``, which the SDK does support.
+  As a second, belt-and-suspenders layer covering both paths, a turn with
+  no function calls still attempts to parse ``response.text`` as that
+  same fenced-JSON shape and feeds any findings found there into the sink
+  before treating the turn as terminal.
 - Cache activation (a synchronous ``caches.create()`` call, plus file I/O
   under a lock) runs via ``asyncio.to_thread`` so it never blocks this
   event loop -- and, symmetrically, a ``generate_content`` call that
@@ -496,6 +516,15 @@ def _maybe_activate_cache(
                 config=types.CreateCachedContentConfig(
                     system_instruction=system_prompt,
                     tools=gemini_tools,
+                    # Baked into the cache itself, not the per-request
+                    # config -- see `_build_config`'s docstring for why a
+                    # cached request can no longer carry `tool_config`
+                    # directly. `CreateCachedContentConfig` (unlike
+                    # `GenerateContentConfig` when `cached_content=` is
+                    # set) DOES support `tool_config`, so the forced-ANY
+                    # tool-calling directive is still enforced on every
+                    # request that references this cache.
+                    tool_config=_FORCE_TOOL_CONFIG,
                     ttl=f"{ttl_seconds}s",
                 ),
             )
@@ -577,17 +606,19 @@ async def _run_turns(
         )
 
         def _build_config(cache_name: str | None) -> types.GenerateContentConfig:
-            # Gemini constraint: a request using `cached_content=` must NOT
-            # also carry `system_instruction`/`tools` -- both are already
-            # part of what the cache represents. `tool_config` is a
-            # per-request directive, not part of what's cached, so it's
-            # set on both branches -- forcing the model to make a function
-            # call rather than freely returning plain text (see
-            # `_FORCE_TOOL_CONFIG`'s docstring for why).
+            # Gemini constraint (confirmed against the live API, not just
+            # documentation): a request using `cached_content=` must NOT
+            # ALSO carry `system_instruction`, `tools`, OR `tool_config` --
+            # all three are rejected outright with `400 INVALID_ARGUMENT:
+            # CachedContent can not be used with GenerateContent request
+            # setting system_instruction, tools or tool_config`. All three
+            # are already part of what the cache represents (see
+            # `_maybe_activate_cache`'s `_create_fn`, which now bakes
+            # `_FORCE_TOOL_CONFIG` into the cache itself via
+            # `CreateCachedContentConfig.tool_config`), so the cached
+            # branch here sends `cached_content` alone.
             if cache_name:
-                return types.GenerateContentConfig(
-                    cached_content=cache_name, tool_config=_FORCE_TOOL_CONFIG
-                )
+                return types.GenerateContentConfig(cached_content=cache_name)
             return types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 tools=gemini_tools,

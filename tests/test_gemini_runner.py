@@ -379,13 +379,22 @@ class TestCacheActivation:
         assert create_config.tools is not None
         assert create_config.ttl == "3600s"
 
+        # The forced-ANY tool_config directive must be baked into the
+        # CACHE ITSELF, not the per-request config -- the live API rejects
+        # tool_config alongside cached_content just like system_instruction/
+        # tools (see TestCachedRequestNeverCombinesToolConfig below).
+        assert create_config.tool_config is not None
+        assert create_config.tool_config.function_calling_config.mode == "ANY"
+
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         request_config = generate_kwargs["config"]
         assert request_config.cached_content == "cachedContents/abc123"
-        # Gemini rejects duplicating system_instruction/tools alongside
-        # cached_content -- they must NOT also be set on this request.
+        # Gemini rejects duplicating system_instruction/tools/tool_config
+        # alongside cached_content -- none of the three may also be set on
+        # this request.
         assert request_config.system_instruction is None
         assert request_config.tools is None
+        assert request_config.tool_config is None
 
     async def test_cache_off_never_calls_caches_create(self) -> None:
         entry = _make_entry(caching="off")
@@ -679,7 +688,12 @@ class TestForcedFunctionCallingMode:
         assert tool_config is not None
         assert tool_config.function_calling_config.mode == "ANY"
 
-    async def test_cached_request_also_forces_any_mode(self) -> None:
+    async def test_cached_session_forces_any_mode_via_the_cache_itself(self) -> None:
+        """A cached request cannot carry `tool_config` directly (the live
+        API rejects it alongside `cached_content=`, just like
+        `system_instruction`/`tools`) -- so the forced-ANY directive must
+        instead be baked into the cache at creation time, via
+        `CreateCachedContentConfig.tool_config`."""
         entry = _make_entry(caching="on")
         settings = _make_settings()
         response = _make_response(calls=[("finish_review", {"files_explored": []})])
@@ -694,8 +708,84 @@ class TestForcedFunctionCallingMode:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
+        create_kwargs = fake_client.caches.create.call_args.kwargs
+        create_tool_config = create_kwargs["config"].tool_config
+        assert create_tool_config is not None
+        assert create_tool_config.function_calling_config.mode == "ANY"
+
+        # The per-request config must NOT also carry tool_config.
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
-        assert generate_kwargs["config"].tool_config.function_calling_config.mode == "ANY"
+        assert generate_kwargs["config"].tool_config is None
+
+
+class TestToolConfigNeverCombinedWithCachedContent:
+    """Regression test for a real (not mocked) 400 INVALID_ARGUMENT the live
+    Gemini API returned: 'CachedContent can not be used with GenerateContent
+    request setting system_instruction, tools or tool_config.' An earlier
+    version of this module treated `tool_config` as safe to combine with
+    `cached_content=` (unlike `system_instruction`/`tools`) -- it is not.
+    Mirrors the equivalent `system_instruction`/`tools` assertions in
+    `TestCacheActivation`."""
+
+    async def test_cached_request_never_carries_tool_config(self) -> None:
+        entry = _make_entry(caching="on")
+        settings = _make_settings()
+        response = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([response], cache_name="cachedContents/xyz")
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.timed_out is False
+        generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
+        request_config = generate_kwargs["config"]
+        assert request_config.cached_content == "cachedContents/xyz"
+        assert request_config.system_instruction is None
+        assert request_config.tools is None
+        assert request_config.tool_config is None
+
+    async def test_uncached_retry_after_cache_invalidation_restores_tool_config(self) -> None:
+        """When a stale cache is invalidated mid-session and the runner
+        falls back to an uncached retry, that retry must fully restore
+        `tool_config` (not just `system_instruction`/`tools`) -- otherwise
+        the forced-ANY directive silently disappears for the rest of the
+        session the moment a cache goes stale upstream."""
+        entry = _make_entry(caching="on")
+        settings = _make_settings()
+
+        cache_invalid_error = genai_errors.ClientError(
+            404, {"message": "Cache cachedContents/xyz not found", "status": "NOT_FOUND"}
+        )
+        success_response = _make_response(calls=[("finish_review", {"files_explored": []})])
+
+        fake_client = _make_fake_client([], cache_name="cachedContents/xyz")
+        fake_client.aio.models.generate_content = AsyncMock(
+            side_effect=[cache_invalid_error, success_response]
+        )
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.timed_out is False
+        retry_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
+        retry_config = retry_kwargs["config"]
+        assert retry_config.cached_content is None
+        assert retry_config.system_instruction == "sys"
+        assert retry_config.tools is not None
+        assert retry_config.tool_config is not None
+        assert retry_config.tool_config.function_calling_config.mode == "ANY"
 
 
 # ---------------------------------------------------------------------------
@@ -1101,10 +1191,15 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
 
         assert result.timed_out is False
         assert fake_client.aio.models.generate_content.await_count == 2
-        # The retry must have fallen back to an uncached request.
+        # The retry must have fallen back to an uncached request -- and
+        # that uncached request must fully restore system_instruction/
+        # tools/tool_config (see TestToolConfigNeverCombinedWithCachedContent
+        # for a dedicated test of the tool_config restoration).
         retry_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         assert retry_kwargs["config"].cached_content is None
         assert retry_kwargs["config"].system_instruction == "sys"
+        assert retry_kwargs["config"].tools is not None
+        assert retry_kwargs["config"].tool_config is not None
 
     async def test_unrelated_client_error_is_not_treated_as_cache_invalid(self) -> None:
         """A 4xx that has nothing to do with the cache (bad request, auth,
