@@ -580,8 +580,8 @@ class TestRunSystemReviewerBenchWiring:
 
         fake_session = MagicMock()
         fake_session.result_text = ""
+        fake_session.failure_reason = None
         fake_session.cost_usd = 0.0
-        fake_session.timed_out = False
         fake_session.tool_call_count = 0
         fake_session.tool_names = []
         fake_session.context7_call_count = 0
@@ -650,8 +650,8 @@ class TestPackagedDefaultNeverTouchesGeminiRunner:
 
         fake_session = MagicMock()
         fake_session.result_text = ""
+        fake_session.failure_reason = None
         fake_session.cost_usd = 0.0
-        fake_session.timed_out = False
         fake_session.tool_call_count = 0
         fake_session.tool_names = []
         fake_session.context7_call_count = 0

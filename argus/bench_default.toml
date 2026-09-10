@@ -43,7 +43,10 @@ caching  = "auto"
 
 [roles.cross-cutting]
 platform    = "claude-sdk"
-model       = "claude-frontier"
+# Opus, not frontier (Fable): matches argus.runners._CROSS_CUTTING_MODEL --
+# evals showed no measurable quality gain from frontier on this stage, at
+# ~2x the per-token cost.
+model       = "claude-opus"
 prompt_name = "pr-review-cross-cutting"
 caching     = "auto"
 

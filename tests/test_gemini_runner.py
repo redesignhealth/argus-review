@@ -8,7 +8,7 @@ function calls handled in one turn, explicit-cache activation (verifying
 cached_content is set and system_instruction/tools are NOT duplicated on
 subsequent requests), graceful degradation when cache creation fails,
 usage accumulation across turns, and the timeout path returning
-timed_out=True rather than raising.
+failure_reason="timeout" rather than raising.
 """
 
 from __future__ import annotations
@@ -179,7 +179,7 @@ class TestSingleTurnNoToolCall:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         assert result.tool_call_count == 0
         assert result.tool_names == []
         assert result.model == resolve_alias("gemini-frontier")
@@ -340,7 +340,7 @@ class TestTurnBudgetExhaustion:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         assert fake_client.aio.models.generate_content.await_count == _MAX_TURNS
         payload = _parse_result_json(result.result_text)
         assert len(payload["findings"]) == _MAX_TURNS
@@ -370,7 +370,7 @@ class TestCacheActivation:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         fake_client.caches.create.assert_called_once()
         create_kwargs = fake_client.caches.create.call_args.kwargs
         assert create_kwargs["model"] == resolve_alias("gemini-frontier")
@@ -441,7 +441,7 @@ class TestCacheCreationFailureDegradesGracefully:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         fake_client.caches.create.assert_called_once()
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         # Fell back to an uncached request.
@@ -515,7 +515,7 @@ class TestUsageAccumulation:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +546,7 @@ class TestTimeout:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
         assert result.result_text == ""
         assert result.cost_usd == 0.0
         assert result.tool_call_count == 0
@@ -577,7 +577,7 @@ class TestMalformedToolCall:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         assert "not_a_real_tool" in result.tool_names
 
         # `contents` is one shared, mutated-in-place list across the whole
@@ -616,7 +616,7 @@ class TestMalformedFinishReviewDoesNotTerminate:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         # The loop must NOT have stopped after turn 1's malformed call --
         # turn 2's well-formed finish_review is what actually ends it.
         assert fake_client.aio.models.generate_content.await_count == 2
@@ -651,7 +651,7 @@ class TestThoughtSignaturePreservation:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         final_contents = fake_client.aio.models.generate_content.await_args.kwargs["contents"]
         # The exact Content object the API returned for turn 1's model turn
         # (final_contents[1]) must be what got appended -- not a hand-
@@ -742,7 +742,7 @@ class TestToolConfigNeverCombinedWithCachedContent:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         request_config = generate_kwargs["config"]
         assert request_config.cached_content == "cachedContents/xyz"
@@ -778,7 +778,7 @@ class TestToolConfigNeverCombinedWithCachedContent:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         retry_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         retry_config = retry_kwargs["config"]
         assert retry_config.cached_content is None
@@ -822,7 +822,7 @@ class TestTextFallbackFindingsRecovery:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         payload = _parse_result_json(result.result_text)
         assert payload["files_explored"] == ["x.py"]
         assert len(payload["findings"]) == 1
@@ -919,7 +919,7 @@ class TestHttpLevelTimeout:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
         assert result.result_text == ""
         assert result.cost_usd == 0.0
 
@@ -956,7 +956,7 @@ class TestTimeoutSOverride:
                 timeout_s=0.05,
             )
 
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
 
 
 # ---------------------------------------------------------------------------
@@ -1122,7 +1122,7 @@ class TestCacheActivationClientIsolationUnderTimeout:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is True
+        assert result.failure_reason == "timeout"
 
         # Two SEPARATE `genai.Client` instances must have been constructed:
         # one for the session itself (`_run_turns`'s own `client`), and one
@@ -1189,7 +1189,7 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.timed_out is False
+        assert result.failure_reason is None
         assert fake_client.aio.models.generate_content.await_count == 2
         # The retry must have fallen back to an uncached request -- and
         # that uncached request must fully restore system_instruction/

@@ -179,12 +179,11 @@ def test_wheel_version_is_pep440_compliant(built_wheel_path: Path) -> None:
 
 @pytest.mark.packaging
 def test_argus_importable_without_gemini_extra() -> None:
-    """`argus` must not unconditionally import `google.genai`/`google_genai`
-    anywhere in its always-imported path.
+    """`argus` must not unconditionally import the real `google.genai`
+    package anywhere in its always-imported path.
 
-    The "gemini" bench platform (argus.bench.Platform, PLATFORM_RUNNERS) is
-    wired into the config surface, but the real runner isn't implemented
-    yet (Track 3, blocked on a separate repo) -- `google-genai` is only an
+    The "gemini" bench platform (argus.bench.Platform, PLATFORM_RUNNERS) has
+    a real runner (argus.gemini_runner), but `google-genai` is only an
     OPTIONAL dependency (`[project.optional-dependencies] gemini`), not a
     hard one. If some future edit added an unconditional top-level
     `import google.genai`, every user who installed plain `argus-code-review`
@@ -194,6 +193,16 @@ def test_argus_importable_without_gemini_extra() -> None:
     Simulates "google-genai isn't installed" by blocking the import at the
     interpreter level (rather than needing a second, extra-less venv) and
     then importing every module this repo ships, fresh, in a subprocess.
+
+    Only blocks an ABSOLUTE top-level `google` import (`level == 0`) --
+    NOT `litellm`'s own internal relative import of a same-named
+    `google_genai` submodule (`from .google_genai import ...`, `level == 1`
+    relative to `litellm` itself). That submodule ships as part of
+    `litellm` (a hard, always-installed dependency here, imported by
+    `argus.llm.pricing`) and has nothing to do with the real, optional
+    `google-genai` PyPI package this test cares about -- blocking it too
+    would break `argus.graph`'s import even in an environment where the
+    `[gemini]` extra genuinely is absent, producing a false failure here.
     """
     modules_to_import = [
         "argus",
@@ -210,7 +219,7 @@ def test_argus_importable_without_gemini_extra() -> None:
         "_real_import = builtins.__import__\n"
         "def _blocking_import(name, globals=None, locals=None, fromlist=(), level=0):\n"
         "    top = name.split('.', 1)[0]\n"
-        "    if top in ('google', 'google_genai'):\n"
+        "    if level == 0 and top == 'google':\n"
         "        raise ImportError(f'blocked for test: {name}')\n"
         "    return _real_import(name, globals, locals, fromlist, level)\n"
         "builtins.__import__ = _blocking_import\n"

@@ -57,7 +57,7 @@ Timeout: ``asyncio.wait_for`` wraps the whole session against the
 effective timeout (an explicit ``timeout_s`` argument, when supplied by
 the caller -- see ``argus.bench``'s ``_gemini_runner`` adapter -- else
 ``settings.ARGUS_SESSION_TIMEOUT``, the same setting the Claude
-subprocess path enforces), returning a ``timed_out=True`` result instead
+subprocess path enforces), returning a ``failure_reason="timeout"`` result instead
 of raising. Unlike the Claude path, there is no subprocess to
 ``SIGKILL`` here -- ``asyncio.wait_for`` can only ever cancel at the next
 ``await`` point, so it CANNOT interrupt an in-flight blocking call inside
@@ -73,7 +73,7 @@ timeout exception well ahead of the outer ``wait_for``'s own deadline.
 That exception -- whether it escapes the SDK call directly, or is
 observed via ``asyncio.wait_for``'s own cancellation, depending on exact
 timing -- is caught either way and translated into the same clean
-``timed_out=True`` result.
+``failure_reason="timeout"`` result.
 
 Other implementation notes:
 
@@ -172,7 +172,7 @@ _FORCE_TOOL_CONFIG = types.ToolConfig(
 # necessarily elapses before a longer one does. That raises its own
 # httpx-level timeout exception ahead of the outer `wait_for`'s own
 # deadline; `run_session_gemini`'s except clause catches it and
-# translates it into the same clean `timed_out=True` result the outer
+# translates it into the same clean `failure_reason="timeout"` result the outer
 # timeout would otherwise produce, rather than letting it escape
 # uncaught.
 _HTTP_TIMEOUT_FRACTION = 0.8
@@ -566,9 +566,9 @@ async def _run_turns(
     timeout_s: float,
     started_at: datetime,
 ) -> SessionResult:
-    """The actual tool-calling loop. Always returns with ``timed_out=False``
+    """The actual tool-calling loop. Always returns with ``failure_reason=None``
     -- the enclosing ``run_session_gemini`` is what applies the timeout and
-    turns a cancellation into a ``timed_out=True`` result instead.
+    turns a cancellation into a ``failure_reason="timeout"`` result instead.
     """
     _, api_key = settings.google_credential
     # Second layer of defense: `asyncio.wait_for` in `run_session_gemini`
@@ -578,7 +578,7 @@ async def _run_turns(
     # SHORTER than the outer `wait_for` deadline (see
     # `_HTTP_TIMEOUT_FRACTION`) so it fires FIRST -- raising its own
     # httpx-level timeout exception, which `run_session_gemini`'s except
-    # clause catches and translates into a clean `timed_out=True` result
+    # clause catches and translates into a clean `failure_reason="timeout"` result
     # -- rather than racing the outer deadline so closely that the raw
     # httpx exception could escape uncaught instead.
     http_options = types.HttpOptions(timeout=int(timeout_s * _HTTP_TIMEOUT_FRACTION * 1000))
@@ -810,7 +810,7 @@ async def _run_turns(
             # docstring) -- always 0, never derived from tool_calls.
             context7_call_count=0,
             model=model,
-            timed_out=False,
+            failure_reason=None,
         )
     finally:
         # Every session creates both a sync and async HTTP client (the sync
@@ -862,7 +862,7 @@ async def run_session_gemini(
     than via ``asyncio.wait_for``'s own cancellation (the HTTP-client-level
     timeout in ``_run_turns`` is deliberately shorter than this outer
     deadline, so it fires FIRST and this is the exception that actually
-    surfaces in practice) -- returns a ``timed_out=True`` result instead
+    surfaces in practice) -- returns a ``failure_reason="timeout"`` result instead
     of letting the exception propagate.
     """
     effective_root = _resolve_repo_root(repo_root, "run_session_gemini")
@@ -907,5 +907,5 @@ async def run_session_gemini(
             tool_names=[],
             context7_call_count=0,
             model=model,
-            timed_out=True,
+            failure_reason="timeout",
         )
