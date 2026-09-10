@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from argus import bench
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_OPUS
 from claude_agent_sdk import (
     AssistantMessage,
@@ -597,9 +598,18 @@ async def run_system_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    # Bench resolution: "system-generalist" is the bulk-bucket role shared by
+    # every generalist-shaped leaf reviewer (see argus.bench module
+    # docstring). Gap-fill reviewers reuse this exact function (they dispatch
+    # through the same reviewer_type="system" path in graph.py), so they
+    # pick up the same resolved entry with no separate role needed. With the
+    # packaged default bench, bench_entry.platform == "claude-sdk" and
+    # bench_entry.model resolves to exactly _SYSTEM_REVIEWER_MODEL -- this
+    # branch is a behavior-preserving no-op for a default install.
+    bench_entry = bench.resolve("system-generalist")
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -610,6 +620,7 @@ async def run_system_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label=f"system:{group.name}",
+        is_system_reviewer_role=True,
     )
     result = _parse_review_result(session.result_text, group.name)
     result.cost_usd = session.cost_usd
@@ -1543,7 +1554,32 @@ async def _run_claude_session(
     #     overrides can make ambiguous. Only the caller genuinely knows its
     #     own role; passing that decision down explicitly is the only fix
     #     that can't be defeated by a future override collision.
-    _attach_1m_context_beta = is_system_reviewer_role and _SYSTEM_REVIEWER_UNOVERRIDDEN
+    #
+    # A live dogfood round found a further gap in the role-only gate above:
+    # `run_system_reviewer` (the only caller that routes through
+    # `argus.bench` today) always passes `is_system_reviewer_role=True`
+    # regardless of what `bench.toml` actually resolved `model` to --
+    # `[bulk_reviewer].model` can point "system-generalist" at ANY alias
+    # (e.g. `claude-opus`, `claude-mini`, a future `EXPERIMENTAL_MODELS`
+    # pin), and this beta was only ever empirically verified against the
+    # sonnet-tier `claude-default` pin (see the probe above). Gating on
+    # role alone would silently attach an unverified-for-that-model beta
+    # to whatever a bench override picked. Re-adding a plain
+    # `model == _SYSTEM_REVIEWER_MODEL` comparison does NOT reintroduce
+    # the collision risk described above, because it's ANDed with
+    # `is_system_reviewer_role` here, not evaluated alone: the
+    # cross-cutting call site always passes `is_system_reviewer_role=False`
+    # and short-circuits before this comparison is ever reached, so an
+    # accidental `_CROSS_CUTTING_MODEL == _SYSTEM_REVIEWER_MODEL` value
+    # collision (e.g. via --frontier-model) still can't leak the beta onto
+    # cross-cutting. This closes the bench-override gap for the ONE
+    # caller that can currently reach it, whether the model got here via
+    # the default no-override path or an explicit bench.toml override.
+    _attach_1m_context_beta = (
+        is_system_reviewer_role
+        and _SYSTEM_REVIEWER_UNOVERRIDDEN
+        and model == _SYSTEM_REVIEWER_MODEL
+    )
     # Logged once at module import time (see _SYSTEM_REVIEWER_UNOVERRIDDEN's
     # definition above), not per-call here: this decision is fixed for the
     # whole process, so a per-session log would just repeat the same fact

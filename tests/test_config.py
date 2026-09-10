@@ -148,6 +148,9 @@ def test_optional_fields_default_to_none(monkeypatch: pytest.MonkeyPatch) -> Non
         "CONTEXT7_API_KEY",
         "ARGUS_CONTEXT7_LIBRARY_ID",
         "ARGUS_CONTEXT7_BASE_URL",
+        "GOOGLE_API_KEY",
+        "ARGUS_BENCH_FILE",
+        "ARGUS_GEMINI_CACHE_DIR",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -156,6 +159,57 @@ def test_optional_fields_default_to_none(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.ARGUS_CONTEXT7_LIBRARY_ID is None
     assert settings.ARGUS_CONTEXT7_BASE_URL is None
     assert settings.ARGUS_PROMPTS_DIR is None
+    assert settings.GOOGLE_API_KEY is None
+    assert settings.ARGUS_BENCH_FILE is None
+    assert settings.ARGUS_GEMINI_CACHE_DIR is None
+
+
+def test_google_credential_raises_when_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    _set_required(monkeypatch)
+
+    settings = get_settings()
+    with pytest.raises(ValueError, match="GOOGLE_API_KEY"):
+        _ = settings.google_credential
+
+
+def test_google_credential_returns_env_name_and_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+
+    settings = get_settings()
+    assert settings.google_credential == ("GOOGLE_API_KEY", "google-key")
+
+
+def test_no_bench_overrides_defaults_to_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+    settings = get_settings()
+    assert settings.ARGUS_NO_BENCH_OVERRIDES is False
+
+
+def test_no_bench_overrides_parses_truthy_env_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", "1")
+    settings = get_settings()
+    assert settings.ARGUS_NO_BENCH_OVERRIDES is True
+
+
+def test_gemini_cache_ttl_defaults_to_3600(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.delenv("ARGUS_GEMINI_CACHE_TTL", raising=False)
+    settings = get_settings()
+    assert settings.ARGUS_GEMINI_CACHE_TTL == 3600
+
+
+def test_gemini_cache_ttl_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("ARGUS_GEMINI_CACHE_TTL", "60")
+    settings = get_settings()
+    assert settings.ARGUS_GEMINI_CACHE_TTL == 60
 
 
 def test_session_timeout_defaults_to_600(monkeypatch: pytest.MonkeyPatch) -> None:

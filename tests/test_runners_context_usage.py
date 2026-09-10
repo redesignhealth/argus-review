@@ -537,6 +537,27 @@ class TestContext1mBetaAndStrictMcpConfig:
         mock_options = self._run(CLAUDE_DEFAULT, is_system_reviewer_role=True)
         assert mock_options.call_args.kwargs["betas"] == []
 
+    def test_no_beta_when_bench_override_routes_system_reviewer_to_another_model(self) -> None:
+        """Regression test for a live-dogfood finding on this PR: a
+        `bench.toml` override to `[bulk_reviewer].model` can route
+        `run_system_reviewer` (the only caller wired through `argus.bench`)
+        at ANY model alias while still passing `is_system_reviewer_role=True`
+        unconditionally -- the caller declares its ROLE, not which concrete
+        model bench resolved for it.
+
+        Before this fix, the gate was `is_system_reviewer_role and
+        _SYSTEM_REVIEWER_UNOVERRIDDEN` -- neither term reflects what model
+        was ACTUALLY passed to this call, so a bench override to e.g.
+        `claude-opus` (simulated here by passing `CLAUDE_OPUS` while still
+        declaring `is_system_reviewer_role=True`, exactly as the bench-routed
+        call site would) would still get the beta attached, despite this
+        beta only ever being empirically verified against the sonnet-tier
+        `claude-default` pin -- unverified-for-opus billing/compatibility
+        risk, applied silently.
+        """
+        mock_options = self._run(CLAUDE_OPUS, is_system_reviewer_role=True)
+        assert mock_options.call_args.kwargs["betas"] == []
+
     def test_no_beta_for_cross_cutting_even_when_model_collides_with_default_pin(self) -> None:
         """Regression test for a round-3 Argus finding on this PR: an earlier
         gate (`model == _SYSTEM_REVIEWER_MODEL and model ==

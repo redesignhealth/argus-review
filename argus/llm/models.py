@@ -8,11 +8,19 @@ Call sites should import the resolved constants (``GPT_MINI``,
 ``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings like
 ``"gpt-5.5-mini"``.
 
-Only aliases this package actually calls are registered here -- this is a
-standalone, isolated package, not the larger monorepo it was extracted from,
-so there's no value in carrying registry entries (gpt-frontier, gpt-nano, the
-Gemini family) with no real call site. Add an alias back if a future call
+Only aliases with a real call site are registered in ``ALIAS_MAP`` -- this is
+a standalone, isolated package, not the larger monorepo it was extracted
+from, so there's no value in carrying registry entries with no real caller.
+``gemini-frontier``/``gemini-mini`` ARE real call sites (Track 3's
+``argus.gemini_runner``, dispatched via ``argus.bench``'s ``"gemini"``
+platform, resolves ``entry.model`` through this same ``ALIAS_MAP``) and stay
+registered; ``gpt-frontier``/``gpt-nano`` have no runner yet (``argus.bench``'s
+``"openai-responses"`` platform is ``_unimplemented_runner``) and are NOT
+registered here. Add an alias back to ``ALIAS_MAP`` if a future call
 site actually needs it.
+
+Per-token model pricing is sourced centrally from ``argus.llm.pricing``
+(litellm-backed); ``estimate_cost_usd`` is re-exported here for call sites.
 
 Tier semantics:
     *frontier* -- best reasoning available in the family; slow / expensive.
@@ -45,6 +53,8 @@ import logging
 import os
 from typing import Any, Final
 
+from argus.llm.pricing import estimate_cost_usd
+
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
@@ -55,6 +65,14 @@ ALIAS_MAP: Final[dict[str, str]] = {
     "claude-opus": "claude-opus-5",
     "claude-default": "claude-sonnet-4-6",
     "claude-mini": "claude-haiku-4-5",
+    # Google -- gemini-3 family. Real call site: argus.gemini_runner
+    # (Track 3), dispatched via argus.bench's "gemini" platform.
+    # NOTE: gemini-3-pro-preview was deprecated by Google (404 as of 2026-06).
+    # gemini-3.1-pro-preview is the current working successor.
+    # TODO: upgrade to stable gemini-3.1-pro (non-preview) when GA;
+    # re-eval by 2026-11-01.
+    "gemini-frontier": "gemini-3.1-pro-preview",
+    "gemini-mini": "gemini-3-flash-preview",
 }
 
 # Short-lived pins for evals / preview models. Anything in here is a known
@@ -145,15 +163,51 @@ CLAUDE_FRONTIER: Final[str] = _env_override("ARGUS_FRONTIER_MODEL", ALIAS_MAP["c
 CLAUDE_OPUS: Final[str] = _env_override("ARGUS_FRONTIER_MODEL", ALIAS_MAP["claude-opus"])
 CLAUDE_DEFAULT: Final[str] = _env_override("ARGUS_SPECIALIST_MODEL", ALIAS_MAP["claude-default"])
 CLAUDE_MINI: Final[str] = ALIAS_MAP["claude-mini"]
+GEMINI_FRONTIER: Final[str] = ALIAS_MAP["gemini-frontier"]
+GEMINI_MINI: Final[str] = ALIAS_MAP["gemini-mini"]
+
+__all__ = [
+    "ALIAS_MAP",
+    "CLAUDE_DEFAULT",
+    "CLAUDE_FRONTIER",
+    "CLAUDE_MINI",
+    "CLAUDE_OPUS",
+    "EXPERIMENTAL_MODELS",
+    "GEMINI_FRONTIER",
+    "GEMINI_MINI",
+    "GPT_MINI",
+    "build_chat_model",
+    "estimate_cost_usd",
+    "infer_provider",
+    "resolve",
+]
 
 
 def resolve(alias: str) -> str:
-    """Resolve a model alias to its concrete model name.
+    """Resolve a model alias to its concrete model name, honoring runtime overrides.
 
-    Raises ``KeyError`` if the alias is not registered, so typos fail loudly
-    rather than silently routing to a wrong model.
+    Checks ``ALIAS_MAP`` (subject to the ``ARGUS_*_MODEL`` env-var overrides
+    below) first, then falls back to ``EXPERIMENTAL_MODELS`` -- the
+    short-lived, non-override-aware escape hatch for eval/preview model
+    pins. ``argus.bench``'s config-validation accepts either registry as a
+    valid ``model`` value (see ``_VALID_MODEL_ALIASES``), so this function
+    must recognize both too, or an accepted bench config could still raise
+    ``KeyError`` here the first time that role actually runs.
+
+    Raises ``KeyError`` if the alias is not registered in either mapping,
+    so typos fail loudly rather than silently routing to a wrong model.
     """
-    return ALIAS_MAP[alias]
+    if alias in EXPERIMENTAL_MODELS:
+        return EXPERIMENTAL_MODELS[alias]
+    if alias not in ALIAS_MAP:
+        raise KeyError(alias)
+    _override_constants: dict[str, str] = {
+        "claude-default": CLAUDE_DEFAULT,
+        "claude-frontier": CLAUDE_FRONTIER,
+        "claude-opus": CLAUDE_OPUS,
+        "claude-mini": CLAUDE_MINI,
+    }
+    return _override_constants.get(alias, ALIAS_MAP[alias])
 
 
 def build_chat_model(alias: str) -> Any:

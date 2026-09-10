@@ -125,12 +125,30 @@ class Settings(BaseSettings):
             production-proven value ahead of this package taking over as the
             actual production reviewer (rh-data-platform's review_service is
             being retired in its favor).
+        GOOGLE_API_KEY: Gemini platform credential, consumed via the
+            ``google_credential`` property by ``argus.gemini_runner``
+            (Track 3) whenever a role's bench entry resolves to
+            ``platform = "gemini"``. Only required if you actually
+            opt a role into that platform (see ``argus.bench``'s
+            override chain) -- the packaged default bench never does.
+        ARGUS_BENCH_FILE: Highest-priority bench-config override file. See
+            ``argus.bench`` for the full override search chain.
+        ARGUS_NO_BENCH_OVERRIDES: Set truthy to ignore every bench override
+            layer (including ``ARGUS_BENCH_FILE``) and force the packaged
+            default bench only. Mirrors ``ARGUS_NO_PROMPT_OVERRIDES``.
+        ARGUS_GEMINI_CACHE_DIR: Override the directory
+            ``argus.gemini_cache.GeminiCacheKeeper`` stores its file-backed
+            cache-lifecycle records in. Defaults to
+            ``~/.local/share/argus/gemini-cache/``.
+        ARGUS_GEMINI_CACHE_TTL: Default TTL in seconds for a Gemini
+            explicit-cache lifecycle record. Defaults to 3600 (1 hour).
     """
 
     ANTHROPIC_API_KEY: str | None = None
     ANTHROPIC_AUTH_TOKEN: str | None = None
     GITHUB_TOKEN_RO: str
     OPENAI_API_KEY: str
+    GOOGLE_API_KEY: str | None = None
 
     ARGUS_DB_URL: str | None = None
     SUPABASE_DB_URL: str | None = None
@@ -158,6 +176,12 @@ class Settings(BaseSettings):
     ARGUS_CONTEXT7_BASE_URL: str | None = None
 
     ARGUS_SESSION_TIMEOUT: int = DEFAULT_ARGUS_SESSION_TIMEOUT_S
+
+    ARGUS_BENCH_FILE: str | None = None
+    ARGUS_NO_BENCH_OVERRIDES: bool = False
+
+    ARGUS_GEMINI_CACHE_DIR: str | None = None
+    ARGUS_GEMINI_CACHE_TTL: int = 3600
 
     model_config = SettingsConfigDict(
         case_sensitive=True,
@@ -193,6 +217,28 @@ class Settings(BaseSettings):
         if self.ANTHROPIC_AUTH_TOKEN:
             return ("ANTHROPIC_AUTH_TOKEN", self.ANTHROPIC_AUTH_TOKEN)
         raise ValueError("One of ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is required")
+
+    @property
+    def google_credential(self) -> tuple[str, str]:
+        """The configured Google credential as ``(env_var_name, value)``.
+
+        Mirrors ``anthropic_credential``'s exact shape, for symmetry with
+        whatever future Gemini runner call site needs to hand this
+        credential to something that itself reads an env var. There is
+        only one Google credential var today (no gateway/proxy dual-token
+        convention like Anthropic's), so this is simpler than
+        ``anthropic_credential`` but keeps the same return shape and
+        raise-if-missing behavior.
+
+        Raises ``ValueError`` if ``GOOGLE_API_KEY`` is not set. Nothing in
+        this codebase requires ``GOOGLE_API_KEY`` at ``Settings``
+        construction time, so this property is the backstop for any caller
+        (such as ``argus.gemini_runner``) that reaches here without it
+        configured when ``platform = "gemini"`` is selected.
+        """
+        if self.GOOGLE_API_KEY:
+            return ("GOOGLE_API_KEY", self.GOOGLE_API_KEY)
+        raise ValueError("GOOGLE_API_KEY is required")
 
 
 @lru_cache(maxsize=1)

@@ -1,0 +1,63 @@
+# Packaged default bench configuration for Argus's leaf reviewers.
+#
+# See argus/bench.py's module docstring for the full override chain and
+# the bulk_reviewer vs. roles.<name> distinction. This file is the base
+# of that chain -- every entry below resolves to platform="claude-sdk"
+# with the exact models the pipeline used before the bench existed, so
+# shipping this file is a behavior-preserving no-op for a default install.
+#
+# To customize: create ./.argus/bench.toml or ~/.config/argus/bench.toml
+# with ONLY the keys you want to change (sparse overlay -- you never need
+# to repeat the rest of this file), or point ARGUS_BENCH_FILE at a
+# standalone file for full control.
+#
+# *** WIRING STATUS *** (see argus/bench.py's "Wiring status" docstring
+# section and _WIRED_ROLES for the full explanation): only the
+# "system-generalist" entry of [bulk_reviewer] below is actually consulted
+# by a runner function today (argus.runners.run_system_reviewer). Every
+# other entry here -- the rest of [bulk_reviewer] (tests-and-docs, every
+# specialist-*) and all three [roles.*] tables -- parses and validates
+# exactly the same way, and bench.resolve() will happily resolve them (with
+# a logged warning), but NO runner calls resolve() for them yet: those
+# reviewers still call argus.runners._run_session_isolated directly with a
+# hardcoded model. Overriding any of THOSE keys below currently has NO
+# effect on a real review run. This is deliberate, incremental scope, not
+# an oversight -- extend _WIRED_ROLES in argus/bench.py as each runner is
+# migrated to route through the bench.
+
+[bulk_reviewer]
+# Applies as one unit to run_system_reviewer (per system group, including
+# gap-fill reviewers), every named specialist, and the tests-and-docs
+# reviewer. Each of those still resolves its own existing prompt file.
+# NOTE: of the roles that route through this table, only
+# "system-generalist" is wired to a runner today -- see WIRING STATUS above.
+platform = "claude-sdk"
+model    = "claude-default"
+caching  = "auto"
+
+# NOTE: none of the three [roles.*] tables below are wired to a runner yet
+# -- see WIRING STATUS above. They parse, validate, and resolve, but
+# overriding them has no effect on a real review run until their runner
+# functions (run_cross_cutting_reviewer, run_blocking_validator,
+# run_feedback_verifier) are migrated to call bench.resolve().
+
+[roles.cross-cutting]
+platform    = "claude-sdk"
+# Opus, not frontier (Fable): matches argus.runners._CROSS_CUTTING_MODEL --
+# evals showed no measurable quality gain from frontier on this stage, at
+# ~2x the per-token cost.
+model       = "claude-opus"
+prompt_name = "pr-review-cross-cutting"
+caching     = "auto"
+
+[roles.blocking-validator]
+platform    = "claude-sdk"
+model       = "claude-default"
+prompt_name = "pr-review-blocking-validator"
+caching     = "auto"
+
+[roles.feedback-verifier]
+platform    = "claude-sdk"
+model       = "claude-default"
+prompt_name = "pr-review-feedback-verifier"
+caching     = "auto"
