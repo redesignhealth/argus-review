@@ -129,12 +129,17 @@ class TestResolveOverrides:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import importlib
+        import os
         import argus.llm.models as models
 
+        orig = os.environ.get("ARGUS_SPECIALIST_MODEL")
         monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-opus-5")
         importlib.reload(models)
         try:
             assert models.resolve("claude-default") == "claude-opus-5"
         finally:
-            monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+            if orig is not None:
+                monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", orig)
+            else:
+                monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
             importlib.reload(models)

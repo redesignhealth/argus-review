@@ -1243,24 +1243,3 @@ class TestGeminiRedactionHooks:
         inputs = {"label": "test"}
         redacted = _redact_gemini_inputs(inputs)
         assert redacted == {"label": "test"}
-
-    async def test_redact_gemini_outputs(self) -> None:
-        from argus.gemini_runner import _redact_gemini_outputs
-        from argus.runners import SessionResult
-
-        res = SessionResult(
-            result_text="secret findings",
-            cost_usd=1.23,
-            duration_seconds=10.0,
-            started_at=datetime.now(timezone.utc),
-            finished_at=datetime.now(timezone.utc),
-            tool_call_count=2,
-            tool_names=["read_file"],
-            context7_call_count=0,
-            model="gemini-frontier",
-            failure_reason=None,
-        )
-        redacted = _redact_gemini_outputs(res)
-        assert redacted["model"] == "gemini-frontier"
-        assert redacted["cost_usd"] == 1.23
-        assert "result_text" not in redacted

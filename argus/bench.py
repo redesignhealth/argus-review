@@ -249,8 +249,8 @@ def load_bench() -> dict[str, Any]:
 
 def clear_cache() -> None:
     """Clear the cached bench config, forcing the next call to reload."""
-    load_bench.cache_clear()
     with _WARNED_ROLES_LOCK:
+        load_bench.cache_clear()
         _WARNED_ROLES.clear()
 
 

@@ -844,15 +844,21 @@ async def _run_turns(
         # `_maybe_activate_cache`) -- close both on every exit path,
         # including a timeout/cancellation unwinding through this `finally`,
         # or connections leak across the concurrent reviewer fan-out.
-        # Combine into a single shielded gather so both run to completion
-        # even under cancellation.
-        await asyncio.shield(asyncio.gather(asyncio.to_thread(client.close), client.aio.aclose()))
+        # Combine into a single shielded gather with return_exceptions=True
+        # so an error in one close does not abort the other.
+        await asyncio.shield(
+            asyncio.gather(
+                asyncio.to_thread(client.close),
+                client.aio.aclose(),
+                return_exceptions=True,
+            )
+        )
 
 
 def _redact_gemini_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:
     """LangSmith ``process_inputs`` hook: redact credentials from Settings."""
     if not isinstance(inputs, dict):
-        return inputs
+        return {}
     s = inputs.get("settings")
     if s is not None:
         return {
@@ -862,25 +868,7 @@ def _redact_gemini_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:
     return dict(inputs)
 
 
-def _redact_gemini_outputs(outputs: Any, **_: Any) -> dict[str, Any]:
-    """LangSmith ``process_outputs`` hook: emit metadata without dumping full text."""
-    if isinstance(outputs, SessionResult):
-        return {
-            "model": outputs.model,
-            "tool_call_count": outputs.tool_call_count,
-            "tool_names": outputs.tool_names,
-            "cost_usd": outputs.cost_usd,
-            "duration_seconds": outputs.duration_seconds,
-            "failure_reason": outputs.failure_reason,
-        }
-    return {"result": "<redacted>"}
-
-
-@traceable(
-    name="pr_review.gemini_session",
-    process_inputs=_redact_gemini_inputs,
-    process_outputs=_redact_gemini_outputs,
-)
+@traceable(name="pr_review.gemini_session", process_inputs=_redact_gemini_inputs)
 async def run_session_gemini(
     *,
     entry: BenchEntry,
