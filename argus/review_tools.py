@@ -66,7 +66,6 @@ before slicing it.
 from __future__ import annotations
 
 import contextlib
-import itertools
 import re
 import signal
 import threading
@@ -273,14 +272,20 @@ def glob_files(pattern: str) -> str:
     root_path = Path(root)
     matches: list[str] = []
     truncated = False
-    for candidate in itertools.islice(root_path.glob(pattern), _MAX_GLOB_CANDIDATES):
+    candidates_count = 0
+    for candidate in root_path.glob(pattern):
+        candidates_count += 1
         if candidate.is_file() and _is_within_root(candidate, root_path):
             matches.append(str(candidate.relative_to(root_path)))
-            if len(matches) >= _MAX_GLOB_RESULTS:
-                truncated = True
-                break
+        if candidates_count >= _MAX_GLOB_CANDIDATES:
+            truncated = True
+            break
 
     matches.sort()
+    if len(matches) > _MAX_GLOB_RESULTS:
+        matches = matches[:_MAX_GLOB_RESULTS]
+        truncated = True
+
     result = "\n".join(matches)
     if truncated:
         result += f"\n... results capped at {_MAX_GLOB_RESULTS} matches"
@@ -312,10 +317,8 @@ def _grep_alarm(timeout_seconds: float) -> Iterator[None]:
     try:
         yield
     finally:
-        try:
-            signal.signal(signal.SIGALRM, old_handler)
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def _grep_scan(
@@ -331,9 +334,15 @@ def _grep_scan(
     content_hits: list[str] = []
     scanned = 0
 
-    candidates = list(itertools.islice(root_path.glob(glob), _MAX_GREP_FILES_SCANNED * 2))
-    candidates.sort()
-    for candidate in candidates:
+    valid_files: list[Path] = []
+    for candidate in root_path.glob(glob):
+        if candidate.is_file() and _is_within_root(candidate, root_path):
+            valid_files.append(candidate)
+            if len(valid_files) >= _MAX_GREP_FILES_SCANNED:
+                break
+    valid_files.sort()
+
+    for candidate in valid_files:
         if scanned >= _MAX_GREP_FILES_SCANNED:
             break
         if not candidate.is_file() or not _is_within_root(candidate, root_path):

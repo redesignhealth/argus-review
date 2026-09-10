@@ -23,7 +23,7 @@ import pytest
 from argus import bench
 from argus import runners as runners_module
 from argus.config import clear_cache as clear_settings_cache
-from argus.llm.models import resolve as resolve_alias
+from argus.llm.models import CLAUDE_DEFAULT, resolve as resolve_alias
 
 
 @pytest.fixture(autouse=True)
@@ -391,6 +391,25 @@ class TestResolveWiringStatusWarning:
         all_roles = set(bench.BULK_ROLE_PROMPTS) | set(raw.get("roles", {}))
         assert bench._WIRED_ROLES <= all_roles
 
+    def test_load_bench_warns_on_unwired_overlay_role(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        overlay = tmp_path / ".argus" / "bench.toml"
+        _write_toml(
+            overlay,
+            """
+            [roles.cross-cutting]
+            platform = "claude-sdk"
+            model = "claude-opus"
+            prompt_name = "pr-review-cross-cutting"
+            """,
+        )
+        monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+        bench.clear_cache()
+        with caplog.at_level("WARNING", logger="argus.bench"):
+            bench.load_bench()
+        assert "cross-cutting" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # Platform runners
@@ -434,7 +453,7 @@ class TestPlatformRunners:
 
         assert result == "session-result-sentinel"
         mock_isolated.assert_called_once_with(
-            model=resolve_alias("claude-default"),
+            model=CLAUDE_DEFAULT,
             system_prompt="sys",
             user_message="msg",
             anthropic_api_key="key",

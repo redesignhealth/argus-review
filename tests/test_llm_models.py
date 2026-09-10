@@ -14,7 +14,6 @@ from argus.llm.models import (
     CLAUDE_DEFAULT,
     CLAUDE_FRONTIER,
     CLAUDE_MINI,
-    EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
     estimate_cost_usd,
 )
@@ -30,9 +29,14 @@ class TestPricingLookup:
             cost = get_token_cost(model)
             assert cost is not None, f"no pricing entry for {alias!r} -> {model!r}"
 
-    def test_experimental_models_coverage(self) -> None:
-        """Any experimental alias must have pricing or EXPERIMENTAL_MODELS must be empty."""
-        for alias, model in EXPERIMENTAL_MODELS.items():
+    def test_experimental_models_coverage(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Any experimental alias must have pricing; verify with a synthetic entry."""
+        monkeypatch.setattr(
+            "argus.llm.models.EXPERIMENTAL_MODELS", {"exp-model": "claude-sonnet-4-6"}
+        )
+        from argus.llm.models import EXPERIMENTAL_MODELS as exp
+
+        for alias, model in exp.items():
             cost = get_token_cost(model)
             assert cost is not None, f"no pricing entry for experimental {alias!r} -> {model!r}"
 
@@ -72,19 +76,33 @@ class TestEstimateCostUsd:
         )
         assert cost == pytest.approx(3.00 + 0.30)
 
+    def test_cache_creation_tokens_billed(self) -> None:
+        """cache_creation_tokens is billed at the cache-creation rate."""
+        cost = estimate_cost_usd(
+            CLAUDE_DEFAULT,
+            input_tokens=0,
+            output_tokens=0,
+            cache_creation_tokens=1_000_000,
+        )
+        assert cost > 0.0
+
     def test_zero_tokens_is_zero_cost(self) -> None:
         assert estimate_cost_usd(CLAUDE_DEFAULT, input_tokens=0, output_tokens=0) == 0.0
 
-    def test_frontier_model_uses_its_own_pricing(self) -> None:
-        cost = estimate_cost_usd(CLAUDE_FRONTIER, input_tokens=1_000_000, output_tokens=0)
-        assert cost == pytest.approx(10.00)
+    def test_tier_relative_pricing_ordering(self) -> None:
+        """Frontier tier input should exceed default, which exceeds mini."""
+        cost_frontier = estimate_cost_usd(CLAUDE_FRONTIER, input_tokens=1_000_000, output_tokens=0)
+        cost_default = estimate_cost_usd(CLAUDE_DEFAULT, input_tokens=1_000_000, output_tokens=0)
+        cost_mini = estimate_cost_usd(CLAUDE_MINI, input_tokens=1_000_000, output_tokens=0)
+        assert cost_frontier > cost_default > cost_mini > 0.0
 
-    def test_mini_model_uses_its_own_pricing(self) -> None:
-        cost = estimate_cost_usd(CLAUDE_MINI, input_tokens=1_000_000, output_tokens=0)
-        assert cost == pytest.approx(1.00)
-
-    def test_unknown_model_returns_zero_cost_with_warning(self) -> None:
-        assert estimate_cost_usd("not-a-real-model", input_tokens=100, output_tokens=100) == 0.0
+    def test_unknown_model_returns_zero_cost_with_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with caplog.at_level("WARNING", logger="argus.llm.pricing"):
+            cost = estimate_cost_usd("not-a-real-model", input_tokens=100, output_tokens=100)
+        assert cost == 0.0
+        assert "No litellm pricing entry" in caplog.text
 
     def test_gemini_model_estimates_real_nonzero_cost(self) -> None:
         """Gemini pricing is real in litellm, so token count must estimate

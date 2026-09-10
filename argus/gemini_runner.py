@@ -367,7 +367,7 @@ def _execute_tool_call(name: str, args: dict[str, Any]) -> tuple[str, bool]:
     try:
         return str(fn(**args)), False
     except Exception as exc:  # noqa: BLE001 - LLM-supplied call, must never crash the loop
-        logger.warning("Tool call error %s(%r): %s", name, args, exc)
+        logger.warning("Tool call error %s(%s): %s", name, repr(args)[:300], exc)
         return f"Error calling {name}({args!r}): {exc}", True
 
 
@@ -648,6 +648,7 @@ async def _run_turns(
         usage_cached_total = 0
         usage_thoughts_total = 0
         usage_tool_use_prompt_total = 0
+        usage_cache_creation_total = 0
 
         with review_tools.review_session(repo_root) as findings_sink:
             for _turn in range(_MAX_TURNS):
@@ -663,11 +664,13 @@ async def _run_turns(
                     # uncached, rather than failing the whole session.
                     if cached_content_name is None or not _is_cache_invalid_error(exc):
                         logger.error(
-                            "Gemini generate_content failed [%s] (role=%s, model=%s): %s",
+                            "Gemini generate_content failed [%s] (role=%s, model=%s, turn=%d): %s",
                             label or "unlabeled",
                             entry.role if entry else "unknown",
                             model,
+                            _turn,
                             exc,
+                            exc_info=True,
                         )
                         raise
                     logger.warning(
@@ -800,21 +803,26 @@ async def _run_turns(
         # input rate AND the cache-read rate. tool_use_prompt tokens are
         # billed at the input rate (added in); thoughts tokens are billed
         # at the output rate (added in) -- see the accumulation loop above.
+        input_tokens = max(usage_prompt_total - usage_cached_total, 0) + usage_tool_use_prompt_total
+        output_tokens = usage_candidates_total + usage_thoughts_total
         cost_usd = estimate_cost_usd(
             model=model,
-            input_tokens=max(usage_prompt_total - usage_cached_total, 0)
-            + usage_tool_use_prompt_total,
-            output_tokens=usage_candidates_total + usage_thoughts_total,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
             cached_input_tokens=usage_cached_total,
+            cache_creation_tokens=usage_cache_creation_total,
         )
 
         tools_str = f" (tools: {', '.join(unique_tool_names)})" if tool_calls else ""
         logger.info(
-            "Gemini agent done [%s]: %d tool calls%s, cost=$%.4f",
+            "Gemini agent done [%s]: %d tool calls%s, cost=$%.4f input_tokens=%d cached_tokens=%d output_tokens=%d",
             label or "unlabeled",
             len(tool_calls),
             tools_str,
             cost_usd,
+            input_tokens,
+            usage_cached_total,
+            output_tokens,
         )
 
         return SessionResult(
@@ -837,11 +845,21 @@ async def _run_turns(
         # `_maybe_activate_cache`) -- close both on every exit path,
         # including a timeout/cancellation unwinding through this `finally`,
         # or connections leak across the concurrent reviewer fan-out.
-        await asyncio.to_thread(client.close)
-        await client.aio.aclose()
+        # Use asyncio.shield so re-delivered cancellation cannot abort cleanup.
+        await asyncio.shield(asyncio.to_thread(client.close))
+        await asyncio.shield(client.aio.aclose())
 
 
-@traceable(name="pr_review.gemini_session")
+def _redact_gemini_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:
+    """LangSmith ``process_inputs`` hook: redact credentials from Settings."""
+    s = inputs.get("settings")
+    return {
+        **inputs,
+        "settings": f"<Settings project={getattr(s, 'LANGSMITH_PROJECT', '?')}>",
+    }
+
+
+@traceable(name="pr_review.gemini_session", process_inputs=_redact_gemini_inputs)
 async def run_session_gemini(
     *,
     entry: BenchEntry,

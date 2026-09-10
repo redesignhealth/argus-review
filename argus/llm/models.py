@@ -184,12 +184,20 @@ __all__ = [
 
 
 def resolve(alias: str) -> str:
-    """Resolve a model alias to its concrete model name.
+    """Resolve a model alias to its concrete model name, honoring runtime overrides.
 
     Raises ``KeyError`` if the alias is not registered, so typos fail loudly
     rather than silently routing to a wrong model.
     """
-    return ALIAS_MAP[alias]
+    if alias not in ALIAS_MAP:
+        raise KeyError(alias)
+    _override_constants: dict[str, str] = {
+        "claude-default": CLAUDE_DEFAULT,
+        "claude-frontier": CLAUDE_FRONTIER,
+        "claude-opus": CLAUDE_OPUS,
+        "claude-mini": CLAUDE_MINI,
+    }
+    return _override_constants.get(alias, ALIAS_MAP[alias])
 
 
 def build_chat_model(alias: str) -> Any:

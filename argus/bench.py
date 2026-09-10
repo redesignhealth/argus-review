@@ -219,6 +219,9 @@ def _overlay_layers(settings: Any) -> list[Path]:
     return layers
 
 
+_WARNED_ROLES: set[str] = set()
+
+
 @lru_cache(maxsize=1)
 def load_bench() -> dict[str, Any]:
     """Load, merge, and validate the effective bench config.
@@ -232,6 +235,9 @@ def load_bench() -> dict[str, Any]:
     if not settings.ARGUS_NO_BENCH_OVERRIDES:
         for layer_path in _overlay_layers(settings):
             overlay = _load_toml_file(layer_path)
+            if "bulk_reviewer" in overlay:
+                for role in BULK_ROLE_PROMPTS:
+                    _warn_if_not_wired(role)
             roles = overlay.get("roles", {})
             if isinstance(roles, dict):
                 for role in roles:
@@ -245,6 +251,7 @@ def load_bench() -> dict[str, Any]:
 def clear_cache() -> None:
     """Clear the cached bench config, forcing the next call to reload."""
     load_bench.cache_clear()
+    _WARNED_ROLES.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +362,7 @@ def _validate_raw_bench(raw: dict[str, Any]) -> None:
 
 
 def _warn_if_not_wired(role: str) -> None:
-    """Log a loud warning when resolving a role no runner consults yet.
+    """Log a loud warning when configuring or resolving a role no runner consults yet.
 
     See this module's "Wiring status" docstring section and
     ``_WIRED_ROLES``: a caller CAN resolve (and override, via bench.toml)
@@ -364,13 +371,13 @@ def _warn_if_not_wired(role: str) -> None:
     overriding anything else silently has no effect on a real review run
     unless this warning is here to say otherwise.
     """
-    if role not in _WIRED_ROLES:
+    if role not in _WIRED_ROLES and role not in _WARNED_ROLES:
+        _WARNED_ROLES.add(role)
         logger.warning(
-            "bench.resolve(%r): no runner function calls bench.resolve() for "
-            "this role yet, so overriding it in a bench.toml layer has NO "
-            "effect on an actual review run. See argus.bench's module "
-            "docstring ('Wiring status') and _WIRED_ROLES for the roles "
-            "that are currently wired.",
+            "bench: role %r is not yet wired to any runner function, "
+            "so configuring it in bench.toml has NO effect on an actual "
+            "review run. See argus.bench's module docstring ('Wiring status') "
+            "and _WIRED_ROLES for the roles that are currently wired.",
             role,
         )
 
@@ -456,19 +463,18 @@ async def _claude_sdk_runner(
     body, not module level) to avoid a circular import: ``argus.runners``
     imports this module to call ``resolve``/``runner_for``.
     """
-    from argus.llm.models import CLAUDE_DEFAULT, resolve as resolve_model_alias
+    from argus.llm.models import resolve as resolve_model_alias
     from argus.runners import _run_session_isolated
 
     if entry.caching != "auto":
-        logger.debug(
-            "_claude_sdk_runner: caching=%r is ignored for platform='claude-sdk' "
-            "(caching is managed natively by the Claude Agent SDK)",
+        logger.warning(
+            "bench: caching=%r is set for role %r but claude-sdk runner does not "
+            "use explicit caching; setting ignored",
             entry.caching,
+            entry.role,
         )
 
-    # When entry requests the default model alias, use the env-override-aware
-    # CLAUDE_DEFAULT so ARGUS_SPECIALIST_MODEL is preserved.
-    model = CLAUDE_DEFAULT if entry.model == "claude-default" else resolve_model_alias(entry.model)
+    model = resolve_model_alias(entry.model)
 
     return await _run_session_isolated(
         model=model,
