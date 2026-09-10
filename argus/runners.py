@@ -1554,7 +1554,32 @@ async def _run_claude_session(
     #     overrides can make ambiguous. Only the caller genuinely knows its
     #     own role; passing that decision down explicitly is the only fix
     #     that can't be defeated by a future override collision.
-    _attach_1m_context_beta = is_system_reviewer_role and _SYSTEM_REVIEWER_UNOVERRIDDEN
+    #
+    # A live dogfood round found a further gap in the role-only gate above:
+    # `run_system_reviewer` (the only caller that routes through
+    # `argus.bench` today) always passes `is_system_reviewer_role=True`
+    # regardless of what `bench.toml` actually resolved `model` to --
+    # `[bulk_reviewer].model` can point "system-generalist" at ANY alias
+    # (e.g. `claude-opus`, `claude-mini`, a future `EXPERIMENTAL_MODELS`
+    # pin), and this beta was only ever empirically verified against the
+    # sonnet-tier `claude-default` pin (see the probe above). Gating on
+    # role alone would silently attach an unverified-for-that-model beta
+    # to whatever a bench override picked. Re-adding a plain
+    # `model == _SYSTEM_REVIEWER_MODEL` comparison does NOT reintroduce
+    # the collision risk described above, because it's ANDed with
+    # `is_system_reviewer_role` here, not evaluated alone: the
+    # cross-cutting call site always passes `is_system_reviewer_role=False`
+    # and short-circuits before this comparison is ever reached, so an
+    # accidental `_CROSS_CUTTING_MODEL == _SYSTEM_REVIEWER_MODEL` value
+    # collision (e.g. via --frontier-model) still can't leak the beta onto
+    # cross-cutting. This closes the bench-override gap for the ONE
+    # caller that can currently reach it, whether the model got here via
+    # the default no-override path or an explicit bench.toml override.
+    _attach_1m_context_beta = (
+        is_system_reviewer_role
+        and _SYSTEM_REVIEWER_UNOVERRIDDEN
+        and model == _SYSTEM_REVIEWER_MODEL
+    )
     # Logged once at module import time (see _SYSTEM_REVIEWER_UNOVERRIDDEN's
     # definition above), not per-call here: this decision is fixed for the
     # whole process, so a per-session log would just repeat the same fact

@@ -143,3 +143,45 @@ class TestResolveOverrides:
             else:
                 monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
             importlib.reload(models)
+
+
+class TestResolveExperimentalModels:
+    """Regression guard: argus.bench's ``_VALID_MODEL_ALIASES`` accepts any
+    ``EXPERIMENTAL_MODELS`` key as a valid bench ``model`` value, so
+    ``resolve()`` must actually be able to turn one into a concrete model
+    string too -- otherwise a bench config that validates cleanly at load
+    time could still raise ``KeyError`` the first time that role runs.
+    """
+
+    def test_experimental_model_alias_resolves_to_its_concrete_model(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import argus.llm.models as models
+
+        monkeypatch.setattr(models, "EXPERIMENTAL_MODELS", {"exp-model": "claude-opus-6-preview"})
+
+        assert models.resolve("exp-model") == "claude-opus-6-preview"
+
+    def test_experimental_model_alias_does_not_raise_keyerror(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The specific failure mode reported: an accepted (validated) bench
+        config still blew up with KeyError the first time the role was
+        actually used, because resolve() only ever consulted ALIAS_MAP."""
+        import argus.llm.models as models
+
+        monkeypatch.setattr(models, "EXPERIMENTAL_MODELS", {"exp-model": "gemini-4-preview"})
+
+        try:
+            result = models.resolve("exp-model")
+        except KeyError:
+            pytest.fail("resolve() raised KeyError for a declared EXPERIMENTAL_MODELS alias")
+        assert result == "gemini-4-preview"
+
+    def test_still_raises_keyerror_for_truly_unknown_alias(self) -> None:
+        """Unregistered in both ALIAS_MAP and EXPERIMENTAL_MODELS -> still a
+        loud failure, not a silent pass-through."""
+        from argus.llm.models import resolve
+
+        with pytest.raises(KeyError):
+            resolve("not-a-real-alias-anywhere")

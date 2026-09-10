@@ -47,32 +47,58 @@ scanned, and the number of results returned, so a huge glob match set
 can't blow up memory in a caller that can't bound its own input (an
 LLM-supplied tool call). It additionally guards against a pathological/
 catastrophic-backtracking regex with a wall-clock time budget
-(``_GREP_TIMEOUT_SECONDS``), enforced via ``signal.SIGALRM`` when running
-on the main thread -- confirmed empirically to interrupt a hung
-``re.Pattern.search()`` call promptly, unlike a plain
-``threading.Thread.join(timeout=...)`` watchdog, which CANNOT preempt it:
-CPython's regex engine holds the GIL for the whole backtracking loop
-without yielding, so a second thread waiting on ``join()`` never gets
-scheduled until the pathological call itself returns. ``SIGALRM`` is
-main-thread-only (a Python/POSIX constraint, not a design choice here),
-so a caller invoking ``grep`` from a non-main thread gets no per-call
-interrupt -- the pattern-length/files-scanned/file-size/results caps
-above are what bound that case instead. ``read_file`` rejects a file
-above a size cap outright and streams line-by-line up to a hard cap on
-lines returned, rather than materializing the whole file in memory
-before slicing it.
+(``_GREP_TIMEOUT_SECONDS``), enforced two ways:
+
+- On the main thread, ``signal.SIGALRM`` wraps the whole scan --
+  confirmed empirically to interrupt a hung match promptly, unlike a
+  plain ``threading.Thread.join(timeout=...)`` watchdog, which CANNOT
+  preempt it: stdlib ``re``'s matching engine holds the GIL for the
+  whole backtracking loop without yielding, so a second thread waiting
+  on ``join()`` never gets scheduled until the pathological call itself
+  returns. ``SIGALRM`` is main-thread-only (a Python/POSIX constraint,
+  not a design choice here).
+- On EVERY thread, including a non-main worker thread (e.g. the
+  ``asyncio.to_thread`` worker ``argus.gemini_runner`` dispatches tool
+  calls onto -- ``SIGALRM`` is unreachable there, a real regression an
+  earlier round introduced by moving blocking tool execution off the
+  event loop without re-examining this watchdog), the actual pattern
+  matching in ``_grep_scan`` uses the third-party ``regex`` package
+  (not stdlib ``re``) specifically for its ``timeout=`` support on
+  ``Pattern.search()``: ``regex``'s own C matching loop periodically
+  checks elapsed wall-clock time against that argument and raises
+  ``TimeoutError`` itself from *within* the matching call, which is a
+  cooperative check inside the loop, not a signal delivered to a
+  thread from outside -- so it works identically regardless of which
+  thread calls it. ``_grep_scan`` computes a single absolute deadline
+  once per ``grep()`` call and passes the shrinking remaining budget to
+  each successive ``regex.Pattern.search()`` call, so the aggregate
+  wall time across an entire multi-file scan is bounded by
+  ``_GREP_TIMEOUT_SECONDS`` regardless of thread -- not just each
+  individual line's match. On the main thread this runs alongside (not
+  instead of) the ``SIGALRM`` wrapper above, as a second, redundant
+  layer of defense; off the main thread, it is the ONLY layer, and
+  closes the exact gap the pattern-length/files-scanned/file-size/
+  results caps alone cannot: those bound total data volume, not the
+  time complexity of a single catastrophic match against one line
+  (empirically, stdlib ``re`` can take 40+ seconds backtracking over a
+  40-character adversarial line -- far below every size cap above).
+  ``read_file`` rejects a file above a size cap outright and streams
+  line-by-line up to a hard cap on lines returned, rather than
+  materializing the whole file in memory before slicing it.
 """
 
 from __future__ import annotations
 
 import contextlib
-import re
 import signal
 import threading
+import time
 from collections.abc import Iterator
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
+
+import regex
 
 from argus.helpers import sanitize_file_paths
 
@@ -322,13 +348,23 @@ def _grep_alarm(timeout_seconds: float) -> Iterator[None]:
 
 
 def _grep_scan(
-    regex: re.Pattern[str], root_path: Path, glob: str, mode: str
+    compiled: regex.Pattern[str], root_path: Path, glob: str, mode: str, deadline: float
 ) -> tuple[list[str], list[str]]:
     """The actual glob-and-match loop.
 
     Enforces the total-files-scanned, per-file-size, and total-results
     caps, and skips any glob match whose real path escapes ``root_path``
     (symlink escape -- see ``_is_within_root``).
+
+    ``deadline`` is an absolute ``time.monotonic()`` timestamp the whole
+    scan must not run past. Enforced per line via the ``regex`` package's
+    own ``timeout=`` support on ``Pattern.search()`` -- passed the
+    shrinking remaining budget on every call, so the total time spent
+    across every file/line in this scan is bounded by the caller's
+    original budget, not just each individual match. This works
+    regardless of which thread calls it (see ``grep``'s docstring and the
+    module docstring's "Resource limits" section for why that matters and
+    why it's `regex`, not stdlib `re`).
     """
     file_hits: list[str] = []
     content_hits: list[str] = []
@@ -358,7 +394,14 @@ def _grep_scan(
         rel = str(candidate.relative_to(root_path))
         matched = False
         for lineno, line in enumerate(text.splitlines(), start=1):
-            if regex.search(line):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"grep exceeded its {_GREP_TIMEOUT_SECONDS}s time budget; the "
+                    "pattern may be pathologically slow to match -- narrow it and "
+                    "try again."
+                )
+            if compiled.search(line, timeout=remaining):
                 matched = True
                 if mode == "content":
                     content_hits.append(f"{rel}:{lineno}: {line}")
@@ -386,20 +429,23 @@ def grep(pattern: str, glob: str = "**/*", mode: str = "files") -> str:
     ``pattern`` is capped at ``_MAX_GREP_PATTERN_LENGTH`` characters; at
     most ``_MAX_GREP_FILES_SCANNED`` files are scanned and files over
     ``_MAX_GREP_FILE_SIZE_BYTES`` are skipped; results are capped at
-    ``_MAX_GREP_RESULTS`` entries; and, when called from the main thread,
-    the scan runs under a ``_GREP_TIMEOUT_SECONDS`` ``SIGALRM`` wall-clock
-    budget, so a catastrophic-backtracking regex raises instead of hanging
-    the caller forever. See ``_grep_alarm`` for why this needs to be a
-    real signal rather than a thread-based watchdog, and why it only
-    applies on the main thread.
+    ``_MAX_GREP_RESULTS`` entries; and the scan runs under a
+    ``_GREP_TIMEOUT_SECONDS`` wall-clock budget on EVERY thread (enforced
+    via the ``regex`` package's own per-call ``timeout=``, plus a
+    redundant ``SIGALRM`` wrapper when called from the main thread), so a
+    catastrophic-backtracking pattern raises instead of hanging the
+    caller forever -- see this module's docstring ("Resource limits") and
+    ``_grep_alarm``/``_grep_scan`` for the full mechanism, including why
+    it needed to change from a main-thread-only signal to something that
+    also works from a worker thread (e.g. ``asyncio.to_thread``).
 
     Raises:
         NoActiveReviewSessionError: if called outside a ``review_session``.
         ValueError: if ``mode`` is unrecognized, ``glob`` is absolute or
             contains ``".."``, or ``pattern`` exceeds the length cap.
-        re.error: if ``pattern`` is not a valid regular expression.
-        TimeoutError: if the scan exceeds ``_GREP_TIMEOUT_SECONDS`` (only
-            enforceable when called from the main thread; see above).
+        regex.error: if ``pattern`` is not a valid regular expression.
+        TimeoutError: if the scan exceeds ``_GREP_TIMEOUT_SECONDS``,
+            regardless of which thread called ``grep``.
     """
     if mode not in _VALID_GREP_MODES:
         raise ValueError(f"Unknown grep mode {mode!r}; must be one of {sorted(_VALID_GREP_MODES)}")
@@ -413,17 +459,19 @@ def grep(pattern: str, glob: str = "**/*", mode: str = "files") -> str:
     _reject_traversal_pattern(glob, "glob")
 
     root_path = Path(root)
-    regex = re.compile(pattern)
+    compiled = regex.compile(pattern)
+    deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
 
     if hasattr(signal, "SIGALRM") and threading.current_thread() is threading.main_thread():
+        # Redundant with the regex-level `timeout=` deadline threaded
+        # through `_grep_scan` below (see that function's docstring) --
+        # kept as a second, main-thread-only layer of defense rather than
+        # removed, since it's already proven reliable there and costs
+        # nothing extra to keep.
         with _grep_alarm(_GREP_TIMEOUT_SECONDS):
-            file_hits, content_hits = _grep_scan(regex, root_path, glob, mode)
+            file_hits, content_hits = _grep_scan(compiled, root_path, glob, mode, deadline)
     else:
-        # SIGALRM is POSIX-only and main-thread-only. Off the main thread
-        # (or on a platform without it), we fall back to no hard wall-clock
-        # interrupt -- the pattern-length/files-scanned/file-size/results
-        # caps above are what bound this case instead.
-        file_hits, content_hits = _grep_scan(regex, root_path, glob, mode)
+        file_hits, content_hits = _grep_scan(compiled, root_path, glob, mode, deadline)
 
     return "\n".join(content_hits if mode == "content" else file_hits)
 

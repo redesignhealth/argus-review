@@ -11,6 +11,28 @@ reviewer, only a shared design (explicit context caching via
 tools in ``argus.review_tools``, and the same ``SessionResult`` contract
 ``argus.runners`` already defines for the Claude Agent SDK path).
 
+NOTE on raw-SDK usage vs. D024 ("no unwrapped LLM client" per RH's
+internal ``llm-pipelines.md`` guidance, which some of THIS repo's own
+packaged review prompts -- e.g. ``pr-review-specialist-llm-patterns.md``
+-- enforce against code Argus reviews): calling ``google.genai`` directly
+here, instead of through ``litellm`` or RH's internal ``rh-lib`` LLM
+wrappers, is intentional, not an oversight this repo's own dogfooding
+should flag against itself. ``argus-review`` is a public, Apache-2.0 OSS
+package (see ``pyproject.toml``'s ``license``) that deliberately does NOT
+depend on or vendor ``rh-lib`` -- a private, RH-internal package under a
+different (non-public) license with no public distribution grant or
+semver guarantee. ``.github/workflows/ci.yml``'s ``guard-rh-lib`` job enforces exactly
+this: it fails the build on any reference to that package's underscored
+import name appearing in ``argus/**/*.py`` or ``tests/**/*.py`` (this
+docstring deliberately avoids spelling that literal string here, so as
+not to trip its own grep). D024 is a policy this repo's own
+prompts apply to the RH-internal codebases Argus reviews; it was never
+adopted as a rule this repo enforces against its own source, and no such
+check (ruff rule, mypy plugin, or otherwise) exists here today -- so
+there is no real suppression marker to add. ``argus.openai_client``'s
+raw ``openai`` SDK usage is the same pre-existing pattern for the same
+reason.
+
 Architecture, in one paragraph: build the five ``argus.review_tools``
 functions into Gemini ``FunctionDeclaration``s, open one
 ``argus.review_tools.review_session`` for the sandboxed worktree root,
@@ -955,4 +977,57 @@ async def run_session_gemini(
             context7_call_count=0,
             model=model,
             failure_reason="timeout",
+        )
+    except (genai_errors.APIError, httpx.HTTPError) as exc:
+        # A genuine, non-timeout SDK/transport failure -- a real API error
+        # (auth rejection, rate limit, malformed request, 5xx) via
+        # `google.genai.errors.APIError` (the SDK's own base for
+        # `ClientError`/`ServerError`), or a lower-level transport failure
+        # (connection reset, DNS failure, protocol error -- anything that
+        # isn't itself a timeout) via `httpx.HTTPError`. `httpx.TimeoutException`
+        # is a subclass of `httpx.HTTPError`, but the more specific except
+        # clause above already claims it first, so it can never reach here.
+        #
+        # Deliberately narrower than a bare `except Exception`: a genuine bug
+        # in THIS module's own code (a `TypeError`/`AttributeError` from a
+        # programming error, say) is NOT caught here and still propagates,
+        # rather than being silently relabeled as an ordinary session
+        # failure -- see this function's module-level docstring section
+        # this except clause was added to fix for the full rationale.
+        #
+        # Before this except clause existed, only timeout exceptions were
+        # translated into a clean SessionResult; every other exception
+        # propagated all the way up to `graph.py`'s blanket per-reviewer
+        # exception handling, which swallows it into a 0-finding,
+        # `failure_reason=None` result -- indistinguishable from "this
+        # reviewer ran fine and genuinely found nothing," with zero visible
+        # signal that anything went wrong. Reuses the existing
+        # `"worker_crashed"` failure_reason value (already a valid member of
+        # `SessionResult.failure_reason`'s Literal type, and of the Postgres/
+        # SQLite `agent_runs.failure_reason` CHECK constraints) rather than
+        # introducing a new value that would need a new DB migration on both
+        # storage backends -- the exact distinction that value already
+        # exists to carry ("this session did not complete or produce a
+        # trustworthy result, for a reason other than timeout") applies
+        # identically here, even though this runner has no literal
+        # subprocess "worker" the way the Claude Agent SDK path does.
+        finished_at = datetime.now(timezone.utc)
+        logger.warning(
+            "Gemini session [%s] failed with a non-timeout error after %.1fs (%s: %s)",
+            label or "unlabeled",
+            (finished_at - started_at).total_seconds(),
+            type(exc).__name__,
+            exc,
+        )
+        return SessionResult(
+            result_text="",
+            cost_usd=0.0,
+            duration_seconds=(finished_at - started_at).total_seconds(),
+            started_at=started_at,
+            finished_at=finished_at,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model=model,
+            failure_reason="worker_crashed",
         )

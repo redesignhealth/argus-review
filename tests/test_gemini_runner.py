@@ -22,12 +22,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from google.genai import errors as genai_errors
-from google.genai import types
 
-from argus.bench import BenchEntry
-from argus.gemini_runner import run_session_gemini
-from argus.llm.models import resolve as resolve_alias
+# `google-genai` is an OPTIONAL dependency (`[project.optional-dependencies]
+# gemini`), not a hard one -- see test_argus_importable_without_gemini_extra
+# in tests/test_packaging.py. Skip this whole module cleanly (rather than
+# erroring out at collection time) when it isn't installed. This must run
+# before any other import that transitively pulls in `google.genai`,
+# including `argus.gemini_runner` itself.
+pytest.importorskip("google.genai")
+from google.genai import errors as genai_errors  # noqa: E402
+from google.genai import types  # noqa: E402
+
+from argus.bench import BenchEntry  # noqa: E402
+from argus.gemini_runner import run_session_gemini  # noqa: E402
+from argus.llm.models import resolve as resolve_alias  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
 
@@ -925,6 +933,134 @@ class TestHttpLevelTimeout:
 
 
 # ---------------------------------------------------------------------------
+# Non-timeout exceptions must produce a visible failure, not vanish
+# ---------------------------------------------------------------------------
+
+
+class TestNonTimeoutExceptionHandling:
+    """Regression coverage for a live-dogfood finding: before this fix,
+    ``run_session_gemini`` only caught timeout-shaped exceptions
+    (``TimeoutError``/``httpx.TimeoutException``); any other exception the
+    underlying ``google-genai`` SDK could realistically raise (a genuine API
+    error, a network/transport failure) propagated uncaught, and
+    ``argus.graph``'s blanket per-reviewer exception handling silently
+    turned it into an empty ``{"findings": [], "agent_runs": []}`` result --
+    indistinguishable from "this reviewer ran fine and found nothing."
+
+    Each test here simulates a specific non-timeout exception type the SDK
+    can realistically raise and asserts it now produces a *visible*
+    ``SessionResult`` (``failure_reason="worker_crashed"``, no findings,
+    no raised exception) instead of propagating or vanishing silently.
+    """
+
+    async def test_genai_server_error_produces_visible_failure_not_silent_result(self) -> None:
+        """A 5xx from the Gemini API itself (google.genai.errors.ServerError,
+        APIError's other concrete subclass alongside ClientError)."""
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+
+        server_error = genai_errors.ServerError(
+            503, {"message": "The model is overloaded", "status": "UNAVAILABLE"}
+        )
+        fake_client = MagicMock()
+        fake_client.aio.models.generate_content = AsyncMock(side_effect=server_error)
+        fake_client.aio.aclose = AsyncMock()
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                label="server-error-test",
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason == "worker_crashed"
+        assert result.result_text == ""
+        assert result.cost_usd == 0.0
+
+    async def test_genai_client_error_produces_visible_failure_not_silent_result(self) -> None:
+        """A 4xx (auth rejection, bad request, quota) with no cache in play
+        at all -- the most direct real-world "genuine API error" case."""
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+
+        client_error = genai_errors.ClientError(
+            401, {"message": "API key not valid", "status": "UNAUTHENTICATED"}
+        )
+        fake_client = MagicMock()
+        fake_client.aio.models.generate_content = AsyncMock(side_effect=client_error)
+        fake_client.aio.aclose = AsyncMock()
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                label="client-error-test",
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason == "worker_crashed"
+        assert result.result_text == ""
+
+    async def test_transport_level_connect_error_produces_visible_failure(self) -> None:
+        """A non-timeout httpx transport failure (connection reset, DNS
+        failure, etc.) -- httpx.ConnectError is a subclass of
+        httpx.HTTPError, not of httpx.TimeoutException, so this exercises a
+        genuinely different exception path than TestHttpLevelTimeout above."""
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+
+        fake_client = MagicMock()
+        fake_client.aio.models.generate_content = AsyncMock(
+            side_effect=httpx.ConnectError("connection refused")
+        )
+        fake_client.aio.aclose = AsyncMock()
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                label="connect-error-test",
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason == "worker_crashed"
+        assert result.result_text == ""
+
+    async def test_genuine_bug_still_propagates_rather_than_being_mislabeled(self) -> None:
+        """A real programming-error-shaped exception (not an SDK/transport
+        failure) must NOT be caught by this narrower except clause -- it
+        should still propagate, so a real bug in this module's own code
+        isn't silently relabeled as an ordinary session failure. Confirms
+        the fix is deliberately narrower than a bare ``except Exception``."""
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+
+        fake_client = MagicMock()
+        fake_client.aio.models.generate_content = AsyncMock(
+            side_effect=AttributeError("boom: not an SDK/transport failure")
+        )
+        fake_client.aio.aclose = AsyncMock()
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            with pytest.raises(AttributeError, match="boom"):
+                await run_session_gemini(
+                    entry=entry,
+                    system_prompt="sys",
+                    user_message="msg",
+                    settings=settings,
+                    label="genuine-bug-test",
+                    repo_root="/tmp/does-not-need-to-exist",
+                )
+
+
+# ---------------------------------------------------------------------------
 # Explicit timeout_s override wins over settings.ARGUS_SESSION_TIMEOUT
 # ---------------------------------------------------------------------------
 
@@ -1203,8 +1339,18 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
 
     async def test_unrelated_client_error_is_not_treated_as_cache_invalid(self) -> None:
         """A 4xx that has nothing to do with the cache (bad request, auth,
-        quota) must surface normally -- retrying uncached would mask the
-        real problem."""
+        quota) must not be silently retried as if the cache were invalid --
+        that would mask the real problem by re-sending the exact same
+        request uncached and hoping it succeeds for an unrelated reason.
+
+        It must still surface as a visible, non-silent failure overall
+        (a ``SessionResult`` with ``failure_reason="worker_crashed"``, per
+        ``run_session_gemini``'s broader non-timeout except clause) rather
+        than being swallowed into a clean 0-finding result -- see
+        TestNonTimeoutExceptionHandling below for that behavior's own
+        dedicated coverage. It no longer propagates all the way out of
+        ``run_session_gemini`` uncaught (that was the exact round-4 Argus
+        finding this broader except clause exists to fix)."""
         entry = _make_entry(caching="on")
         settings = _make_settings()
 
@@ -1215,14 +1361,20 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
         fake_client.aio.models.generate_content = AsyncMock(side_effect=unrelated_error)
 
         with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
-            with pytest.raises(genai_errors.ClientError):
-                await run_session_gemini(
-                    entry=entry,
-                    system_prompt="sys",
-                    user_message="msg",
-                    settings=settings,
-                    repo_root="/tmp/does-not-need-to-exist",
-                )
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        # Not retried uncached (that would mean 2 awaits, as in the
+        # cache-invalid-recovery test above) -- the error propagated
+        # straight out of the cache-retry logic on the first attempt.
+        assert fake_client.aio.models.generate_content.await_count == 1
+        assert result.failure_reason == "worker_crashed"
+        assert result.result_text == ""
 
 
 class TestGeminiRedactionHooks:

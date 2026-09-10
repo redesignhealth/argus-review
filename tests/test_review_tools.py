@@ -265,34 +265,42 @@ class TestGrepResourceLimits:
             with pytest.raises(ValueError, match="chars"):
                 review_tools.grep("a" * (review_tools._MAX_GREP_PATTERN_LENGTH + 1))
 
+    # A classic catastrophic-backtracking pattern against a run of a's with
+    # no trailing match -- exponential in the length of the run. `(a+)+$`
+    # (the pattern earlier rounds of this test used) turns out to be an
+    # ambiguity shape the third-party `regex` package's own matcher
+    # optimizes away without ever needing its `timeout=` escape hatch, so
+    # it can no longer stand in for "a pattern regex-the-package cannot
+    # itself out-optimize" -- `(a|aa)+b` still empirically defeats it
+    # (confirmed to run several seconds unbounded without a timeout, and
+    # 40+ seconds under stdlib `re` for the same 40-char input).
+    _ADVERSARIAL_PATTERN = r"(a|aa)+b"
+
     def test_catastrophic_backtracking_regex_times_out(self, worktree, monkeypatch) -> None:
-        """(a+)+$ against a run of a's with no trailing match is a classic
-        catastrophic-backtracking pattern -- exponential in the length of
-        the run (uncontested, ~5s+ for just 26 a's). With the timeout
-        budget cranked down, grep must raise TimeoutError promptly instead
-        of hanging for however long the pathological match would actually
-        take -- this is the SIGALRM path (see _grep_alarm), not a
-        thread-based watchdog, specifically because a thread-based
-        watchdog CANNOT preempt this (CPython's regex engine holds the GIL
-        for the whole backtracking loop)."""
+        """With the timeout budget cranked down, grep must raise
+        TimeoutError promptly instead of hanging for however long the
+        pathological match would actually take -- this is the
+        main-thread SIGALRM path (see _grep_alarm) PLUS the regex-package
+        per-call `timeout=` deadline threaded through `_grep_scan` (see
+        TestGrepTimeoutOffMainThread below for the latter's own dedicated,
+        main-thread-independent coverage)."""
         monkeypatch.setattr(review_tools, "_GREP_TIMEOUT_SECONDS", 0.2)
         adversarial = worktree / "adversarial.txt"
-        adversarial.write_text("a" * 30 + "!\n")
+        adversarial.write_text("a" * 40 + "!\n")
 
         with review_tools.review_session(str(worktree)):
             start = time.monotonic()
             with pytest.raises(TimeoutError):
-                review_tools.grep(r"(a+)+$", glob="adversarial.txt", mode="content")
+                review_tools.grep(self._ADVERSARIAL_PATTERN, glob="adversarial.txt", mode="content")
             elapsed = time.monotonic() - start
 
-        # Generous upper bound: proves the alarm actually interrupted the
+        # Generous upper bound: proves something actually interrupted the
         # match rather than merely happening to finish first.
         assert elapsed < 3.0
 
-    def test_grep_from_non_main_thread_still_works_without_a_hard_timeout(self, worktree) -> None:
-        """SIGALRM is main-thread-only, so grep() called off the main
-        thread can't get a per-call hard interrupt (see module docstring)
-        -- but it must still work correctly for a well-behaved pattern."""
+    def test_grep_from_non_main_thread_still_works_for_well_behaved_pattern(self, worktree) -> None:
+        """A well-behaved pattern must still work correctly off the main
+        thread, where SIGALRM can never fire (see module docstring)."""
         result_holder: dict[str, str] = {}
         error_holder: dict[str, BaseException] = {}
 
@@ -310,6 +318,89 @@ class TestGrepResourceLimits:
         assert not thread.is_alive()
         assert "error" not in error_holder, error_holder.get("error")
         assert result_holder["result"] == "src/util.py"
+
+
+class TestGrepTimeoutOffMainThread:
+    """Regression coverage for a live-dogfood finding: `_grep_alarm`'s
+    `signal.SIGALRM`-based watchdog only works on the main thread (Python
+    signal handlers are main-thread-only) -- but `argus.gemini_runner`
+    dispatches every tool call, including `grep`, via
+    `asyncio.to_thread`, which runs on a worker thread where SIGALRM can
+    never fire. Before this fix, a catastrophic-backtracking pattern
+    submitted through that path would hang the worker thread indefinitely
+    with no interrupt possible. The fix threads a `regex`-package (not
+    stdlib `re`) per-call `timeout=` deadline through `_grep_scan`, which
+    works from ANY thread since it's a cooperative check inside the C
+    matching loop itself, not a signal delivered from outside.
+
+    The original SIGALRM test from earlier rounds
+    (`test_catastrophic_backtracking_regex_times_out` above) only ever
+    exercised the main-thread call path -- these tests are the
+    dedicated off-main-thread (and, more specifically, `asyncio.to_thread`)
+    coverage that was missing.
+    """
+
+    _ADVERSARIAL_PATTERN = TestGrepResourceLimits._ADVERSARIAL_PATTERN
+
+    def test_catastrophic_pattern_times_out_on_a_plain_worker_thread(
+        self, worktree, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(review_tools, "_GREP_TIMEOUT_SECONDS", 0.2)
+        adversarial = worktree / "adversarial.txt"
+        adversarial.write_text("a" * 40 + "!\n")
+
+        result_holder: dict[str, str] = {}
+        error_holder: dict[str, BaseException] = {}
+        elapsed_holder: dict[str, float] = {}
+
+        def _worker() -> None:
+            start = time.monotonic()
+            try:
+                with review_tools.review_session(str(worktree)):
+                    result_holder["result"] = review_tools.grep(
+                        self._ADVERSARIAL_PATTERN, glob="adversarial.txt", mode="content"
+                    )
+                    elapsed_holder["elapsed"] = time.monotonic() - start
+            except BaseException as exc:  # noqa: BLE001 - surfaced via assertion below
+                elapsed_holder["elapsed"] = time.monotonic() - start
+                error_holder["error"] = exc
+
+        thread = threading.Thread(target=_worker)
+        thread.start()
+        # Generous join timeout: if the fix regressed and SIGALRM's absence
+        # left this genuinely unbounded, this join would itself time out
+        # (thread.is_alive() below), rather than the test hanging forever.
+        thread.join(timeout=5)
+
+        assert not thread.is_alive(), (
+            "worker thread is still running -- the catastrophic pattern was "
+            "not interrupted at all off the main thread"
+        )
+        assert "result" not in result_holder
+        assert isinstance(error_holder.get("error"), TimeoutError), error_holder.get("error")
+        # Generous upper bound, well under the 5s join timeout above: proves
+        # the regex-timeout deadline actually interrupted the match rather
+        # than the thread merely finishing on its own for some other reason.
+        assert elapsed_holder["elapsed"] < 3.0
+
+    async def test_catastrophic_pattern_times_out_via_asyncio_to_thread(
+        self, worktree, monkeypatch
+    ) -> None:
+        """The exact real-world call shape: argus.gemini_runner dispatches
+        `grep` via `await asyncio.to_thread(review_tools.grep, ...)`."""
+        monkeypatch.setattr(review_tools, "_GREP_TIMEOUT_SECONDS", 0.2)
+        adversarial = worktree / "adversarial.txt"
+        adversarial.write_text("a" * 40 + "!\n")
+
+        with review_tools.review_session(str(worktree)):
+            start = time.monotonic()
+            with pytest.raises(TimeoutError):
+                await asyncio.to_thread(
+                    review_tools.grep, self._ADVERSARIAL_PATTERN, "adversarial.txt", "content"
+                )
+            elapsed = time.monotonic() - start
+
+        assert elapsed < 3.0
 
 
 # ---------------------------------------------------------------------------

@@ -346,6 +346,52 @@ class TestValidation:
 
 
 # ---------------------------------------------------------------------------
+# EXPERIMENTAL_MODELS end-to-end: accepted by validation AND resolvable
+# ---------------------------------------------------------------------------
+
+
+class TestExperimentalModelAliasEndToEnd:
+    """Regression guard: ``_VALID_MODEL_ALIASES`` accepts any
+    ``EXPERIMENTAL_MODELS`` key as a valid ``model`` value at load time --
+    a bench config using one must therefore ALSO actually resolve to a
+    concrete model string at runtime (via ``argus.llm.models.resolve``),
+    not raise ``KeyError`` the first time that role is used. Previously
+    ``resolve()`` only ever consulted ``ALIAS_MAP``, so an accepted config
+    could still crash later.
+    """
+
+    def test_experimental_model_alias_validates_and_resolves(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import argus.llm.models as models
+
+        monkeypatch.setattr(
+            models, "EXPERIMENTAL_MODELS", {"claude-preview-eval": "claude-opus-6-preview"}
+        )
+        # _VALID_MODEL_ALIASES is a frozenset computed once at argus.bench's
+        # import time from the (at-the-time) EXPERIMENTAL_MODELS dict, so
+        # simulate a real, checked-in EXPERIMENTAL_MODELS entry by
+        # recomputing it the same way bench.py itself does.
+        monkeypatch.setattr(
+            bench,
+            "_VALID_MODEL_ALIASES",
+            frozenset(models.ALIAS_MAP) | frozenset(models.EXPERIMENTAL_MODELS),
+        )
+
+        repo_local = Path.cwd() / ".argus" / "bench.toml"
+        _write_toml(repo_local, '[roles.cross-cutting]\nmodel = "claude-preview-eval"\n')
+        bench.clear_cache()
+
+        # Load-time validation must accept it.
+        entry = bench.resolve("cross-cutting")
+        assert entry.model == "claude-preview-eval"
+
+        # The actual regression: turning the validated alias into a
+        # concrete model string must NOT raise KeyError.
+        assert resolve_alias(entry.model) == "claude-opus-6-preview"
+
+
+# ---------------------------------------------------------------------------
 # resolve(): unknown role
 # ---------------------------------------------------------------------------
 

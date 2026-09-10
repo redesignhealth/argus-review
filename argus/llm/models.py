@@ -186,9 +186,19 @@ __all__ = [
 def resolve(alias: str) -> str:
     """Resolve a model alias to its concrete model name, honoring runtime overrides.
 
-    Raises ``KeyError`` if the alias is not registered, so typos fail loudly
-    rather than silently routing to a wrong model.
+    Checks ``ALIAS_MAP`` (subject to the ``ARGUS_*_MODEL`` env-var overrides
+    below) first, then falls back to ``EXPERIMENTAL_MODELS`` -- the
+    short-lived, non-override-aware escape hatch for eval/preview model
+    pins. ``argus.bench``'s config-validation accepts either registry as a
+    valid ``model`` value (see ``_VALID_MODEL_ALIASES``), so this function
+    must recognize both too, or an accepted bench config could still raise
+    ``KeyError`` here the first time that role actually runs.
+
+    Raises ``KeyError`` if the alias is not registered in either mapping,
+    so typos fail loudly rather than silently routing to a wrong model.
     """
+    if alias in EXPERIMENTAL_MODELS:
+        return EXPERIMENTAL_MODELS[alias]
     if alias not in ALIAS_MAP:
         raise KeyError(alias)
     _override_constants: dict[str, str] = {
