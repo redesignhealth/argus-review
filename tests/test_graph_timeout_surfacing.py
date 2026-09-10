@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from argus.pipeline_models import AgentRunData, SystemReviewResult
+from argus.pipeline_models import AgentRunData, CoverageResult, SystemReviewResult
 
 _GRAPH_MODULE = "argus.graph"
 
@@ -303,6 +303,41 @@ class TestDegradedCoverageFindings:
             ("specialist/security", "worker_crashed"),
         ]
 
+    def test_coverage_gap_findings_for_round_keeps_precheck_when_gate_did_not_fire(
+        self,
+    ) -> None:
+        """Regression test for a round-3 Argus BLOCKING finding: when
+        apply_precheck_scanner_failure_gate did NOT add its own finding
+        this round (e.g. ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is unset,
+        the default), a crashed precheck scanner must still get a
+        SUGGESTION/coverage-gap finding -- unconditionally dropping
+        precheck: entries here (an earlier round's bug) left it with ZERO
+        structured findings."""
+        from argus.helpers import coverage_gap_findings_for_round
+
+        mixed = [
+            ("system/backend", "timeout"),
+            ("precheck:zizmor", "scanner did not complete this round"),
+        ]
+        findings = coverage_gap_findings_for_round(mixed, gate_added_precheck_finding=False)
+        assert len(findings) == 2
+        labels_in_findings = {f.description.split("'")[1] for f in findings}
+        assert labels_in_findings == {"system/backend", "precheck:zizmor"}
+
+    def test_coverage_gap_findings_for_round_drops_precheck_when_gate_fired(self) -> None:
+        """When the gate DID add its own BLOCKING/deterministic-precheck
+        finding this round, the same precheck failure must not also get a
+        SUGGESTION/coverage-gap finding -- that would double-report it."""
+        from argus.helpers import coverage_gap_findings_for_round
+
+        mixed = [
+            ("system/backend", "timeout"),
+            ("precheck:zizmor", "scanner did not complete this round"),
+        ]
+        findings = coverage_gap_findings_for_round(mixed, gate_added_precheck_finding=True)
+        assert len(findings) == 1
+        assert "system/backend" in findings[0].description
+
     def test_failed_reviewer_labels_recognizes_timed_out_field(self) -> None:
         from argus.helpers import failed_reviewer_labels
 
@@ -396,6 +431,49 @@ def _make_plan_dict() -> dict[str, object]:
         "cross_cutting_concerns": [],
         "file_manifest": [{"path": "a.py", "change_type": "modified"}],
     }
+
+
+class TestNodeCheckCoverageExcludesCrashMarkers:
+    """_node_check_coverage must filter out crashed/timed-out reviewer
+    markers before passing findings to check_coverage, same as
+    _node_write_review's own filter (and for the same reason): a crash
+    marker is a 0-finding SystemReviewResult that should never be
+    presented to the coverage LLM as if it were a completed review."""
+
+    @pytest.mark.asyncio
+    async def test_crash_marker_excluded_from_check_coverage_input(self) -> None:
+        from argus.graph import _node_check_coverage
+
+        clean_result = {
+            "system_group": "backend",
+            "findings": [{"file": "a.py", "line": 1, "description": "real finding"}],
+            "files_explored": ["a.py"],
+            "cost_usd": 0.01,
+        }
+        crashed_result = {
+            "system_group": "frontend",
+            "findings": [],
+            "files_explored": [],
+            "cost_usd": 0.0,
+            "failure_reason": "worker_crashed",
+        }
+        state = {
+            "plan": _make_plan_dict(),
+            "findings": [clean_result, crashed_result],
+        }
+
+        with patch(
+            f"{_GRAPH_MODULE}.check_coverage",
+            new_callable=AsyncMock,
+            return_value=CoverageResult(is_covered=True, gaps=[]),
+        ) as mock_check_coverage:
+            await _node_check_coverage(state)
+
+        assert mock_check_coverage.await_args is not None
+        findings_arg = mock_check_coverage.await_args.args[1]
+        assert len(findings_arg) == 1
+        assert findings_arg[0].system_group == "backend"
+        assert findings_arg[0].failure_reason is None
 
 
 class TestNodeCollectFindingsAllCrashedGuard:

@@ -15,6 +15,7 @@ from argus.llm.models import (
     EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
     GPT_FRONTIER,
+    GPT_MINI,
     estimate_cost_usd,
 )
 from argus.llm.pricing import get_token_cost
@@ -139,6 +140,14 @@ class TestEstimateCostUsd:
         review time."""
         assert ALIAS_MAP["gpt-frontier"] == "gpt-5.4"
         assert GPT_FRONTIER == "gpt-5.4"
+
+    def test_gpt_mini_pinned_to_approved_model(self) -> None:
+        """Parallel regression guard for gpt-mini: it carries the exact
+        same 'bump once shipped' comment pattern gpt-frontier did, and
+        gpt-5.5-mini is equally unapproved. Pin it too so the same
+        BLOCKING-finding class can't recur on this alias instead."""
+        assert ALIAS_MAP["gpt-mini"] == "gpt-5.4-mini"
+        assert GPT_MINI == "gpt-5.4-mini"
 
 
 class TestResolveOverrides:

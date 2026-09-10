@@ -197,13 +197,23 @@ def reviewer_only_labels(failed_labels: list[tuple[str, str]]) -> list[tuple[str
     Pulled out of ``graph.run_review`` for the same reason
     :func:`build_degraded_coverage_labels` was -- so the precheck/reviewer
     split has a unit test that doesn't require mocking the full
-    ``run_review`` pipeline. This split matters because a failed precheck
-    *scanner* is surfaced as a structured finding exclusively by
-    ``apply_precheck_scanner_failure_gate`` (a BLOCKING/deterministic-
-    precheck finding, when ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is
-    set); passing an unfiltered ``failed_labels`` list straight to
+    ``run_review`` pipeline.
+
+    **Call this ONLY when the caller has confirmed
+    ``apply_precheck_scanner_failure_gate`` already added its own
+    BLOCKING/deterministic-precheck finding for the same precheck
+    failures this round** (i.e. its return value was ``True`` --
+    ``graph.run_review`` calls the gate before this function specifically
+    so that fact is known). That gate is a no-op whenever
+    ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is unset (the default) or
+    the verdict is already BLOCKING for some other reason -- in either
+    case it adds no finding at all, and unconditionally dropping precheck
+    entries here would leave a crashed precheck scanner with ZERO
+    structured findings, not merely a de-duplicated one. When the gate DID
+    fire, passing an unfiltered ``failed_labels`` list straight to
     :func:`build_degraded_coverage_findings` would double-report the same
-    scanner failure as a SUGGESTION/coverage-gap finding too.
+    scanner failure as a SUGGESTION/coverage-gap finding too -- that's the
+    only case this filter exists to prevent.
 
     Relies on the ``precheck:`` prefix convention ``build_degraded_coverage_labels``
     itself establishes for scanner-failure labels -- not a dedicated
@@ -258,6 +268,35 @@ def build_degraded_coverage_findings(
             )
         )
     return findings
+
+
+def coverage_gap_findings_for_round(
+    failed_labels: list[tuple[str, str]], gate_added_precheck_finding: bool
+) -> list[Finding]:
+    """Build the structured coverage-gap findings for one review round,
+    encoding the fix for a round-3 Argus BLOCKING finding on this PR:
+    ``reviewer_only_labels`` must be applied ONLY when
+    ``apply_precheck_scanner_failure_gate`` already added its own
+    BLOCKING/deterministic-precheck finding for the same precheck
+    failures this round (``gate_added_precheck_finding``).
+
+    Unconditionally filtering ``precheck:``-prefixed entries (an earlier
+    round's bug) silently dropped a crashed precheck scanner to ZERO
+    structured findings whenever ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE``
+    is unset (the default) -- the gate is a no-op in that case and adds no
+    finding of its own, so nothing else would have surfaced the failure.
+    When the gate DID fire, passing the precheck entries through
+    unfiltered would double-report the same failure as both a
+    SUGGESTION/coverage-gap finding and the gate's own BLOCKING finding.
+
+    Pulled out into its own directly-testable function, mirroring
+    :func:`build_degraded_coverage_labels`/:func:`reviewer_only_labels`'s
+    own testability rationale, so this exact conditional -- the actual
+    site of the round-3 bug -- has a unit test that doesn't require
+    mocking the full ``run_review`` pipeline.
+    """
+    labels = reviewer_only_labels(failed_labels) if gate_added_precheck_finding else failed_labels
+    return build_degraded_coverage_findings(labels)
 
 
 def compute_persisted_finding_counts(findings: list[Finding]) -> tuple[int, int]:

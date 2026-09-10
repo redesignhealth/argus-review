@@ -1,12 +1,17 @@
 """Central model alias registry.
 
 Single source of truth for which concrete LLM each logical alias resolves to.
-To upgrade a model family across the codebase (e.g. GPT-5.4 -> GPT-5.5), edit
-``ALIAS_MAP`` below and nothing else.
+To upgrade a model family across the codebase (e.g. Claude Sonnet 4.6 ->
+4.7, once formally approved), edit ``ALIAS_MAP`` below and nothing else.
+Do not use this comment's own prior example (GPT-5.4 -> GPT-5.5) as a
+template: gpt-5.5 is NOT on the approved model list (see
+``pr-review-specialist-llm-patterns.md``) -- that exact bump was a real
+BLOCKING finding on this file, reverted back to gpt-5.4, with a
+regression-guard test (``test_gpt_frontier_pinned_to_approved_model`` in
+``tests/test_llm_models.py``) added specifically to catch a repeat.
 
 Call sites should import the resolved constants (``GPT_MINI``,
-``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings like
-``"gpt-5.5-mini"``.
+``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings.
 
 Only aliases with a real call site are registered in ``ALIAS_MAP`` -- this is
 a standalone, isolated package, not the larger monorepo it was extracted
@@ -57,8 +62,12 @@ logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
     # OpenAI -- gpt-5 family
-    "gpt-frontier": "gpt-5.4",  # bump to gpt-5.5 once formally approved and shipped
-    "gpt-mini": "gpt-5.4-mini",  # bump to gpt-5.5-mini once OpenAI ships it
+    # gpt-5.5/gpt-5.5-mini are NOT yet on the approved model list -- do not
+    # bump either alias to them until the policy table is updated (see the
+    # module docstring above). test_llm_models.py pins both of these exact
+    # values as a regression guard.
+    "gpt-frontier": "gpt-5.4",
+    "gpt-mini": "gpt-5.4-mini",
     # Anthropic
     "claude-frontier": "claude-fable-5",
     "claude-opus": "claude-opus-5",

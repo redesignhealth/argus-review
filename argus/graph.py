@@ -40,10 +40,9 @@ from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 from argus.helpers import (
     append_degraded_coverage_section,
     apply_precheck_scanner_failure_gate,
-    build_degraded_coverage_findings,
     build_degraded_coverage_labels,
     compute_persisted_finding_counts,
-    reviewer_only_labels,
+    coverage_gap_findings_for_round,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
@@ -2452,7 +2451,21 @@ async def _node_collect_findings(state: ReviewState) -> dict[str, Any]:
 async def _node_check_coverage(state: ReviewState) -> dict[str, Any]:
     """Run coverage check on collected findings."""
     plan = ReviewPlan.model_validate(state["plan"])
-    findings_models = [SystemReviewResult.model_validate(f) for f in state["findings"]]
+    # Filter out crashed/timed-out reviewer markers before this reaches
+    # check_coverage, same as _node_write_review's own filter and for the
+    # same reason: a crash marker's files_explored is always empty, so the
+    # mechanical manifest-vs-reviewed set-difference already treats its
+    # files as uncovered regardless of this filter -- but when that
+    # triggers the LLM-triage path (ambiguous-gap fallback), leaving the
+    # crash marker in the findings list serialized into the LLM prompt
+    # would present a 0-finding, failed session as if it were a genuinely
+    # completed review, risking the LLM reasoning its way into treating a
+    # real gap as already covered.
+    findings_models = [
+        f
+        for f in (SystemReviewResult.model_validate(f) for f in state["findings"])
+        if f.failure_reason is None
+    ]
     coverage = await check_coverage(plan, findings_models)
     return {"coverage": coverage.model_dump()}
 
@@ -3177,6 +3190,36 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
 
     response.usage.cost_usd = total_cost_usd
 
+    # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
+    # own docstring (argus/config.py) for the fail-open-vs-fail-closed
+    # tradeoff, and apply_precheck_scanner_failure_gate's for why this is
+    # a helpers.py call rather than inline logic here. Deliberately keyed
+    # on precheck_scanner_failures alone, not the combined failed_labels
+    # computed below -- a killed/timed-out LLM reviewer session is a
+    # different failure class this flag was never scoped to.
+    #
+    # Run this BEFORE building the coverage-gap findings below (not after,
+    # as an earlier round had it): whether a failed precheck scanner
+    # already got its own BLOCKING/deterministic-precheck finding here is
+    # exactly the fact reviewer_only_labels' filter needs, on every call,
+    # not a static assumption baked into the filter itself -- see the
+    # gate_added_precheck_finding usage below for why a static assumption
+    # was wrong.
+    precheck_scanner_failures = result.get("precheck_scanner_failures", [])
+    gate_added_precheck_finding = apply_precheck_scanner_failure_gate(
+        response,
+        precheck_scanner_failures,
+        get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
+    )
+    if gate_added_precheck_finding:
+        logger.warning(
+            "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set -- forced verdict to BLOCKING "
+            "(risk_level=%s) because %d precheck scanner(s) did not complete this round: %s",
+            response.risk_level.value,
+            len(precheck_scanner_failures),
+            ", ".join(precheck_scanner_failures),
+        )
+
     # Surface killed/timed-out reviewer sessions AND crashed/timed-out
     # deterministic precheck scanners instead of letting either collapse
     # silently into "0 findings" — both in the rendered markdown (not
@@ -3198,41 +3241,11 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
         response.review_comment = append_degraded_coverage_section(
             response.review_comment, failed_labels
         )
-        # Structured coverage-gap findings, unlike the markdown section
-        # above, are reviewer-session-only: a failed precheck *scanner* is
-        # surfaced as a structured finding exclusively by
-        # apply_precheck_scanner_failure_gate below (which promotes it to a
-        # BLOCKING/deterministic-precheck finding when
-        # ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set). Passing the
-        # combined failed_labels (which also carries `precheck:<name>`
-        # entries) here would double-report the same scanner failure as
-        # both a SUGGESTION/coverage-gap finding and a BLOCKING/
-        # deterministic-precheck finding, inflating both counts below. See
-        # reviewer_only_labels' own docstring for why this split is pulled
-        # out into a directly-testable helper.
+        # See coverage_gap_findings_for_round's own docstring for why this
+        # conditions on gate_added_precheck_finding rather than
+        # unconditionally filtering precheck:-prefixed entries.
         response.findings.extend(
-            build_degraded_coverage_findings(reviewer_only_labels(failed_labels))
-        )
-
-    # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
-    # own docstring (argus/config.py) for the fail-open-vs-fail-closed
-    # tradeoff, and apply_precheck_scanner_failure_gate's for why this is
-    # a helpers.py call rather than inline logic here. Deliberately keyed
-    # on precheck_scanner_failures alone, not the combined failed_labels
-    # above -- a killed/timed-out LLM reviewer session is a different
-    # failure class this flag was never scoped to.
-    precheck_scanner_failures = result.get("precheck_scanner_failures", [])
-    if apply_precheck_scanner_failure_gate(
-        response,
-        precheck_scanner_failures,
-        get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
-    ):
-        logger.warning(
-            "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set -- forced verdict to BLOCKING "
-            "(risk_level=%s) because %d precheck scanner(s) did not complete this round: %s",
-            response.risk_level.value,
-            len(precheck_scanner_failures),
-            ", ".join(precheck_scanner_failures),
+            coverage_gap_findings_for_round(failed_labels, gate_added_precheck_finding)
         )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
