@@ -595,6 +595,41 @@ class TestOpenAIRunnerTimeoutsAndFailures:
         assert result.failure_reason == "timeout"
         assert result.timed_out is True
 
+    async def test_external_cancellation_propagates_as_cancelled_error(self, tmp_path: Any) -> None:
+        """Simulate genuine external cancellation (not a timeout) of the session
+        and assert it propagates as CancelledError rather than being swallowed
+        into a timed_out=True result.
+        """
+
+        async def _slow_create(**_: Any) -> Any:
+            await asyncio.sleep(10.0)
+            return _make_response(calls=[])
+
+        client = MagicMock()
+        client.responses.create = AsyncMock(side_effect=_slow_create)
+        client.close = AsyncMock()
+
+        entry = _make_entry()
+        with patch("argus.openai_runner._build_client", return_value=client):
+            task = asyncio.create_task(
+                run_session_openai(
+                    entry=entry,
+                    system_prompt="system",
+                    user_message="user",
+                    settings=_make_settings(session_timeout=60.0),
+                    repo_root=str(tmp_path),
+                    timeout_s=60.0,
+                )
+            )
+            # Yield control so run_session_openai enters client.responses.create.
+            await asyncio.sleep(0.01)
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        client.close.assert_called_once()
+
     async def test_openai_api_error_produces_visible_failure_not_silent_result(
         self, tmp_path: Any
     ) -> None:
@@ -826,7 +861,7 @@ class TestOpenAIRunnerPartialProgressOnFailure:
     async def test_timeout_after_completed_turns_preserves_cost_and_usage(
         self, tmp_path: Any
     ) -> None:
-        """An overall-session timeout firing on turn 3 (asyncio.wait_for
+        """An overall-session timeout firing on turn 3 (asyncio.timeout
         cancellation) must not discard turns 1-2's accounting either.
         """
         u1 = _make_usage(input_tokens=800, output_tokens=80, cached_tokens=100)

@@ -55,14 +55,16 @@ creation or lifecycle management. Tokens read from cache are reported in
 ``response.usage.input_tokens_details.cached_tokens`` and billed at the
 reduced cache-read rate via ``argus.llm.pricing``.
 
-Timeout handling: ``asyncio.wait_for`` bounds the entire multi-turn session
-against ``effective_timeout_s`` (default 600s, consistent across platforms).
-The ``AsyncOpenAI`` client is constructed with ``timeout=effective_timeout_s``,
-bounding individual HTTP calls natively in the SDK. Timeouts raise
-``TimeoutError``, ``APITimeoutError``, or ``httpx.TimeoutException``, caught
-cleanly and returned as ``SessionResult(failure_reason="timeout")``.
-Non-timeout SDK or network errors (``OpenAIError``, ``httpx.HTTPError``) are
-caught and returned as ``SessionResult(failure_reason="worker_crashed")`` to
+Timeout handling: ``asyncio.timeout()`` inside ``_run_turns`` bounds the
+entire multi-turn session against ``effective_timeout_s`` (default 600s,
+consistent across platforms). The ``AsyncOpenAI`` client is constructed with
+``timeout=effective_timeout_s``, bounding individual HTTP calls natively in the
+SDK. Timeouts raise ``TimeoutError``, ``APITimeoutError``, or
+``httpx.TimeoutException``, caught cleanly and returned as
+``SessionResult(failure_reason="timeout")``. Genuine external cancellations
+propagate as ``asyncio.CancelledError`` rather than being swallowed into a
+timeout. Non-timeout SDK or network errors (``OpenAIError``, ``httpx.HTTPError``)
+are caught and returned as ``SessionResult(failure_reason="worker_crashed")`` to
 ensure loud, visible failures that surface as degraded coverage rather than
 silently returning 0 findings.
 
@@ -73,10 +75,10 @@ several turns have already completed still returns a ``SessionResult`` whose
 ``cost_usd``/token counts/``tool_call_count``/``result_text`` reflect
 whatever those completed turns actually produced and billed -- real,
 already-incurred cost is never silently discarded just because a later turn
-failed. ``run_session_openai``'s own ``try``/``except`` around
-``asyncio.wait_for`` is kept only as a defense-in-depth fallback for failures
-that occur before ``_run_turns`` starts accumulating anything (e.g. client
-construction), where there is nothing to preserve anyway.
+failed. ``run_session_openai``'s own ``try``/``except`` around ``_run_turns``
+is kept only as a defense-in-depth fallback for failures that occur before
+``_run_turns`` starts accumulating anything (e.g. client construction),
+where there is nothing to preserve anyway.
 
 Degraded-completion detection: a turn with no function calls is only treated
 as "the model is done" after checking that OpenAI's Responses API didn't
@@ -493,130 +495,135 @@ async def _run_turns(
         )
 
     try:
-        with review_tools.review_session(repo_root) as findings_sink:
-            previous_response_id: str | None = None
-            tool_outputs: list[dict[str, Any]] = []
-            for _turn in range(_MAX_TURNS):
-                create_kwargs: dict[str, Any] = {
-                    "model": model,
-                    "instructions": system_prompt,
-                    "tools": _TOOL_SCHEMAS,
-                }
-                if _turn == 0:
-                    create_kwargs["input"] = user_message
-                else:
-                    create_kwargs["input"] = tool_outputs
-                    if previous_response_id:
-                        create_kwargs["previous_response_id"] = previous_response_id
-
-                response = await client.responses.create(**create_kwargs)
-
-                usage = getattr(response, "usage", None)
-                if usage is not None:
-                    usage_input_total += getattr(usage, "input_tokens", 0) or 0
-                    usage_output_total += getattr(usage, "output_tokens", 0) or 0
-                    details = getattr(usage, "input_tokens_details", None)
-                    if details is not None:
-                        usage_cached_total += getattr(details, "cached_tokens", 0) or 0
-
-                output_items = getattr(response, "output", None) or []
-
-                degraded_reason = _detect_degraded_response(response, output_items)
-                if degraded_reason is not None:
-                    # Route through the same OpenAIError-based failure path as a
-                    # real SDK exception (caught below) -- a refused/incomplete
-                    # response must not be silently reported as a clean,
-                    # zero-findings review. This turn's usage is already
-                    # accumulated above, so it's preserved in the failure result.
-                    raise OpenAIError(
-                        f"OpenAI response degraded on turn {_turn} "
-                        f"[{label or 'unlabeled'}]: {degraded_reason}"
-                    )
-
-                function_calls = [
-                    item for item in output_items if getattr(item, "type", None) == "function_call"
-                ]
-
-                if not function_calls:
-                    output_text = getattr(response, "output_text", None) or ""
-                    recovered = _parse_text_findings(output_text)
-                    if recovered is not None:
-                        recovered_findings, recovered_files = recovered
-                        for finding in recovered_findings:
-                            review_tools.report_finding(
-                                file=finding.get("file"),
-                                line=finding.get("line"),
-                                description=str(finding.get("description", "")),
-                                context=finding.get("context"),
-                            )
-                        if recovered_findings:
-                            logger.warning(
-                                "OpenAI session [%s] returned %d finding(s) as text instead of "
-                                "calling report_finding; recovered them from response.output_text",
-                                label or "unlabeled",
-                                len(recovered_findings),
-                            )
-                        if recovered_files:
-                            files_explored = recovered_files
-                    break
-
-                tool_outputs = []
-                finished = False
-                for call in function_calls:
-                    name = getattr(call, "name", "")
-                    raw_args = getattr(call, "arguments", "{}")
-                    call_id = getattr(call, "call_id", "")
-                    tool_calls.append(name)
-
-                    try:
-                        args = (
-                            json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-                        )
-                        if not isinstance(args, dict):
-                            args = {}
-                    except Exception as exc:  # noqa: BLE001
-                        args = {}
-                        output = f"Error parsing arguments for {name}: {exc}"
-                        is_error = True
+        async with asyncio.timeout(timeout_s):
+            with review_tools.review_session(repo_root) as findings_sink:
+                previous_response_id: str | None = None
+                tool_outputs: list[dict[str, Any]] = []
+                for _turn in range(_MAX_TURNS):
+                    create_kwargs: dict[str, Any] = {
+                        "model": model,
+                        "instructions": system_prompt,
+                        "tools": _TOOL_SCHEMAS,
+                    }
+                    if _turn == 0:
+                        create_kwargs["input"] = user_message
                     else:
-                        output, is_error = await asyncio.to_thread(_execute_tool_call, name, args)
+                        create_kwargs["input"] = tool_outputs
+                        if previous_response_id:
+                            create_kwargs["previous_response_id"] = previous_response_id
 
-                    if is_error and name != "finish_review":
-                        logger.warning("Tool call failed [%s]: %s", name, output[:200])
+                    response = await client.responses.create(**create_kwargs)
 
-                    tool_outputs.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": call_id,
-                            "output": output,
-                        }
+                    usage = getattr(response, "usage", None)
+                    if usage is not None:
+                        usage_input_total += getattr(usage, "input_tokens", 0) or 0
+                        usage_output_total += getattr(usage, "output_tokens", 0) or 0
+                        details = getattr(usage, "input_tokens_details", None)
+                        if details is not None:
+                            usage_cached_total += getattr(details, "cached_tokens", 0) or 0
+
+                    output_items = getattr(response, "output", None) or []
+
+                    degraded_reason = _detect_degraded_response(response, output_items)
+                    if degraded_reason is not None:
+                        # Route through the same OpenAIError-based failure path as a
+                        # real SDK exception (caught below) -- a refused/incomplete
+                        # response must not be silently reported as a clean,
+                        # zero-findings review. This turn's usage is already
+                        # accumulated above, so it's preserved in the failure result.
+                        raise OpenAIError(
+                            f"OpenAI response degraded on turn {_turn} "
+                            f"[{label or 'unlabeled'}]: {degraded_reason}"
+                        )
+
+                    function_calls = [
+                        item
+                        for item in output_items
+                        if getattr(item, "type", None) == "function_call"
+                    ]
+
+                    if not function_calls:
+                        output_text = getattr(response, "output_text", None) or ""
+                        recovered = _parse_text_findings(output_text)
+                        if recovered is not None:
+                            recovered_findings, recovered_files = recovered
+                            for finding in recovered_findings:
+                                review_tools.report_finding(
+                                    file=finding.get("file"),
+                                    line=finding.get("line"),
+                                    description=str(finding.get("description", "")),
+                                    context=finding.get("context"),
+                                )
+                            if recovered_findings:
+                                logger.warning(
+                                    "OpenAI session [%s] returned %d finding(s) as text instead of "
+                                    "calling report_finding; recovered them from response.output_text",
+                                    label or "unlabeled",
+                                    len(recovered_findings),
+                                )
+                            if recovered_files:
+                                files_explored = recovered_files
+                        break
+
+                    tool_outputs = []
+                    finished = False
+                    for call in function_calls:
+                        name = getattr(call, "name", "")
+                        raw_args = getattr(call, "arguments", "{}")
+                        call_id = getattr(call, "call_id", "")
+                        tool_calls.append(name)
+
+                        try:
+                            args = (
+                                json.loads(raw_args)
+                                if isinstance(raw_args, str)
+                                else (raw_args or {})
+                            )
+                            if not isinstance(args, dict):
+                                args = {}
+                        except Exception as exc:  # noqa: BLE001
+                            args = {}
+                            output = f"Error parsing arguments for {name}: {exc}"
+                            is_error = True
+                        else:
+                            output, is_error = await asyncio.to_thread(
+                                _execute_tool_call, name, args
+                            )
+
+                        if is_error and name != "finish_review":
+                            logger.warning("Tool call failed [%s]: %s", name, output[:200])
+
+                        tool_outputs.append(
+                            {
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": output,
+                            }
+                        )
+
+                        if name == "finish_review" and not is_error:
+                            finished = True
+                            files_explored = list(args.get("files_explored") or [])
+
+                    if finished:
+                        break
+
+                    previous_response_id = getattr(response, "id", None)
+                else:
+                    logger.warning(
+                        "OpenAI session [%s] exhausted its %d-turn budget without a finish_review call",
+                        label or "unlabeled",
+                        _MAX_TURNS,
                     )
-
-                    if name == "finish_review" and not is_error:
-                        finished = True
-                        files_explored = list(args.get("files_explored") or [])
-
-                if finished:
-                    break
-
-                previous_response_id = getattr(response, "id", None)
-            else:
-                logger.warning(
-                    "OpenAI session [%s] exhausted its %d-turn budget without a finish_review call",
-                    label or "unlabeled",
-                    _MAX_TURNS,
-                )
 
         return _build_result(None)
-    except (TimeoutError, APITimeoutError, httpx.TimeoutException, asyncio.CancelledError):
-        # asyncio.CancelledError is included deliberately: run_session_openai
-        # bounds this whole function with asyncio.wait_for, whose expiry
-        # cancels whatever this coroutine is currently awaiting (typically
-        # client.responses.create) rather than raising a plain TimeoutError
-        # here directly. Catching it (without re-raising) lets this function
-        # return its own partial-progress SessionResult instead of letting
-        # asyncio.wait_for's caller see a bare TimeoutError with no
-        # accumulated accounting.
+    except (TimeoutError, APITimeoutError, httpx.TimeoutException):
+        # Session timeout is enforced via asyncio.timeout() inside this function.
+        # Its expiry raises TimeoutError, distinguishable from a genuine external
+        # cancellation (which propagates as asyncio.CancelledError). Catching
+        # TimeoutError (plus SDK/httpx timeouts) lets this function return its
+        # own partial-progress SessionResult while letting external cancellations
+        # propagate freely.
         logger.warning(
             "OpenAI session [%s] timed out after %ss",
             label or "unlabeled",
@@ -683,19 +690,16 @@ async def run_session_openai(
 
     started_at = datetime.now(timezone.utc)
     try:
-        return await asyncio.wait_for(
-            _run_turns(
-                entry=entry,
-                model=model,
-                system_prompt=system_prompt,
-                user_message=user_message,
-                settings=settings,
-                label=label,
-                repo_root=effective_root,
-                timeout_s=effective_timeout_s,
-                started_at=started_at,
-            ),
-            timeout=effective_timeout_s,
+        return await _run_turns(
+            entry=entry,
+            model=model,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            settings=settings,
+            label=label,
+            repo_root=effective_root,
+            timeout_s=effective_timeout_s,
+            started_at=started_at,
         )
     except (TimeoutError, APITimeoutError, httpx.TimeoutException) as exc:
         finished_at = datetime.now(timezone.utc)
