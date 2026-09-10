@@ -65,6 +65,28 @@ Non-timeout SDK or network errors (``OpenAIError``, ``httpx.HTTPError``) are
 caught and returned as ``SessionResult(failure_reason="worker_crashed")`` to
 ensure loud, visible failures that surface as degraded coverage rather than
 silently returning 0 findings.
+
+Partial-progress accounting on failure: all of this exception handling lives
+inside ``_run_turns`` itself (not in a separate path in ``run_session_openai``
+that starts from zero), so a timeout or API failure that strikes after
+several turns have already completed still returns a ``SessionResult`` whose
+``cost_usd``/token counts/``tool_call_count``/``result_text`` reflect
+whatever those completed turns actually produced and billed -- real,
+already-incurred cost is never silently discarded just because a later turn
+failed. ``run_session_openai``'s own ``try``/``except`` around
+``asyncio.wait_for`` is kept only as a defense-in-depth fallback for failures
+that occur before ``_run_turns`` starts accumulating anything (e.g. client
+construction), where there is nothing to preserve anyway.
+
+Degraded-completion detection: a turn with no function calls is only treated
+as "the model is done" after checking that OpenAI's Responses API didn't
+actually flag the response as incomplete, errored, or refused --
+``response.status`` (must be ``"completed"`` or unset), ``response.error``,
+``response.incomplete_details``, and any ``refusal``-type content block on
+an output message. Any of these route to the same
+``SessionResult(failure_reason="worker_crashed")`` path as a real SDK
+exception, rather than being silently reported as a clean zero-finding
+review.
 """
 
 from __future__ import annotations
@@ -74,7 +96,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from langsmith import traceable
@@ -296,6 +318,57 @@ def _parse_text_findings(text: str) -> tuple[list[dict[str, Any]], list[str]] | 
     return findings, files_explored
 
 
+def _detect_degraded_response(response: Any, output_items: list[Any]) -> str | None:
+    """Return a human-readable reason if ``response`` signals an incomplete,
+    errored, or refused completion -- rather than a genuine "the model has
+    nothing further to say/call" stop.
+
+    Checks the actual Responses API degraded-completion signals the
+    ``openai`` SDK exposes on a ``Response`` object:
+
+    - ``response.status`` other than ``"completed"`` (or unset/``None``,
+      which real ``Response`` instances only leave unset in tests) --
+      covers ``"failed"``, ``"incomplete"``, and ``"cancelled"``.
+    - ``response.error`` -- a top-level ``ResponseError`` the API attached
+      to an otherwise-terminal response.
+    - ``response.incomplete_details`` -- set when ``status == "incomplete"``
+      (e.g. ``reason="max_output_tokens"`` or ``"content_filter"``), checked
+      independently in case a future SDK version populates it without also
+      setting ``status``.
+    - A ``refusal``-type content block on any output message -- the model
+      can refuse to answer while the response itself still reports
+      ``status == "completed"``, so this is not implied by the checks above.
+
+    Returns ``None`` for a healthy response. Uses ``getattr`` throughout
+    since these fields are absent from hand-built ``MagicMock(spec=Response)``
+    test doubles that don't set them explicitly.
+    """
+    status = getattr(response, "status", None)
+    if status is not None and status != "completed":
+        return f"response.status={status!r}"
+
+    error = getattr(response, "error", None)
+    if error is not None:
+        code = getattr(error, "code", None)
+        message = getattr(error, "message", None)
+        return f"response.error(code={code!r}, message={message!r})"
+
+    incomplete_details = getattr(response, "incomplete_details", None)
+    if incomplete_details is not None:
+        reason = getattr(incomplete_details, "reason", None)
+        return f"response.incomplete_details.reason={reason!r}"
+
+    for item in output_items:
+        if getattr(item, "type", None) != "message":
+            continue
+        for content in getattr(item, "content", None) or []:
+            if getattr(content, "type", None) == "refusal":
+                refusal_text = getattr(content, "refusal", "") or ""
+                return f"model refused: {refusal_text[:200]!r}"
+
+    return None
+
+
 def _build_client(
     *,
     api_key: str | None = None,
@@ -325,7 +398,16 @@ async def _run_turns(
     timeout_s: float,
     started_at: datetime,
 ) -> SessionResult:
-    """Run the OpenAI Responses API multi-turn tool-calling loop."""
+    """Run the OpenAI Responses API multi-turn tool-calling loop.
+
+    All failure handling (timeout, transport/API error, or a degraded/
+    refused response -- see ``_detect_degraded_response``) lives inside this
+    function rather than in a separate zero-state path upstream, so it has
+    access to this loop's own running accumulator (``tool_calls``, usage
+    totals, ``findings_sink``). A session that fails after several turns
+    have already completed still returns a ``SessionResult`` reflecting
+    whatever those completed turns actually produced and billed.
+    """
     api_key = getattr(settings, "OPENAI_API_KEY", None)
     base_url = getattr(settings, "OPENAI_BASE_URL", None)
 
@@ -340,13 +422,77 @@ async def _run_turns(
         model,
         timeout_s,
     )
-    try:
-        tool_calls: list[str] = []
-        files_explored: list[str] = []
-        usage_input_total = 0
-        usage_output_total = 0
-        usage_cached_total = 0
 
+    tool_calls: list[str] = []
+    files_explored: list[str] = []
+    findings_sink: list[dict[str, Any]] = []
+    usage_input_total = 0
+    usage_output_total = 0
+    usage_cached_total = 0
+
+    def _build_result(
+        failure_reason: Literal["timeout", "worker_crashed"] | None,
+    ) -> SessionResult:
+        """Build a ``SessionResult`` from whatever has accumulated so far.
+
+        Shared by the successful-completion path and every failure path, so
+        a mid-session failure reports the real cost/usage/tool-call
+        accounting for the turns that DID complete instead of zeroing it.
+        """
+        finished_at = datetime.now(timezone.utc)
+        unique_tool_names = sorted(set(tool_calls))
+        input_tokens = max(usage_input_total - usage_cached_total, 0)
+        output_tokens = usage_output_total
+        cost_usd = estimate_cost_usd(
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cached_input_tokens=usage_cached_total,
+        )
+        result_text = _build_result_text(findings_sink, files_explored)
+        tools_str = f" (tools: {', '.join(unique_tool_names)})" if tool_calls else ""
+
+        if failure_reason is None:
+            logger.info(
+                "OpenAI agent done [%s]: %d tool calls%s, cost=$%.4f input_tokens=%d "
+                "cached_tokens=%d output_tokens=%d",
+                label or "unlabeled",
+                len(tool_calls),
+                tools_str,
+                cost_usd,
+                input_tokens,
+                usage_cached_total,
+                output_tokens,
+            )
+        else:
+            logger.warning(
+                "OpenAI session [%s] ended with failure_reason=%s after %d tool call(s)%s -- "
+                "preserving accumulated cost=$%.4f input_tokens=%d cached_tokens=%d "
+                "output_tokens=%d rather than reporting 0",
+                label or "unlabeled",
+                failure_reason,
+                len(tool_calls),
+                tools_str,
+                cost_usd,
+                input_tokens,
+                usage_cached_total,
+                output_tokens,
+            )
+
+        return SessionResult(
+            result_text=result_text,
+            cost_usd=cost_usd,
+            duration_seconds=(finished_at - started_at).total_seconds(),
+            started_at=started_at,
+            finished_at=finished_at,
+            tool_call_count=len(tool_calls),
+            tool_names=unique_tool_names,
+            context7_call_count=0,
+            model=model,
+            failure_reason=failure_reason,
+        )
+
+    try:
         with review_tools.review_session(repo_root) as findings_sink:
             previous_response_id: str | None = None
             tool_outputs: list[dict[str, Any]] = []
@@ -374,6 +520,19 @@ async def _run_turns(
                         usage_cached_total += getattr(details, "cached_tokens", 0) or 0
 
                 output_items = getattr(response, "output", None) or []
+
+                degraded_reason = _detect_degraded_response(response, output_items)
+                if degraded_reason is not None:
+                    # Route through the same OpenAIError-based failure path as a
+                    # real SDK exception (caught below) -- a refused/incomplete
+                    # response must not be silently reported as a clean,
+                    # zero-findings review. This turn's usage is already
+                    # accumulated above, so it's preserved in the failure result.
+                    raise OpenAIError(
+                        f"OpenAI response degraded on turn {_turn} "
+                        f"[{label or 'unlabeled'}]: {degraded_reason}"
+                    )
+
                 function_calls = [
                     item for item in output_items if getattr(item, "type", None) == "function_call"
                 ]
@@ -448,44 +607,30 @@ async def _run_turns(
                     _MAX_TURNS,
                 )
 
-            result_text = _build_result_text(findings_sink, files_explored)
-
-        finished_at = datetime.now(timezone.utc)
-        unique_tool_names = sorted(set(tool_calls))
-
-        input_tokens = max(usage_input_total - usage_cached_total, 0)
-        output_tokens = usage_output_total
-        cost_usd = estimate_cost_usd(
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=usage_cached_total,
-        )
-
-        tools_str = f" (tools: {', '.join(unique_tool_names)})" if tool_calls else ""
-        logger.info(
-            "OpenAI agent done [%s]: %d tool calls%s, cost=$%.4f input_tokens=%d cached_tokens=%d output_tokens=%d",
+        return _build_result(None)
+    except (TimeoutError, APITimeoutError, httpx.TimeoutException, asyncio.CancelledError):
+        # asyncio.CancelledError is included deliberately: run_session_openai
+        # bounds this whole function with asyncio.wait_for, whose expiry
+        # cancels whatever this coroutine is currently awaiting (typically
+        # client.responses.create) rather than raising a plain TimeoutError
+        # here directly. Catching it (without re-raising) lets this function
+        # return its own partial-progress SessionResult instead of letting
+        # asyncio.wait_for's caller see a bare TimeoutError with no
+        # accumulated accounting.
+        logger.warning(
+            "OpenAI session [%s] timed out after %ss",
             label or "unlabeled",
-            len(tool_calls),
-            tools_str,
-            cost_usd,
-            input_tokens,
-            usage_cached_total,
-            output_tokens,
+            timeout_s,
         )
-
-        return SessionResult(
-            result_text=result_text,
-            cost_usd=cost_usd,
-            duration_seconds=(finished_at - started_at).total_seconds(),
-            started_at=started_at,
-            finished_at=finished_at,
-            tool_call_count=len(tool_calls),
-            tool_names=unique_tool_names,
-            context7_call_count=0,
-            model=model,
-            failure_reason=None,
+        return _build_result("timeout")
+    except (OpenAIError, httpx.HTTPError) as exc:
+        logger.warning(
+            "OpenAI session [%s] failed with a non-timeout error (%s: %s)",
+            label or "unlabeled",
+            type(exc).__name__,
+            exc,
         )
+        return _build_result("worker_crashed")
     finally:
         await asyncio.shield(client.close())
 
@@ -518,6 +663,15 @@ async def run_session_openai(
 
     Returns a ``SessionResult`` matching the contract defined for the Claude
     and Gemini runners.
+
+    ``_run_turns`` handles every failure mode it can encounter (timeout,
+    transport/API error, degraded response) internally, using its own
+    running accumulator to preserve partial cost/usage/tool-call accounting
+    -- see that function's docstring. The ``try``/``except`` below is kept
+    only as a defense-in-depth fallback for a failure occurring before
+    ``_run_turns`` has accumulated anything (e.g. during client
+    construction), where a zero-accounting result is correct because
+    nothing has actually happened yet.
     """
     effective_root = _resolve_repo_root(repo_root, "run_session_openai")
     model = resolve_model_alias(entry.model)

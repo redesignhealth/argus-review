@@ -2377,6 +2377,17 @@ async def _node_collect_findings(state: ReviewState) -> dict[str, Any]:
 
     Logs a warning when some reviewers failed so partial failures are
     visible in the orchestrator's logs.
+
+    A crashed/timed-out reviewer still contributes a (marker) result to
+    ``state["findings"]`` (see ``_node_run_reviewer``'s except branch) --
+    a 0-finding ``SystemReviewResult`` with ``failure_reason`` set. Simply
+    checking ``len(findings)`` therefore cannot distinguish "every reviewer
+    crashed" from "every reviewer succeeded": both produce a
+    non-empty, full-length ``findings`` list. Only entries with
+    ``failure_reason is None`` count as a genuine successful review; if
+    that count is zero, treat it exactly like the "no results at all"
+    case and fail the pipeline rather than silently continuing toward a
+    clean-looking verdict built on zero real coverage.
     """
     findings = state.get("findings", [])
 
@@ -2387,10 +2398,12 @@ async def _node_collect_findings(state: ReviewState) -> dict[str, Any]:
         expected += 1  # system reviewer
         expected += len(group.specialists_needed)  # specialist reviewers
 
-    if not findings:
+    successful = [f for f in findings if f.get("failure_reason") is None]
+
+    if not successful:
         raise RuntimeError("All reviewers failed -- no findings collected")
 
-    succeeded = len(findings)
+    succeeded = len(successful)
     failed = expected - succeeded
     if failed > 0:
         logger.warning(

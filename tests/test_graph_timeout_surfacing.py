@@ -191,3 +191,124 @@ class TestDegradedCoverageFindings:
         assert result1.failure_reason == "timeout"
         labels = failed_reviewer_labels([result1])
         assert labels == [("group1", "timeout")]
+
+
+def _make_plan_dict() -> dict[str, object]:
+    """A minimal ReviewPlan with 1 system group (0 specialists) -- expected
+    reviewer count = 2 (cross-cutting + tests-and-docs) + 1 (system) = 3.
+    """
+    return {
+        "system_groups": [
+            {
+                "name": "backend",
+                "files": ["a.py"],
+                "conventions": "",
+                "review_focus": "",
+                "specialists_needed": [],
+            }
+        ],
+        "cross_cutting_concerns": [],
+        "file_manifest": [{"path": "a.py", "change_type": "modified"}],
+    }
+
+
+class TestNodeCollectFindingsAllCrashedGuard:
+    """Regression coverage for the all-reviewers-failed guard in
+    _node_collect_findings: a crashed/timed-out reviewer still contributes a
+    (marker) SystemReviewResult to state["findings"], so a plain
+    `len(findings)` check cannot tell "everyone crashed" apart from
+    "everyone succeeded".
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_reviewers_crashed_raises_instead_of_proceeding(self) -> None:
+        """Every reviewer result carries a failure_reason -- must raise, not
+        silently continue toward a clean-looking verdict with zero real
+        coverage.
+        """
+        from argus.graph import _node_collect_findings
+
+        crashed = SystemReviewResult(
+            system_group="backend",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="worker_crashed",
+        )
+        timed_out = SystemReviewResult(
+            system_group="cross-cutting",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="timeout",
+        )
+        another_crashed = SystemReviewResult(
+            system_group="tests-and-docs",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="worker_crashed",
+        )
+
+        state = {
+            "plan": _make_plan_dict(),
+            "findings": [
+                crashed.model_dump(),
+                timed_out.model_dump(),
+                another_crashed.model_dump(),
+            ],
+        }
+
+        with pytest.raises(RuntimeError, match="All reviewers failed"):
+            await _node_collect_findings(state)
+
+    @pytest.mark.asyncio
+    async def test_empty_findings_still_raises(self) -> None:
+        """The pre-existing "nothing came back at all" case must still raise."""
+        from argus.graph import _node_collect_findings
+
+        state = {"plan": _make_plan_dict(), "findings": []}
+
+        with pytest.raises(RuntimeError, match="All reviewers failed"):
+            await _node_collect_findings(state)
+
+    @pytest.mark.asyncio
+    async def test_mixed_success_and_crash_proceeds_and_counts_only_real_failures(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """At least one genuinely successful reviewer keeps the pipeline
+        going, and the partial-failure count reflects only the
+        crashed/timed-out entries plus any missing results -- not
+        `expected - len(findings)`.
+        """
+        from argus.graph import _node_collect_findings
+
+        succeeded = SystemReviewResult(
+            system_group="backend",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.01,
+            failure_reason=None,
+        )
+        crashed = SystemReviewResult(
+            system_group="cross-cutting",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="worker_crashed",
+        )
+
+        state = {
+            "plan": _make_plan_dict(),
+            "findings": [succeeded.model_dump(), crashed.model_dump()],
+        }
+
+        with caplog.at_level(logging.WARNING, logger=_GRAPH_MODULE):
+            result = await _node_collect_findings(state)
+
+        assert result == {}
+        warning_records = [r for r in caplog.records if r.levelname == "WARNING"]
+        # expected=3, succeeded=1 (only the real success counts) -> failed=2,
+        # even though state["findings"] has 2 entries (not 1 as a naive
+        # len(findings)-based "succeeded" count would have implied).
+        assert any("Partial reviewer failure: 2/3" in r.message for r in warning_records)

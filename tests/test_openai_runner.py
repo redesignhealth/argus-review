@@ -24,9 +24,12 @@ from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
     ResponseOutputMessage,
+    ResponseOutputRefusal,
     ResponseOutputText,
     ResponseUsage,
 )
+from openai.types.responses.response import IncompleteDetails
+from openai.types.responses.response_error import ResponseError
 from openai.types.responses.response_usage import InputTokensDetails, OutputTokensDetails
 
 from argus.bench import BenchEntry
@@ -88,12 +91,25 @@ def _make_response(
     usage: ResponseUsage | None = None,
     text: str = "",
     resp_id: str = "resp_123",
+    *,
+    status: str | None = None,
+    error: Any = None,
+    incomplete_details: Any = None,
+    extra_output_items: list[Any] | None = None,
 ) -> MagicMock:
-    """Build a mock Response object for the Responses API."""
+    """Build a mock Response object for the Responses API.
+
+    ``status``/``error``/``incomplete_details`` default to ``None`` (a
+    healthy response) and ``extra_output_items`` lets a test append items
+    (e.g. a message with refusal content) alongside any function calls.
+    """
     response = MagicMock(spec=Response)
     response.id = resp_id
     response.usage = usage
     response.output_text = text
+    response.status = status
+    response.error = error
+    response.incomplete_details = incomplete_details
 
     output_items: list[Any] = []
     for i, (name, args) in enumerate(calls or []):
@@ -108,6 +124,7 @@ def _make_response(
                 content=[ResponseOutputText(text=text, type="output_text", annotations=[])],
             )
         )
+    output_items.extend(extra_output_items or [])
     response.output = output_items
     return response
 
@@ -531,7 +548,13 @@ class TestOpenAIRunnerTimeoutsAndFailures:
 
         assert result.failure_reason == "timeout"
         assert result.timed_out is True
-        assert result.result_text == ""
+        # No turns completed before the timeout -- result_text still reflects
+        # a genuinely empty (not discarded) accumulator, same shape as a
+        # normal 0-finding completion, not the empty-string sentinel.
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert parsed.findings == []
         assert result.tool_call_count == 0
 
     async def test_api_timeout_error_returns_timed_out_result(self, tmp_path: Any) -> None:
@@ -593,7 +616,10 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         assert result.failure_reason == "worker_crashed"
-        assert result.result_text == ""
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert parsed.findings == []
 
     async def test_openai_rate_limit_error_produces_visible_failure(self, tmp_path: Any) -> None:
         """RateLimitError translates into failure_reason='worker_crashed'."""
@@ -735,6 +761,275 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         client.close.assert_called_once()
+
+
+class TestOpenAIRunnerPartialProgressOnFailure:
+    """Finding: a failure partway through a session must preserve the
+    cost/usage/tool-call accounting already accumulated from turns that DID
+    complete, rather than reporting cost_usd=0 and discarding it.
+    """
+
+    async def test_worker_crash_after_completed_turns_preserves_cost_and_usage(
+        self, tmp_path: Any
+    ) -> None:
+        """An API error on turn 3 must not zero out turns 1-2's accounting."""
+        u1 = _make_usage(input_tokens=1000, output_tokens=100, cached_tokens=0)
+        u2 = _make_usage(input_tokens=1200, output_tokens=120, cached_tokens=0)
+
+        responses: list[Any] = [
+            _make_response(
+                calls=[("report_finding", {"file": "a.py", "line": 1, "description": "d1"})],
+                usage=u1,
+                resp_id="r1",
+            ),
+            _make_response(
+                calls=[("report_finding", {"file": "b.py", "line": 2, "description": "d2"})],
+                usage=u2,
+                resp_id="r2",
+            ),
+            APIError(message="internal server error", request=MagicMock(), body=None),
+        ]
+        client = _make_fake_client(responses)
+        entry = _make_entry(model="gpt-mini")
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "worker_crashed"
+        # Two completed turns' worth of report_finding calls -- not zero.
+        assert result.tool_call_count == 2
+        assert result.tool_names == ["report_finding"]
+        assert result.cost_usd > 0.0
+
+        from argus.llm.models import estimate_cost_usd
+
+        expected_cost = estimate_cost_usd(
+            model=resolve_alias("gpt-mini"),
+            input_tokens=2200,
+            output_tokens=220,
+            cached_input_tokens=0,
+        )
+        assert result.cost_usd == pytest.approx(expected_cost)
+
+        # The 2 findings reported before the crash are preserved too.
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert len(parsed.findings) == 2
+
+    async def test_timeout_after_completed_turns_preserves_cost_and_usage(
+        self, tmp_path: Any
+    ) -> None:
+        """An overall-session timeout firing on turn 3 (asyncio.wait_for
+        cancellation) must not discard turns 1-2's accounting either.
+        """
+        u1 = _make_usage(input_tokens=800, output_tokens=80, cached_tokens=100)
+        u2 = _make_usage(input_tokens=900, output_tokens=90, cached_tokens=100)
+
+        call_count = 0
+
+        async def _create(**_: Any) -> Any:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_response(
+                    calls=[("report_finding", {"file": "a.py", "line": 1, "description": "d1"})],
+                    usage=u1,
+                    resp_id="r1",
+                )
+            if call_count == 2:
+                return _make_response(
+                    calls=[("report_finding", {"file": "b.py", "line": 2, "description": "d2"})],
+                    usage=u2,
+                    resp_id="r2",
+                )
+            # Turn 3 never completes -- the overall session timeout fires here.
+            await asyncio.sleep(5.0)
+            return _make_response(calls=[])
+
+        client = MagicMock()
+        client.responses.create = AsyncMock(side_effect=_create)
+        client.close = AsyncMock()
+
+        entry = _make_entry(model="gpt-mini")
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+                timeout_s=0.15,
+            )
+
+        assert result.failure_reason == "timeout"
+        assert result.timed_out is True
+        assert result.tool_call_count == 2
+        assert result.cost_usd > 0.0
+
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert len(parsed.findings) == 2
+
+        client.close.assert_called_once()
+
+
+class TestOpenAIRunnerDegradedResponseDetection:
+    """Finding: a response with no function calls must not be treated as a
+    clean completion without checking OpenAI's own degraded-completion
+    signals -- ``status``, ``incomplete_details``, ``error``, and refusal
+    content blocks.
+    """
+
+    async def test_incomplete_status_max_output_tokens_is_a_failure(self, tmp_path: Any) -> None:
+        """status="incomplete" (e.g. truncated by the output-token budget)
+        must not be reported as a clean, zero-findings review.
+        """
+        response = _make_response(
+            calls=[],
+            text="a partial thought that got cut o",
+            resp_id="r1",
+            status="incomplete",
+            incomplete_details=IncompleteDetails(reason="max_output_tokens"),
+        )
+        client = _make_fake_client([response])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "worker_crashed"
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert parsed.findings == []
+
+    async def test_failed_status_is_a_failure(self, tmp_path: Any) -> None:
+        """status="failed" must not be reported as a clean completion."""
+        response = _make_response(calls=[], resp_id="r1", status="failed")
+        client = _make_fake_client([response])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "worker_crashed"
+
+    async def test_top_level_error_is_a_failure(self, tmp_path: Any) -> None:
+        """A response.error attached to an otherwise-terminal response must
+        not be silently ignored just because there were no function calls.
+        """
+        response = _make_response(
+            calls=[],
+            resp_id="r1",
+            error=ResponseError(code="server_error", message="internal error"),
+        )
+        client = _make_fake_client([response])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "worker_crashed"
+
+    async def test_refusal_content_is_a_failure_even_with_completed_status(
+        self, tmp_path: Any
+    ) -> None:
+        """A refusal can arrive on an otherwise status="completed" response
+        with no function calls -- must still be caught.
+        """
+        refusal_message = ResponseOutputMessage(
+            id="msg_1",
+            type="message",
+            role="assistant",
+            status="completed",
+            content=[ResponseOutputRefusal(refusal="I can't help with that.", type="refusal")],
+        )
+        response = _make_response(
+            calls=[],
+            resp_id="r1",
+            status="completed",
+            extra_output_items=[refusal_message],
+        )
+        client = _make_fake_client([response])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "worker_crashed"
+
+    async def test_completed_status_with_no_function_calls_is_still_clean(
+        self, tmp_path: Any
+    ) -> None:
+        """Sanity check against over-triggering: a genuinely healthy,
+        status="completed", no-tool-call response is NOT a failure.
+        """
+        response = _make_response(calls=[], text="all good", resp_id="r1", status="completed")
+        client = _make_fake_client([response])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason is None
+
+    async def test_status_unset_with_no_function_calls_is_still_clean(self, tmp_path: Any) -> None:
+        """A response with status left unset (as in every other test's mock
+        doubles, and possibly some real SDK responses) must not spuriously
+        trip the new degraded-response check.
+        """
+        response = _make_response(calls=[], text="all good", resp_id="r1")
+        client = _make_fake_client([response])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason is None
 
 
 class TestOpenAIRedactInputs:
