@@ -153,11 +153,14 @@ def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str,
     as a timed-out one's, and the previous timeout-only check silently treated
     a crash as a clean result.
     """
-    return [
-        (result.system_group, result.failure_reason)
-        for result in results
-        if result.failure_reason is not None
-    ]
+    labels: list[tuple[str, str]] = []
+    for result in results:
+        reason = result.failure_reason
+        if reason is None and getattr(result, "timed_out", False):
+            reason = "timeout"
+        if reason is not None:
+            labels.append((result.system_group, reason))
+    return labels
 
 
 def build_degraded_coverage_labels(
@@ -184,6 +187,37 @@ def build_degraded_coverage_labels(
         for name in graph_result.get("precheck_scanner_failures", [])
     ]
     return failed_labels
+
+
+def build_degraded_coverage_findings(
+    failed_labels: list[tuple[str, str]],
+) -> list[Finding]:
+    """Build SUGGESTION-level findings for reviewers/scanners that failed to complete.
+
+    Surfaces each timed-out or crashed reviewer session (and failed scanner)
+    as an explicit coverage-gap finding so it appears in response.findings
+    and the final review output, rather than only in telemetry.
+    """
+    findings: list[Finding] = []
+    for label, reason in failed_labels:
+        reason_desc = "timed out" if reason == "timeout" else f"failed ({reason})"
+        findings.append(
+            Finding(
+                severity=Severity.SUGGESTION,
+                category="coverage-gap",
+                file=None,
+                line=None,
+                description=(
+                    f"Reviewer session '{label}' {reason_desc} and produced no findings. "
+                    "Coverage for this area is degraded."
+                ),
+                suggestion=(
+                    f"Re-run the review or manually inspect the changes in '{label}' "
+                    f"to ensure potential issues were not missed due to {reason}."
+                ),
+            )
+        )
+    return findings
 
 
 # Explicit ordering, not reliance on declaration order or enum identity:
@@ -322,6 +356,8 @@ def append_degraded_coverage_section(
         "The following did not complete this round and produced no findings "
         "as a result, not because the area was clean. Treat these areas as "
         "**not reviewed** this round:\n\n"
-        f"{bullets}\n"
+        f"{bullets}\n\n"
+        "**Suggestion**: Re-run the review or manually inspect the unreviewed areas "
+        "above to cover potential gaps.\n"
     )
     return review_comment + section

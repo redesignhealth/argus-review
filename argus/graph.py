@@ -40,6 +40,7 @@ from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 from argus.helpers import (
     append_degraded_coverage_section,
     apply_precheck_scanner_failure_gate,
+    build_degraded_coverage_findings,
     build_degraded_coverage_labels,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
@@ -2281,7 +2282,42 @@ async def _node_run_reviewer(inputs: ReviewerInput, config: RunnableConfig) -> d
         raise
     except Exception as exc:
         logger.error("Reviewer %s failed: %s", reviewer_type, exc, exc_info=True)
-        return {"findings": [], "agent_runs": []}
+        if reviewer_type == "system" and group:
+            grp_name = group.name
+            agent_name = f"system:{group.name}"
+        elif reviewer_type == "specialist" and group:
+            spec = inputs.get("specialist", "unknown")
+            grp_name = f"{group.name}::{spec}"
+            agent_name = f"specialist:{group.name}::{spec}"
+        elif reviewer_type == "cross_cutting":
+            grp_name = "cross-cutting"
+            agent_name = "cross-cutting"
+        elif reviewer_type == "tests_and_docs":
+            grp_name = "tests-and-docs"
+            agent_name = "tests-and-docs"
+        else:
+            grp_name = str(reviewer_type)
+            agent_name = str(reviewer_type)
+
+        crashed_result = SystemReviewResult(
+            system_group=grp_name,
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="worker_crashed",
+        )
+        crashed_agent_run = AgentRunData(
+            agent_name=agent_name,
+            agent_type=reviewer_type
+            if reviewer_type in ("system", "specialist", "cross_cutting", "tests_and_docs")
+            else "system",
+            duration_seconds=0.0,
+            failure_reason="worker_crashed",
+        )
+        return {
+            "findings": [crashed_result.model_dump()],
+            "agent_runs": [crashed_agent_run.model_dump(mode="json")],
+        }
 
     # Build a human-readable label for this reviewer. Wrapped in try/except so
     # a label-formatting bug can never discard a successfully-computed result.
@@ -3093,6 +3129,7 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
         response.review_comment = append_degraded_coverage_section(
             response.review_comment, failed_labels
         )
+        response.findings.extend(build_degraded_coverage_findings(failed_labels))
 
     # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
     # own docstring (argus/config.py) for the fail-open-vs-fail-closed

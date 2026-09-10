@@ -348,6 +348,13 @@ class SessionResult:
     context7_call_count: int = 0
     model: str | None = None
     failure_reason: Literal["timeout", "worker_crashed"] | None = None
+    timed_out: bool = False
+
+    def __post_init__(self) -> None:
+        if self.timed_out and not self.failure_reason:
+            self.failure_reason = "timeout"
+        elif self.failure_reason == "timeout":
+            self.timed_out = True
 
 
 def _empty_session_result(

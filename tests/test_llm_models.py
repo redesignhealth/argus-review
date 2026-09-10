@@ -14,6 +14,7 @@ from argus.llm.models import (
     CLAUDE_DEFAULT,
     EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
+    GPT_FRONTIER,
     estimate_cost_usd,
 )
 from argus.llm.pricing import get_token_cost
@@ -121,6 +122,12 @@ class TestEstimateCostUsd:
         """Gemini pricing is real in litellm, so token count must estimate
         a real, nonzero cost."""
         cost = estimate_cost_usd(GEMINI_FRONTIER, input_tokens=1_000_000, output_tokens=1_000_000)
+        assert cost > 0.0
+
+    def test_openai_model_estimates_real_nonzero_cost(self) -> None:
+        """OpenAI pricing is real in litellm, so token count must estimate
+        a real, nonzero cost."""
+        cost = estimate_cost_usd(GPT_FRONTIER, input_tokens=1_000_000, output_tokens=1_000_000)
         assert cost > 0.0
 
 

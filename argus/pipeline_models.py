@@ -15,7 +15,7 @@ from enum import Enum
 from datetime import datetime, timezone
 from typing import Any, Literal, get_args
 
-from pydantic import AwareDatetime, BaseModel, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +128,20 @@ class SystemReviewResult(BaseModel):
             "to have failed', not 'confirmed completed'."
         ),
     )
+    timed_out: bool = Field(
+        default=False,
+        description="True when failure_reason == 'timeout'; kept for back-compat.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_timed_out_and_failure_reason(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("timed_out") and not data.get("failure_reason"):
+                data["failure_reason"] = "timeout"
+            elif data.get("failure_reason") == "timeout":
+                data["timed_out"] = True
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +303,20 @@ class AgentRunData(BaseModel):
             "flows through here too."
         ),
     )
+    timed_out: bool = Field(
+        default=False,
+        description="True when failure_reason == 'timeout'; kept for back-compat.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sync_timed_out_and_failure_reason(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if data.get("timed_out") and not data.get("failure_reason"):
+                data["failure_reason"] = "timeout"
+            elif data.get("failure_reason") == "timeout":
+                data["timed_out"] = True
+        return data
 
     @field_validator("started_at", "finished_at", mode="before")
     @classmethod
