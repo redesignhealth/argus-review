@@ -2,7 +2,10 @@
 
 Single source of truth for which concrete LLM each logical alias resolves to.
 To upgrade a model family across the codebase (e.g. Claude Sonnet 4.6 ->
-4.7, once formally approved), edit ``ALIAS_MAP`` below and nothing else.
+4.7, once formally approved), update the alias in ``ALIAS_MAP`` below, the
+approved-model policy table (``pr-review-specialist-llm-patterns.md``), and
+the corresponding pinning test in ``tests/test_llm_models.py`` together --
+not ``ALIAS_MAP`` alone.
 Note the history on ``gpt-frontier`` specifically: an earlier bump of this
 same alias (GPT-5.4 -> GPT-5.5) was a real BLOCKING finding, because
 gpt-5.5 was NOT on the approved model list (see
@@ -79,7 +82,7 @@ from argus.llm.pricing import estimate_cost_usd
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
-    # OpenAI -- gpt-5 / gpt-5.6 families
+    # OpenAI -- gpt-5.4 / gpt-5.6 families
     # gpt-frontier is bumped to gpt-5.6-sol, and gpt-mini is bumped to
     # gpt-5.6-luna, as the gpt-5.6 family is now on the approved model list
     # (see pr-review-specialist-llm-patterns.md), whose Default column was
