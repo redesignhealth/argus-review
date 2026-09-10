@@ -12,8 +12,7 @@ import pytest
 from argus.llm.models import (
     ALIAS_MAP,
     CLAUDE_DEFAULT,
-    CLAUDE_FRONTIER,
-    CLAUDE_MINI,
+    EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
     estimate_cost_usd,
 )
@@ -30,15 +29,21 @@ class TestPricingLookup:
             assert cost is not None, f"no pricing entry for {alias!r} -> {model!r}"
 
     def test_experimental_models_coverage(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Any experimental alias must have pricing; verify with a synthetic entry."""
+        """Any experimental alias must have pricing; verify with both real and synthetic entries."""
+        for alias, model in EXPERIMENTAL_MODELS.items():
+            cost = get_token_cost(model)
+            assert cost is not None, f"no pricing entry for experimental {alias!r} -> {model!r}"
+
         monkeypatch.setattr(
-            "argus.llm.models.EXPERIMENTAL_MODELS", {"exp-model": "claude-sonnet-4-6"}
+            "argus.llm.models.EXPERIMENTAL_MODELS", {"exp-model": ALIAS_MAP["claude-default"]}
         )
         from argus.llm.models import EXPERIMENTAL_MODELS as exp
 
         for alias, model in exp.items():
             cost = get_token_cost(model)
-            assert cost is not None, f"no pricing entry for experimental {alias!r} -> {model!r}"
+            assert cost is not None, (
+                f"no pricing entry for synthetic experimental {alias!r} -> {model!r}"
+            )
 
     def test_claude_default_pricing_rates(self) -> None:
         """Regression guard: claude-sonnet-4-6 rates in litellm must match
@@ -79,21 +84,29 @@ class TestEstimateCostUsd:
     def test_cache_creation_tokens_billed(self) -> None:
         """cache_creation_tokens is billed at the cache-creation rate."""
         cost = estimate_cost_usd(
-            CLAUDE_DEFAULT,
+            ALIAS_MAP["claude-default"],
             input_tokens=0,
             output_tokens=0,
             cache_creation_tokens=1_000_000,
         )
-        assert cost > 0.0
+        assert cost == pytest.approx(3.75)
 
     def test_zero_tokens_is_zero_cost(self) -> None:
-        assert estimate_cost_usd(CLAUDE_DEFAULT, input_tokens=0, output_tokens=0) == 0.0
+        assert (
+            estimate_cost_usd(ALIAS_MAP["claude-default"], input_tokens=0, output_tokens=0) == 0.0
+        )
 
     def test_tier_relative_pricing_ordering(self) -> None:
         """Frontier tier input should exceed default, which exceeds mini."""
-        cost_frontier = estimate_cost_usd(CLAUDE_FRONTIER, input_tokens=1_000_000, output_tokens=0)
-        cost_default = estimate_cost_usd(CLAUDE_DEFAULT, input_tokens=1_000_000, output_tokens=0)
-        cost_mini = estimate_cost_usd(CLAUDE_MINI, input_tokens=1_000_000, output_tokens=0)
+        cost_frontier = estimate_cost_usd(
+            ALIAS_MAP["claude-frontier"], input_tokens=1_000_000, output_tokens=0
+        )
+        cost_default = estimate_cost_usd(
+            ALIAS_MAP["claude-default"], input_tokens=1_000_000, output_tokens=0
+        )
+        cost_mini = estimate_cost_usd(
+            ALIAS_MAP["claude-mini"], input_tokens=1_000_000, output_tokens=0
+        )
         assert cost_frontier > cost_default > cost_mini > 0.0
 
     def test_unknown_model_returns_zero_cost_with_warning(
@@ -109,3 +122,19 @@ class TestEstimateCostUsd:
         a real, nonzero cost."""
         cost = estimate_cost_usd(GEMINI_FRONTIER, input_tokens=1_000_000, output_tokens=1_000_000)
         assert cost > 0.0
+
+
+class TestResolveOverrides:
+    def test_resolve_claude_default_honors_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib
+        import argus.llm.models as models
+
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-opus-5")
+        importlib.reload(models)
+        try:
+            assert models.resolve("claude-default") == "claude-opus-5"
+        finally:
+            monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+            importlib.reload(models)

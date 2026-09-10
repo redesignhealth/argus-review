@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -220,6 +221,7 @@ def _overlay_layers(settings: Any) -> list[Path]:
 
 
 _WARNED_ROLES: set[str] = set()
+_WARNED_ROLES_LOCK: threading.Lock = threading.Lock()
 
 
 @lru_cache(maxsize=1)
@@ -235,9 +237,6 @@ def load_bench() -> dict[str, Any]:
     if not settings.ARGUS_NO_BENCH_OVERRIDES:
         for layer_path in _overlay_layers(settings):
             overlay = _load_toml_file(layer_path)
-            if "bulk_reviewer" in overlay:
-                for role in BULK_ROLE_PROMPTS:
-                    _warn_if_not_wired(role)
             roles = overlay.get("roles", {})
             if isinstance(roles, dict):
                 for role in roles:
@@ -251,7 +250,8 @@ def load_bench() -> dict[str, Any]:
 def clear_cache() -> None:
     """Clear the cached bench config, forcing the next call to reload."""
     load_bench.cache_clear()
-    _WARNED_ROLES.clear()
+    with _WARNED_ROLES_LOCK:
+        _WARNED_ROLES.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +371,14 @@ def _warn_if_not_wired(role: str) -> None:
     overriding anything else silently has no effect on a real review run
     unless this warning is here to say otherwise.
     """
-    if role not in _WIRED_ROLES and role not in _WARNED_ROLES:
-        _WARNED_ROLES.add(role)
+    with _WARNED_ROLES_LOCK:
+        if role not in _WIRED_ROLES and role not in _WARNED_ROLES:
+            _WARNED_ROLES.add(role)
+            should_warn = True
+        else:
+            should_warn = False
+
+    if should_warn:
         logger.warning(
             "bench: role %r is not yet wired to any runner function, "
             "so configuring it in bench.toml has NO effect on an actual "

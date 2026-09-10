@@ -367,8 +367,9 @@ def _execute_tool_call(name: str, args: dict[str, Any]) -> tuple[str, bool]:
     try:
         return str(fn(**args)), False
     except Exception as exc:  # noqa: BLE001 - LLM-supplied call, must never crash the loop
-        logger.warning("Tool call error %s(%s): %s", name, repr(args)[:300], exc)
-        return f"Error calling {name}({args!r}): {exc}", True
+        args_repr = repr(args)[:300]
+        logger.warning("Tool call error %s(%s): %s", name, args_repr, exc)
+        return f"Error calling {name}({args_repr}): {exc}", True
 
 
 def _build_result_text(findings: list[dict[str, Any]], files_explored: list[str]) -> str:
@@ -648,7 +649,6 @@ async def _run_turns(
         usage_cached_total = 0
         usage_thoughts_total = 0
         usage_tool_use_prompt_total = 0
-        usage_cache_creation_total = 0
 
         with review_tools.review_session(repo_root) as findings_sink:
             for _turn in range(_MAX_TURNS):
@@ -810,7 +810,6 @@ async def _run_turns(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=usage_cached_total,
-            cache_creation_tokens=usage_cache_creation_total,
         )
 
         tools_str = f" (tools: {', '.join(unique_tool_names)})" if tool_calls else ""
@@ -845,21 +844,43 @@ async def _run_turns(
         # `_maybe_activate_cache`) -- close both on every exit path,
         # including a timeout/cancellation unwinding through this `finally`,
         # or connections leak across the concurrent reviewer fan-out.
-        # Use asyncio.shield so re-delivered cancellation cannot abort cleanup.
-        await asyncio.shield(asyncio.to_thread(client.close))
-        await asyncio.shield(client.aio.aclose())
+        # Combine into a single shielded gather so both run to completion
+        # even under cancellation.
+        await asyncio.shield(asyncio.gather(asyncio.to_thread(client.close), client.aio.aclose()))
 
 
 def _redact_gemini_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:
     """LangSmith ``process_inputs`` hook: redact credentials from Settings."""
+    if not isinstance(inputs, dict):
+        return inputs
     s = inputs.get("settings")
-    return {
-        **inputs,
-        "settings": f"<Settings project={getattr(s, 'LANGSMITH_PROJECT', '?')}>",
-    }
+    if s is not None:
+        return {
+            **inputs,
+            "settings": f"<Settings project={getattr(s, 'LANGSMITH_PROJECT', '?')}>",
+        }
+    return dict(inputs)
 
 
-@traceable(name="pr_review.gemini_session", process_inputs=_redact_gemini_inputs)
+def _redact_gemini_outputs(outputs: Any, **_: Any) -> dict[str, Any]:
+    """LangSmith ``process_outputs`` hook: emit metadata without dumping full text."""
+    if isinstance(outputs, SessionResult):
+        return {
+            "model": outputs.model,
+            "tool_call_count": outputs.tool_call_count,
+            "tool_names": outputs.tool_names,
+            "cost_usd": outputs.cost_usd,
+            "duration_seconds": outputs.duration_seconds,
+            "failure_reason": outputs.failure_reason,
+        }
+    return {"result": "<redacted>"}
+
+
+@traceable(
+    name="pr_review.gemini_session",
+    process_inputs=_redact_gemini_inputs,
+    process_outputs=_redact_gemini_outputs,
+)
 async def run_session_gemini(
     *,
     entry: BenchEntry,

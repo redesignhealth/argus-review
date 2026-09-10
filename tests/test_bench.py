@@ -384,6 +384,13 @@ class TestResolveWiringStatusWarning:
         assert any(role in record.message for record in caplog.records)
         assert any("no effect" in record.message.lower() for record in caplog.records)
 
+    def test_unwired_role_warns_only_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING", logger="argus.bench"):
+            bench.resolve("cross-cutting")
+            bench.resolve("cross-cutting")
+        matching = [r for r in caplog.records if "cross-cutting" in r.message]
+        assert len(matching) == 1
+
     def test_wired_roles_is_a_subset_of_all_declared_roles(self) -> None:
         """Sanity guard: every name in _WIRED_ROLES must actually be a real,
         resolvable role -- catches a typo in _WIRED_ROLES itself."""

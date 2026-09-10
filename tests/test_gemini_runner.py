@@ -1223,3 +1223,44 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
                     settings=settings,
                     repo_root="/tmp/does-not-need-to-exist",
                 )
+
+
+class TestGeminiRedactionHooks:
+    async def test_redact_gemini_inputs_redacts_settings(self) -> None:
+        from argus.gemini_runner import _redact_gemini_inputs
+
+        settings = _make_settings()
+        inputs = {"settings": settings, "label": "test", "other": 123}
+        redacted = _redact_gemini_inputs(inputs)
+        assert redacted["label"] == "test"
+        assert redacted["other"] == 123
+        assert "Settings" in redacted["settings"]
+        assert "secret" not in redacted["settings"]
+
+    async def test_redact_gemini_inputs_missing_settings(self) -> None:
+        from argus.gemini_runner import _redact_gemini_inputs
+
+        inputs = {"label": "test"}
+        redacted = _redact_gemini_inputs(inputs)
+        assert redacted == {"label": "test"}
+
+    async def test_redact_gemini_outputs(self) -> None:
+        from argus.gemini_runner import _redact_gemini_outputs
+        from argus.runners import SessionResult
+
+        res = SessionResult(
+            result_text="secret findings",
+            cost_usd=1.23,
+            duration_seconds=10.0,
+            started_at=datetime.now(timezone.utc),
+            finished_at=datetime.now(timezone.utc),
+            tool_call_count=2,
+            tool_names=["read_file"],
+            context7_call_count=0,
+            model="gemini-frontier",
+            failure_reason=None,
+        )
+        redacted = _redact_gemini_outputs(res)
+        assert redacted["model"] == "gemini-frontier"
+        assert redacted["cost_usd"] == 1.23
+        assert "result_text" not in redacted

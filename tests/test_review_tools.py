@@ -127,8 +127,7 @@ class TestGlobFiles:
         monkeypatch.setattr(review_tools, "_MAX_GLOB_RESULTS", 1)
         with review_tools.review_session(str(worktree)):
             result = review_tools.glob_files("src/*.py")
-        assert "src/app.py" in result or "src/util.py" in result
-        assert "capped at 1" in result
+        assert result == "src/app.py\n... results capped at 1 matches"
 
 
 # ---------------------------------------------------------------------------
