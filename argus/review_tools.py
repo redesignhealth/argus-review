@@ -1,7 +1,7 @@
 """Platform-neutral leaf-reviewer tool implementations.
 
 These are plain Python functions intended for reuse by ANY future
-non-Claude runner (Gemini, OpenAI Responses, ...) — deliberately NOT
+non-Claude runner (Gemini, OpenAI Responses, ...) -- deliberately NOT
 coupled to a specific agent framework's ``@tool``/function-schema
 decorator, since the actual agent-loop implementation that wraps them is
 out of scope here (Track 3). A future runner adapter wraps
@@ -19,20 +19,20 @@ taking a ``root``/``session_id`` parameter directly. A caller opens one
         # ... drive an agent loop that calls read_file/glob_files/grep/
         # report_finding/finish_review as tool calls ...
         pass
-    # `findings` still holds every reported finding here — the context
+    # `findings` still holds every reported finding here -- the context
     # manager only unbinds the ContextVars on exit, it doesn't clear the
     # list object itself.
 
 Because ``contextvars`` context is copied (not shared) when an
 ``asyncio`` task is created, two concurrent reviewer sessions opened in
 two different tasks never see each other's root or findings sink, even
-though both run in the same process — this is the "16 concurrent
+though both run in the same process -- this is the "16 concurrent
 reviewers don't cross-contaminate each other's findings" property.
 
 Sandboxing: ``read_file``, ``glob_files``, and ``grep`` all resolve paths
 against the active session's root using ``argus.helpers.sanitize_file_paths``
-— the same path-containment idiom ``argus.runners`` already uses to
-sandbox LLM-supplied file paths — rather than a new one invented here.
+-- the same path-containment idiom ``argus.runners`` already uses to
+sandbox LLM-supplied file paths -- rather than a new one invented here.
 ``glob_files`` and ``grep`` additionally re-resolve (``Path.resolve()``)
 every individual candidate returned by ``Path.glob()`` and verify it is
 still contained under the (already-resolved) root before treating it as a
@@ -40,7 +40,7 @@ match: ``sanitize_file_paths`` only validates the caller-supplied
 ``path``/``pattern`` argument itself, but a glob match can be a symlink
 *inside* the sandboxed tree (a file symlink, or an intermediate path
 segment that is a symlinked directory) whose real target lives *outside*
-it — see ``_is_within_root``.
+it -- see ``_is_within_root``.
 
 Resource limits: ``grep`` caps the pattern length, the number of files
 scanned, and the number of results returned, so a huge glob match set
@@ -66,6 +66,7 @@ before slicing it.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import re
 import signal
 import threading
@@ -89,6 +90,10 @@ _VALID_GREP_MODES = frozenset({"files", "content"})
 _MAX_READ_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MiB
 _MAX_READ_LINES_HARD_CAP = 20_000  # absolute ceiling, even when limit=0
 
+# glob_files: bound output size and file candidate enumeration to avoid memory spikes.
+_MAX_GLOB_RESULTS = 500
+_MAX_GLOB_CANDIDATES = 5000
+
 # grep: bound pattern complexity, total work, and total output, since the
 # pattern/glob ultimately come from an LLM tool call this code can't trust
 # to be well-behaved.
@@ -110,7 +115,7 @@ def review_session(root: str) -> Iterator[list[dict[str, Any]]]:
     Yields the (initially empty) findings list that ``report_finding``
     appends to. The list is a plain object, not itself a ContextVar, so
     the caller can keep reading it after the ``with`` block exits (exit
-    only resets the ContextVars binding root/sink to this context — it
+    only resets the ContextVars binding root/sink to this context -- it
     does not clear the list's contents).
     """
     findings: list[dict[str, Any]] = []
@@ -146,8 +151,8 @@ def _require_findings_sink() -> list[dict[str, Any]]:
 def _safe_path(path: str, root: str) -> Path:
     """Resolve ``path`` against ``root``, raising if it escapes the root.
 
-    Reuses ``argus.helpers.sanitize_file_paths`` — passing a single-item
-    list and treating an empty result as rejection — rather than
+    Reuses ``argus.helpers.sanitize_file_paths`` -- passing a single-item
+    list and treating an empty result as rejection -- rather than
     reimplementing path-containment logic here.
     """
     safe = sanitize_file_paths([path], root)
@@ -255,6 +260,9 @@ def glob_files(pattern: str) -> str:
     that traverses a symlinked directory -- is silently skipped rather
     than listed; see ``_is_within_root``.
 
+    Output is capped at ``_MAX_GLOB_RESULTS`` matches to prevent unbounded
+    memory growth from broad queries.
+
     Raises:
         NoActiveReviewSessionError: if called outside a ``review_session``.
         ValueError: if ``pattern`` is absolute or contains ``".."``.
@@ -263,12 +271,20 @@ def glob_files(pattern: str) -> str:
     _reject_traversal_pattern(pattern, "pattern")
 
     root_path = Path(root)
-    matches = sorted(
-        str(p.relative_to(root_path))
-        for p in root_path.glob(pattern)
-        if p.is_file() and _is_within_root(p, root_path)
-    )
-    return "\n".join(matches)
+    matches: list[str] = []
+    truncated = False
+    for candidate in itertools.islice(root_path.glob(pattern), _MAX_GLOB_CANDIDATES):
+        if candidate.is_file() and _is_within_root(candidate, root_path):
+            matches.append(str(candidate.relative_to(root_path)))
+            if len(matches) >= _MAX_GLOB_RESULTS:
+                truncated = True
+                break
+
+    matches.sort()
+    result = "\n".join(matches)
+    if truncated:
+        result += f"\n... results capped at {_MAX_GLOB_RESULTS} matches"
+    return result
 
 
 @contextlib.contextmanager
@@ -296,8 +312,10 @@ def _grep_alarm(timeout_seconds: float) -> Iterator[None]:
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, old_handler)
+        try:
+            signal.signal(signal.SIGALRM, old_handler)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 def _grep_scan(
@@ -313,7 +331,9 @@ def _grep_scan(
     content_hits: list[str] = []
     scanned = 0
 
-    for candidate in sorted(root_path.glob(glob)):
+    candidates = list(itertools.islice(root_path.glob(glob), _MAX_GREP_FILES_SCANNED * 2))
+    candidates.sort()
+    for candidate in candidates:
         if scanned >= _MAX_GREP_FILES_SCANNED:
             break
         if not candidate.is_file() or not _is_within_root(candidate, root_path):
@@ -412,7 +432,7 @@ def report_finding(
     """
     sink = _require_findings_sink()
     sink.append({"file": file, "line": line, "description": description, "context": context})
-    return f"Recorded finding #{len(sink)}: {file}:{line} — {description[:80]}"
+    return f"Recorded finding #{len(sink)}: {file}:{line} -- {description[:80]}"
 
 
 def finish_review(files_explored: list[str]) -> str:

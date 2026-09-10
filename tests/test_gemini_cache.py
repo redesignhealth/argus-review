@@ -494,3 +494,14 @@ class TestInvalidate:
             system_prompt="sys",
             tool_schema={"tools": []},
         )
+
+    def test_locked_raises_runtime_error_when_fcntl_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import argus.gemini_cache as gc
+
+        monkeypatch.setattr(gc, "fcntl", None)
+        keeper = _make_keeper(tmp_path)
+        with pytest.raises(RuntimeError, match="fcntl"):
+            with keeper._locked("some-key"):
+                pass

@@ -16,10 +16,11 @@ from, so there's no value in carrying registry entries with no real caller.
 platform, resolves ``entry.model`` through this same ``ALIAS_MAP``) and stay
 registered; ``gpt-frontier``/``gpt-nano`` have no runner yet (``argus.bench``'s
 ``"openai-responses"`` platform is ``_unimplemented_runner``) and are NOT
-registered here -- their concrete model ids are kept as bare, non-alias
-constants below purely so ``_PRICES``/``estimate_cost_usd`` has a complete,
-future-proof cost table. Add an alias back to ``ALIAS_MAP`` if a future call
+registered here. Add an alias back to ``ALIAS_MAP`` if a future call
 site actually needs it.
+
+Per-token model pricing is sourced centrally from ``argus.llm.pricing``
+(litellm-backed); ``estimate_cost_usd`` is re-exported here for call sites.
 
 Tier semantics:
     *frontier* -- best reasoning available in the family; slow / expensive.
@@ -52,6 +53,8 @@ import logging
 import os
 from typing import Any, Final
 
+from argus.llm.pricing import estimate_cost_usd
+
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
@@ -67,7 +70,7 @@ ALIAS_MAP: Final[dict[str, str]] = {
     # NOTE: gemini-3-pro-preview was deprecated by Google (404 as of 2026-06).
     # gemini-3.1-pro-preview is the current working successor.
     # TODO: upgrade to stable gemini-3.1-pro (non-preview) when GA;
-    # re-eval by 2026-09-01.
+    # re-eval by 2026-11-01.
     "gemini-frontier": "gemini-3.1-pro-preview",
     "gemini-mini": "gemini-3-flash-preview",
 }
@@ -163,12 +166,21 @@ CLAUDE_MINI: Final[str] = ALIAS_MAP["claude-mini"]
 GEMINI_FRONTIER: Final[str] = ALIAS_MAP["gemini-frontier"]
 GEMINI_MINI: Final[str] = ALIAS_MAP["gemini-mini"]
 
-# Not registered in ALIAS_MAP (see module docstring) -- no OpenAI Responses
-# runner exists yet to actually call these, but the concrete ids are kept as
-# bare constants so the pricing table below stays complete and forward-
-# compatible with the day a real runner ships.
-GPT_FRONTIER: Final[str] = "gpt-5.5"
-GPT_NANO: Final[str] = "gpt-5-nano"
+__all__ = [
+    "ALIAS_MAP",
+    "CLAUDE_DEFAULT",
+    "CLAUDE_FRONTIER",
+    "CLAUDE_MINI",
+    "CLAUDE_OPUS",
+    "EXPERIMENTAL_MODELS",
+    "GEMINI_FRONTIER",
+    "GEMINI_MINI",
+    "GPT_MINI",
+    "build_chat_model",
+    "estimate_cost_usd",
+    "infer_provider",
+    "resolve",
+]
 
 
 def resolve(alias: str) -> str:
@@ -178,91 +190,6 @@ def resolve(alias: str) -> str:
     rather than silently routing to a wrong model.
     """
     return ALIAS_MAP[alias]
-
-
-# Per-Mtok USD pricing: model name -> (input_cost, output_cost, cache_read_cost).
-# Deliberately NOT litellm-backed -- this is a lean, dependency-free OSS CLI,
-# so pricing is a small hand-maintained table instead of a third-party
-# pricing-data dependency.
-#
-# Anthropic entries mirror the per-token constants already used for
-# lite-review cost aggregation in argus/graph.py (_SONNET_INPUT_COST etc.,
-# $3/$15/$0.30 per Mtok for claude-sonnet-4-6) -- kept in sync manually,
-# there is no single source of truth spanning both modules yet. CLAUDE_MINI
-# (Haiku) follows Anthropic's published Sonnet-relative pricing ratio
-# (~0.27x Sonnet input/output). CLAUDE_FRONTIER (claude-fable-5) keeps the
-# same ~5x-Sonnet ratio the pre-fable frontier alias (an actual Opus model)
-# used. CLAUDE_OPUS is new (main introduced a separate "opus" tier distinct
-# from "frontier") and is priced at roughly half of CLAUDE_FRONTIER's rate,
-# matching this module's own "opus... roughly half frontier's per-token
-# cost" tier semantics above. None of these Anthropic estimates beyond
-# CLAUDE_DEFAULT are independently exercised by any existing
-# cost-aggregation call site today, only estimate_cost_usd below.
-#
-# Gemini entries are REAL: argus.gemini_runner is a real, reachable runner
-# (see argus.bench's "gemini" platform / PLATFORM_RUNNERS), so a $0/$0/$0
-# placeholder here would silently under-report every Gemini session's cost.
-# Modeled on Google's publicly published Gemini 2.5 Pro/Flash per-Mtok rates
-# (<=200k-token context tier; cached-content input priced at roughly a
-# quarter of the full input rate, matching Google's own published ratio for
-# that tier).
-# TODO(gemini-pricing): these are plausible-but-NOT-independently-verified
-# placeholders -- confirm against Google's CURRENT published rates for the
-# specific gemini-3.1-pro-preview/gemini-3-flash-preview models this
-# registry actually resolves to (see ALIAS_MAP above). Preview-tier pricing
-# in particular is prone to changing without notice; re-check before
-# relying on this for real billing reconciliation.
-#
-# GPT rows are still placeholders: no OpenAI Responses runner exists yet
-# (argus.bench's "openai-responses" platform is _unimplemented_runner), so
-# these models are not reachable by any runner. Update with real per-Mtok
-# rates once a runner ships.
-_PRICES: Final[dict[str, tuple[float, float, float]]] = {
-    CLAUDE_DEFAULT: (3.00, 15.00, 0.30),
-    CLAUDE_FRONTIER: (15.00, 75.00, 1.50),
-    CLAUDE_OPUS: (7.50, 37.50, 0.75),
-    CLAUDE_MINI: (0.80, 4.00, 0.08),
-    GEMINI_FRONTIER: (1.25, 10.00, 0.31),  # TODO(gemini-pricing): confirm, see comment above
-    GEMINI_MINI: (0.30, 2.50, 0.075),  # TODO(gemini-pricing): confirm, see comment above
-    GPT_FRONTIER: (0.0, 0.0, 0.0),  # placeholder -- no OpenAI Responses runner yet
-    GPT_MINI: (0.0, 0.0, 0.0),  # placeholder -- no OpenAI Responses runner yet
-    GPT_NANO: (0.0, 0.0, 0.0),  # placeholder -- no OpenAI Responses runner yet
-}
-
-
-def estimate_cost_usd(
-    model: str,
-    input_tokens: int,
-    output_tokens: int,
-    cached_input_tokens: int = 0,
-) -> float:
-    """Estimate USD cost for one LLM call from token counts.
-
-    ``cached_input_tokens`` is a SEPARATE token count billed at the
-    cache-read rate, not a subset of ``input_tokens`` to subtract out --
-    matches the convention already used for cost aggregation in
-    ``argus/graph.py``'s lite-review path (and how Anthropic's own usage
-    object reports ``input_tokens`` and ``cache_read_input_tokens`` as
-    distinct counters, not one nested in the other).
-
-    ``model`` must be a concrete model name with a ``_PRICES`` entry
-    (e.g. ``CLAUDE_DEFAULT``, not the alias key ``"claude-default"``).
-
-    Raises ``KeyError`` if ``model`` has no pricing entry -- fails loudly
-    rather than silently reporting a $0.00 cost for an unrecognized model.
-    """
-    try:
-        input_cost, output_cost, cache_read_cost = _PRICES[model]
-    except KeyError:
-        raise KeyError(
-            f"No pricing entry for model {model!r}; add one to _PRICES in argus/llm/models.py"
-        ) from None
-
-    return (
-        input_tokens / 1_000_000 * input_cost
-        + cached_input_tokens / 1_000_000 * cache_read_cost
-        + output_tokens / 1_000_000 * output_cost
-    )
 
 
 def build_chat_model(alias: str) -> Any:

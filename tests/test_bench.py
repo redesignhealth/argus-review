@@ -534,7 +534,7 @@ class TestPlatformRunners:
         entry = bench.BenchEntry(
             role="cross-cutting",
             platform="openai-responses",
-            model="gpt-frontier",
+            model="gpt-mini",
             prompt_name="pr-review-cross-cutting",
         )
         runner = bench.runner_for(entry)

@@ -232,9 +232,9 @@ class Settings(BaseSettings):
 
         Raises ``ValueError`` if ``GOOGLE_API_KEY`` is not set. Nothing in
         this codebase requires ``GOOGLE_API_KEY`` at ``Settings``
-        construction time (there is no Gemini runner yet to enforce it),
-        so this property is the backstop for any caller that reaches here
-        without it configured.
+        construction time, so this property is the backstop for any caller
+        (such as ``argus.gemini_runner``) that reaches here without it
+        configured when ``platform = "gemini"`` is selected.
         """
         if self.GOOGLE_API_KEY:
             return ("GOOGLE_API_KEY", self.GOOGLE_API_KEY)

@@ -4,7 +4,7 @@ There is no real Gemini SDK call available yet (Track 3, blocked on a
 separate repo), so this module's job is deliberately narrow: compute a
 cache key from the inputs that make a cache valid or stale, read/write a
 JSON lifecycle record for that key, decide whether an existing record is
-still usable, and — only when a fresh one is actually needed — call an
+still usable, and -- only when a fresh one is actually needed -- call an
 injected ``create_fn`` callback to obtain a new ``cache_name``. The real
 ``client.caches.create(...)`` call is Track 3's job to supply as that
 callback; this module is fully unit-testable without any Gemini
@@ -28,7 +28,11 @@ can never observe a partially-written JSON file either.
 from __future__ import annotations
 
 import contextlib
-import fcntl
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import json
 import os
@@ -109,7 +113,7 @@ class GeminiCacheKeeper:
             ttl_seconds=...)``) to actually create a new upstream cache and
             return its ``cache_name``, only when :meth:`get_or_create`
             determines a fresh cache is needed (no record, or the
-            existing one expired/changed). Left ``None`` here — the real
+            existing one expired/changed). Left ``None`` here -- the real
             ``client.caches.create(...)`` call is Track 3's job to inject.
             Calling :meth:`get_or_create` when a fresh cache is needed but
             no ``create_fn`` was configured raises ``NotImplementedError``.
@@ -150,7 +154,7 @@ class GeminiCacheKeeper:
         guarantee (see module docstring).
         """
         schema_json = json.dumps(tool_schema, sort_keys=True, default=str)
-        raw = f"{role}|{model}|{system_prompt}|{schema_json}"
+        raw = f"{len(role)}:{role}|{len(model)}:{model}|{len(system_prompt)}:{system_prompt}|{len(schema_json)}:{schema_json}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _record_path(self, key: str) -> Path:
@@ -173,6 +177,8 @@ class GeminiCacheKeeper:
         threads and processes sharing this cache directory -- not just
         within one Python process.
         """
+        if fcntl is None:
+            raise RuntimeError("gemini cache locking requires a POSIX platform with fcntl support")
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(self._lock_path(key), os.O_CREAT | os.O_RDWR, 0o644)
         try:
@@ -203,11 +209,16 @@ class GeminiCacheKeeper:
         path = self._record_path(record.key)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{record.key}.", suffix=".tmp")
+        opened = False
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
+                opened = True
                 f.write(json.dumps(record.to_json(), indent=2))
             os.replace(tmp_name, path)
         except BaseException:
+            if not opened:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
             with contextlib.suppress(OSError):
                 os.unlink(tmp_name)
             raise

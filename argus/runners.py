@@ -604,7 +604,7 @@ async def run_system_reviewer(
     # through the same reviewer_type="system" path in graph.py), so they
     # pick up the same resolved entry with no separate role needed. With the
     # packaged default bench, bench_entry.platform == "claude-sdk" and
-    # bench_entry.model resolves to exactly _SYSTEM_REVIEWER_MODEL — this
+    # bench_entry.model resolves to exactly _SYSTEM_REVIEWER_MODEL -- this
     # branch is a behavior-preserving no-op for a default install.
     bench_entry = bench.resolve("system-generalist")
     runner = bench.runner_for(bench_entry)

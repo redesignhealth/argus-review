@@ -136,12 +136,17 @@ def _mock_settings_impl(node: pytest.Item, monkeypatch: pytest.MonkeyPatch) -> N
     if not os.environ.get("ARGUS_DB_URL") and not os.environ.get("SUPABASE_DB_URL"):
         monkeypatch.setenv("ARGUS_DB_URL", "postgresql://test:test@localhost:5432/test")
 
+    # Isolate bench configuration from ambient ~/.config or ./.argus overrides
+    monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", "1")
+
     # Clear the settings cache so the env vars set above take effect.
+    from argus.bench import clear_cache as clear_bench_cache
     from argus.config import clear_cache
     from argus.storage.session import clear_engine_cache
 
     clear_cache()
     clear_engine_cache()
+    clear_bench_cache()
 
 
 @pytest.fixture(autouse=True)

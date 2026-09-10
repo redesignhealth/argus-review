@@ -6,40 +6,40 @@ real runner too, see ``argus.gemini_runner``, but is opt-in only --
 OpenAI Responses is wired as a valid value but has no runner yet, see
 ``PLATFORM_RUNNERS``) and *model* each leaf reviewer in the review
 pipeline runs on. This is
-deliberately NOT a dynamic/adaptive routing system — it is a static,
+deliberately NOT a dynamic/adaptive routing system -- it is a static,
 PR-reviewed config with a human-editable override chain, in the same
 spirit as ``argus.prompts_runtime``'s prompt override chain.
 
 Two kinds of config unit, not a per-role table:
 
-1. ``[bulk_reviewer]`` — ONE shared platform+model+caching setting that
+1. ``[bulk_reviewer]`` -- ONE shared platform+model+caching setting that
    applies to every generalist-shaped leaf reviewer as a single unit:
    ``run_system_reviewer`` (per system group, including gap-fill
    reviewers, which reuse the same code path), every named specialist,
    and the tests-and-docs reviewer. Each of these still resolves its OWN
-   existing prompt file exactly as before (see ``BULK_ROLE_PROMPTS``) —
+   existing prompt file exactly as before (see ``BULK_ROLE_PROMPTS``) --
    only platform/model/caching is shared.
-2. ``[roles.<name>]`` — an independent platform+model+prompt_name+caching
+2. ``[roles.<name>]`` -- an independent platform+model+prompt_name+caching
    config for everything else: ``cross-cutting``, ``blocking-validator``,
    ``feedback-verifier``. Unrelated to the bulk bucket and to each other.
 
 Override chain (mirrors ``argus.prompts_runtime`` exactly, including its
 opt-out convention), lowest to highest priority:
 
-1. Packaged ``argus/bench_default.toml`` — the base. Every entry resolves
+1. Packaged ``argus/bench_default.toml`` -- the base. Every entry resolves
    to ``platform="claude-sdk"`` with today's actual models, so shipping
    this file is a behavior-preserving no-op for a default install.
-2. ``~/.config/argus/bench.toml`` (respecting ``XDG_CONFIG_HOME``) — a
+2. ``~/.config/argus/bench.toml`` (respecting ``XDG_CONFIG_HOME``) -- a
    user-global sparse overlay: only the keys it specifies are overridden;
    everything else falls through to the layer below.
-3. ``./.argus/bench.toml`` — a repo-local sparse overlay, same semantics.
-4. ``ARGUS_BENCH_FILE`` env var — an explicit override file, sparse-merged
+3. ``./.argus/bench.toml`` -- a repo-local sparse overlay, same semantics.
+4. ``ARGUS_BENCH_FILE`` env var -- an explicit override file, sparse-merged
    on top of everything below it, so it "wins outright" for any key it
    specifies. Raises if the path doesn't exist (the caller explicitly
    asked for it, so a typo should fail loudly, not silently fall through).
 
 Setting ``ARGUS_NO_BENCH_OVERRIDES`` truthy skips layers 2-4 and forces
-the packaged default only — for CI/official runs that must not pick up a
+the packaged default only -- for CI/official runs that must not pick up a
 developer's local override by accident.
 
 Validation happens once, at load time, not mid-review: unknown top-level
@@ -231,7 +231,12 @@ def load_bench() -> dict[str, Any]:
 
     if not settings.ARGUS_NO_BENCH_OVERRIDES:
         for layer_path in _overlay_layers(settings):
-            merged = _deep_merge(merged, _load_toml_file(layer_path))
+            overlay = _load_toml_file(layer_path)
+            roles = overlay.get("roles", {})
+            if isinstance(roles, dict):
+                for role in roles:
+                    _warn_if_not_wired(role)
+            merged = _deep_merge(merged, overlay)
 
     _validate_raw_bench(merged)
     return merged
@@ -451,11 +456,22 @@ async def _claude_sdk_runner(
     body, not module level) to avoid a circular import: ``argus.runners``
     imports this module to call ``resolve``/``runner_for``.
     """
-    from argus.llm.models import resolve as resolve_model_alias
+    from argus.llm.models import CLAUDE_DEFAULT, resolve as resolve_model_alias
     from argus.runners import _run_session_isolated
 
+    if entry.caching != "auto":
+        logger.debug(
+            "_claude_sdk_runner: caching=%r is ignored for platform='claude-sdk' "
+            "(caching is managed natively by the Claude Agent SDK)",
+            entry.caching,
+        )
+
+    # When entry requests the default model alias, use the env-override-aware
+    # CLAUDE_DEFAULT so ARGUS_SPECIALIST_MODEL is preserved.
+    model = CLAUDE_DEFAULT if entry.model == "claude-default" else resolve_model_alias(entry.model)
+
     return await _run_session_isolated(
-        model=resolve_model_alias(entry.model),
+        model=model,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=anthropic_api_key,

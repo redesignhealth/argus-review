@@ -121,6 +121,15 @@ class TestGlobFiles:
             with pytest.raises(ValueError, match="absolute"):
                 review_tools.glob_files("/etc/*")
 
+    def test_glob_files_caps_results_and_truncates(
+        self, worktree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(review_tools, "_MAX_GLOB_RESULTS", 1)
+        with review_tools.review_session(str(worktree)):
+            result = review_tools.glob_files("src/*.py")
+        assert "src/app.py" in result or "src/util.py" in result
+        assert "capped at 1" in result
+
 
 # ---------------------------------------------------------------------------
 # grep

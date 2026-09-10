@@ -71,3 +71,29 @@ def get_token_cost(model: str) -> TokenCost | None:
         cache_read_cost_per_token=row.get("cache_read_input_token_cost", 0.0),
         cache_write_cost_per_token=row.get("cache_creation_input_token_cost", 0.0),
     )
+
+
+def estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_input_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Estimate USD cost for one LLM call from token counts using litellm pricing.
+
+    ``cached_input_tokens`` is billed at the cache-read rate.
+    ``cache_creation_tokens`` is billed at the cache-write rate.
+
+    Returns 0.0 if pricing is not available for the model (with a warning logged
+    by ``get_token_cost``).
+    """
+    token_cost = get_token_cost(model)
+    if token_cost is None:
+        return 0.0
+    return (
+        input_tokens * token_cost.input_cost_per_token
+        + cached_input_tokens * token_cost.cache_read_cost_per_token
+        + cache_creation_tokens * token_cost.cache_write_cost_per_token
+        + output_tokens * token_cost.output_cost_per_token
+    )

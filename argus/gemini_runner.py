@@ -128,6 +128,7 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
+from langsmith import traceable
 
 from argus import review_tools
 from argus.bench import BenchEntry
@@ -361,10 +362,12 @@ def _execute_tool_call(name: str, args: dict[str, Any]) -> tuple[str, bool]:
     """
     fn = _TOOL_FUNCTIONS.get(name)
     if fn is None:
+        logger.warning("Tool call error: unknown tool %r", name)
         return f"Error: unknown tool {name!r}", True
     try:
         return str(fn(**args)), False
     except Exception as exc:  # noqa: BLE001 - LLM-supplied call, must never crash the loop
+        logger.warning("Tool call error %s(%r): %s", name, args, exc)
         return f"Error calling {name}({args!r}): {exc}", True
 
 
@@ -583,6 +586,13 @@ async def _run_turns(
     # httpx exception could escape uncaught instead.
     http_options = types.HttpOptions(timeout=int(timeout_s * _HTTP_TIMEOUT_FRACTION * 1000))
     client = genai.Client(api_key=api_key, http_options=http_options)
+    logger.info(
+        "Gemini session started: %s model=%s caching=%s timeout=%ss",
+        label,
+        model,
+        entry.caching if entry else "none",
+        timeout_s,
+    )
     try:
         gemini_tools = _build_tools()
 
@@ -652,6 +662,13 @@ async def _run_turns(
                     # stale local record and retrying this SAME request once,
                     # uncached, rather than failing the whole session.
                     if cached_content_name is None or not _is_cache_invalid_error(exc):
+                        logger.error(
+                            "Gemini generate_content failed [%s] (role=%s, model=%s): %s",
+                            label or "unlabeled",
+                            entry.role if entry else "unknown",
+                            model,
+                            exc,
+                        )
                         raise
                     logger.warning(
                         "Gemini cache [%s] appears invalid upstream (role=%s); "
@@ -742,7 +759,9 @@ async def _run_turns(
                     name = call.name or ""
                     args = dict(call.args or {})
                     tool_calls.append(name)
-                    output, is_error = _execute_tool_call(name, args)
+                    output, is_error = await asyncio.to_thread(_execute_tool_call, name, args)
+                    if is_error and name != "finish_review":
+                        logger.warning("Tool call failed [%s]: %s", name, output[:200])
                     response_parts.append(
                         types.Part.from_function_response(name=name, response={"result": output})
                     )
@@ -789,14 +808,14 @@ async def _run_turns(
             cached_input_tokens=usage_cached_total,
         )
 
-        if tool_calls:
-            logger.info(
-                "Gemini agent done [%s]: %d tool calls (tools: %s), cost=$%.4f",
-                label or "unlabeled",
-                len(tool_calls),
-                ", ".join(unique_tool_names),
-                cost_usd,
-            )
+        tools_str = f" (tools: {', '.join(unique_tool_names)})" if tool_calls else ""
+        logger.info(
+            "Gemini agent done [%s]: %d tool calls%s, cost=$%.4f",
+            label or "unlabeled",
+            len(tool_calls),
+            tools_str,
+            cost_usd,
+        )
 
         return SessionResult(
             result_text=result_text,
@@ -818,10 +837,11 @@ async def _run_turns(
         # `_maybe_activate_cache`) -- close both on every exit path,
         # including a timeout/cancellation unwinding through this `finally`,
         # or connections leak across the concurrent reviewer fan-out.
-        client.close()
+        await asyncio.to_thread(client.close)
         await client.aio.aclose()
 
 
+@traceable(name="pr_review.gemini_session")
 async def run_session_gemini(
     *,
     entry: BenchEntry,
