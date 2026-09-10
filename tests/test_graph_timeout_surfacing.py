@@ -286,7 +286,9 @@ class TestDegradedCoverageFindings:
         assert suggestion_count == 1
 
     def test_reviewer_only_labels_drops_precheck_prefixed_entries(self) -> None:
-        """The graph.run_review call site relies on this filter to avoid
+        """coverage_gap_findings_for_round (called from
+        apply_precheck_gate_and_surface_degraded_coverage, in turn called
+        from graph.run_review) relies on this filter to avoid
         double-reporting a failed precheck scanner as both a SUGGESTION/
         coverage-gap finding and a BLOCKING/deterministic-precheck
         finding (the latter via apply_precheck_scanner_failure_gate)."""

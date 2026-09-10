@@ -542,6 +542,48 @@ class TestApplyPrecheckGateAndSurfaceDegradedCoverage:
         assert response.findings == []
         assert response.review_comment == original_comment
 
+    def test_mixed_timed_out_reviewer_and_precheck_failure_same_round(self) -> None:
+        """Production-realistic mixed shape: a timed-out LLM reviewer
+        session AND a crashed precheck scanner in the same round, with the
+        gate off (the default). Both failure classes must be surfaced --
+        two coverage-gap findings plus the markdown section -- since
+        reviewer-session failures and precheck-scanner failures are
+        different failure classes this flag was never scoped to unify."""
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        timed_out_reviewer = SystemReviewResult(
+            system_group="backend",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            timed_out=True,
+        )
+        graph_result = {"precheck_scanner_failures": ["zizmor"]}
+
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response,
+                findings_models=[timed_out_reviewer],
+                graph_result=graph_result,
+                block_on_failure=False,
+            )
+        )
+
+        assert gate_added_precheck_finding is False
+        assert set(failed_labels) == {
+            ("backend", "timeout"),
+            ("precheck:zizmor", "scanner did not complete this round"),
+        }
+        assert response.verdict == Verdict.APPROVE
+        assert len(response.findings) == 2
+        categories = {f.category for f in response.findings}
+        assert categories == {"coverage-gap"}
+        descriptions = [f.description for f in response.findings]
+        assert any("backend" in d for d in descriptions)
+        assert any("precheck:zizmor" in d for d in descriptions)
+        assert "⚠ Degraded coverage" in response.review_comment
+
 
 class TestRiskLevelOrderExhaustive:
     def test_covers_every_risk_level(self) -> None:

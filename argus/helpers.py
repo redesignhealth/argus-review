@@ -203,8 +203,11 @@ def reviewer_only_labels(failed_labels: list[tuple[str, str]]) -> list[tuple[str
     ``apply_precheck_scanner_failure_gate`` already added its own
     BLOCKING/deterministic-precheck finding for the same precheck
     failures this round** (i.e. its return value was ``True`` --
-    ``graph.run_review`` calls the gate before this function specifically
-    so that fact is known). That gate is a no-op whenever
+    :func:`apply_precheck_gate_and_surface_degraded_coverage` calls the
+    gate before this function specifically so that fact is known; that
+    combined function, not ``graph.run_review`` directly, is what actually
+    threads the gate's return value through today). That gate is a no-op
+    whenever
     ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is unset (the default) or
     the verdict is already BLOCKING for some other reason -- in either
     case it adds no finding at all, and unconditionally dropping precheck
