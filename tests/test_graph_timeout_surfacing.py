@@ -321,8 +321,9 @@ class TestDegradedCoverageFindings:
         ]
         findings = coverage_gap_findings_for_round(mixed, gate_added_precheck_finding=False)
         assert len(findings) == 2
-        labels_in_findings = {f.description.split("'")[1] for f in findings}
-        assert labels_in_findings == {"system/backend", "precheck:zizmor"}
+        descriptions = [f.description for f in findings]
+        assert any("system/backend" in d for d in descriptions)
+        assert any("precheck:zizmor" in d for d in descriptions)
 
     def test_coverage_gap_findings_for_round_drops_precheck_when_gate_fired(self) -> None:
         """When the gate DID add its own BLOCKING/deterministic-precheck

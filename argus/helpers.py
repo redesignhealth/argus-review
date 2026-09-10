@@ -231,20 +231,30 @@ def build_degraded_coverage_findings(
 ) -> list[Finding]:
     """Build SUGGESTION-level findings for reviewer sessions that failed to complete.
 
-    Surfaces each timed-out or crashed reviewer session as an explicit
+    Surfaces each timed-out or crashed reviewer session (and, per below,
+    a crashed precheck scanner when appropriate) as an explicit
     coverage-gap finding so it appears in response.findings and the final
     review output, rather than only in telemetry.
 
-    Callers should pass only reviewer-session labels (see
-    ``failed_reviewer_labels``), not the combined
-    ``build_degraded_coverage_labels`` output that also carries
-    ``precheck:<name>`` entries -- a failed precheck scanner is handled
-    exclusively by ``apply_precheck_scanner_failure_gate``, which promotes
-    it to a BLOCKING finding when ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE``
-    is set; passing both would double-report the same scanner failure.
-    A ``precheck:``-prefixed label is still handled correctly here (with
-    scanner-appropriate wording, not "Reviewer session") as a defense in
-    depth, in case a future caller passes the combined list anyway.
+    The production caller is :func:`coverage_gap_findings_for_round`,
+    which passes the FULL combined ``build_degraded_coverage_labels``
+    output -- including ``precheck:<name>`` entries -- on its own default
+    (non-``gate_added_precheck_finding``) path. Passing precheck entries
+    through to this function is intended behavior in that case, not an
+    edge case: a failed precheck scanner is only ever additionally
+    surfaced as its own BLOCKING/deterministic-precheck finding by
+    ``apply_precheck_scanner_failure_gate`` when
+    ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is set AND that gate
+    actually fired this round; in every other case (the default config),
+    this function is the ONLY place a crashed precheck scanner is
+    surfaced as a structured finding at all, so dropping precheck entries
+    unconditionally here (a real round-3 BLOCKING bug on this file) would
+    leave it with zero structured findings. Do not "fix" this function to
+    unconditionally filter ``precheck:`` labels again -- that regresses
+    the exact bug ``coverage_gap_findings_for_round`` exists to prevent.
+    The ``is_precheck``-branch wording below (scanner-appropriate, not
+    "Reviewer session") reflects that this is a first-class, expected
+    input shape, not defense in depth for a caller mistake.
     """
     findings: list[Finding] = []
     for label, reason in failed_labels:
@@ -297,6 +307,54 @@ def coverage_gap_findings_for_round(
     """
     labels = reviewer_only_labels(failed_labels) if gate_added_precheck_finding else failed_labels
     return build_degraded_coverage_findings(labels)
+
+
+def apply_precheck_gate_and_surface_degraded_coverage(
+    response: ReviewResponse,
+    findings_models: list[SystemReviewResult],
+    graph_result: dict[str, Any],
+    block_on_failure: bool,
+) -> tuple[bool, list[tuple[str, str]]]:
+    """Apply the precheck scanner-failure gate, THEN surface this round's
+    degraded coverage (the markdown section and the structured
+    coverage-gap findings) -- combined into one function specifically so
+    this ordering can never be silently violated by a future refactor
+    that pulls the two apart again.
+
+    This ordering IS the round-3 BLOCKING fix: :func:`coverage_gap_findings_for_round`
+    needs to know whether :func:`apply_precheck_scanner_failure_gate`
+    already added its own finding THIS round, which is only knowable once
+    the gate has actually run against this round's real
+    ``precheck_scanner_failures``/``block_on_failure`` -- a hand-supplied
+    boolean in a unit test can verify each half in isolation (see
+    :func:`coverage_gap_findings_for_round`'s own tests) but cannot catch
+    a refactor that reorders the two real call sites. Wrapping both in one
+    function removes the reordering opportunity entirely: there is only
+    one place left to call, and its own body fixes the order.
+
+    Mutates ``response`` in place (verdict/risk_level/review_comment/
+    findings), via the same effects
+    ``apply_precheck_scanner_failure_gate``/``append_degraded_coverage_section``/
+    ``coverage_gap_findings_for_round`` already document individually.
+    Returns ``(gate_added_precheck_finding, failed_labels)`` so the caller
+    can log accordingly -- this function does no logging itself, matching
+    ``apply_precheck_scanner_failure_gate``'s own return-value-for-logging
+    convention (logging lives in ``graph.run_review``, which has the
+    logger and the rest of this round's context).
+    """
+    precheck_scanner_failures = graph_result.get("precheck_scanner_failures", [])
+    gate_added_precheck_finding = apply_precheck_scanner_failure_gate(
+        response, precheck_scanner_failures, block_on_failure
+    )
+    failed_labels = build_degraded_coverage_labels(findings_models, graph_result)
+    if failed_labels:
+        response.review_comment = append_degraded_coverage_section(
+            response.review_comment, failed_labels
+        )
+        response.findings.extend(
+            coverage_gap_findings_for_round(failed_labels, gate_added_precheck_finding)
+        )
+    return gate_added_precheck_finding, failed_labels
 
 
 def compute_persisted_finding_counts(findings: list[Finding]) -> tuple[int, int]:
@@ -404,7 +462,7 @@ def apply_precheck_scanner_failure_gate(
             description=note,
             suggestion=(
                 "Re-run once the underlying scanner failure is resolved -- see this "
-                "round's logs (or the degraded-coverage section above) for which "
+                "round's logs (or the degraded-coverage section below) for which "
                 "scanner(s) failed and why."
             ),
         )

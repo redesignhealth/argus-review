@@ -145,9 +145,16 @@ class TestEstimateCostUsd:
         """Parallel regression guard for gpt-mini: it carries the exact
         same 'bump once shipped' comment pattern gpt-frontier did, and
         gpt-5.5-mini is equally unapproved. Pin it too so the same
-        BLOCKING-finding class can't recur on this alias instead."""
+        BLOCKING-finding class can't recur on this alias instead.
+
+        Also exercises estimate_cost_usd(GPT_MINI, ...) directly (not just
+        ALIAS_MAP/get_token_cost, covered elsewhere) so this test's home in
+        TestEstimateCostUsd actually corresponds to the end-to-end cost
+        pipeline it's implicitly claiming to cover for this alias."""
         assert ALIAS_MAP["gpt-mini"] == "gpt-5.4-mini"
         assert GPT_MINI == "gpt-5.4-mini"
+        cost = estimate_cost_usd(GPT_MINI, input_tokens=1000, output_tokens=500)
+        assert cost > 0.0
 
 
 class TestResolveOverrides:

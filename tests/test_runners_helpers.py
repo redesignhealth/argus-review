@@ -468,6 +468,81 @@ class TestApplyPrecheckScannerFailureGate:
         )
 
 
+class TestApplyPrecheckGateAndSurfaceDegradedCoverage:
+    """Integration-level coverage for the round-3 BLOCKING-fix ordering
+    invariant: apply_precheck_scanner_failure_gate must run BEFORE the
+    coverage-gap findings are built, since coverage_gap_findings_for_round
+    needs the gate's real return value (not a hand-supplied boolean) to
+    decide whether to filter precheck: labels. Testing each half in
+    isolation (as TestApplyPrecheckScannerFailureGate and
+    TestCoverageGapFindingsForRound already do) cannot catch a refactor
+    that reorders the two real call sites in graph.run_review; calling the
+    combined function end-to-end, as done here, can.
+    """
+
+    def test_non_blocking_config_still_surfaces_precheck_failure_as_finding(self) -> None:
+        """ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE unset (the default): the
+        gate adds nothing, so the crashed precheck scanner must still get
+        a SUGGESTION/coverage-gap finding -- the exact round-3 bug was
+        this ending up with zero findings in this configuration."""
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        graph_result = {"precheck_scanner_failures": ["zizmor"]}
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response, findings_models=[], graph_result=graph_result, block_on_failure=False
+            )
+        )
+        assert gate_added_precheck_finding is False
+        assert failed_labels == [("precheck:zizmor", "scanner did not complete this round")]
+        assert response.verdict == Verdict.APPROVE
+        assert len(response.findings) == 1
+        assert response.findings[0].category == "coverage-gap"
+        assert "precheck:zizmor" in response.findings[0].description
+        assert "⚠ Degraded coverage" in response.review_comment
+
+    def test_blocking_config_surfaces_gate_finding_without_duplicate_coverage_gap(self) -> None:
+        """ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE set and the gate fires:
+        the same precheck failure must get exactly the gate's own
+        BLOCKING/deterministic-precheck finding, not also a SUGGESTION/
+        coverage-gap finding for the identical scanner (double-reporting,
+        the bug this whole split exists to prevent)."""
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        graph_result = {"precheck_scanner_failures": ["zizmor"]}
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response, findings_models=[], graph_result=graph_result, block_on_failure=True
+            )
+        )
+        assert gate_added_precheck_finding is True
+        assert failed_labels == [("precheck:zizmor", "scanner did not complete this round")]
+        assert response.verdict == Verdict.BLOCKING
+        assert len(response.findings) == 1
+        assert response.findings[0].category == "deterministic-precheck"
+        # The markdown "Degraded coverage" section is still rendered
+        # (it's a separate, additive surface from the structured findings).
+        assert "⚠ Degraded coverage" in response.review_comment
+
+    def test_no_failures_at_all_is_a_full_noop(self) -> None:
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        original_comment = response.review_comment
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response, findings_models=[], graph_result={}, block_on_failure=True
+            )
+        )
+        assert gate_added_precheck_finding is False
+        assert failed_labels == []
+        assert response.verdict == Verdict.APPROVE
+        assert response.findings == []
+        assert response.review_comment == original_comment
+
+
 class TestRiskLevelOrderExhaustive:
     def test_covers_every_risk_level(self) -> None:
         assert set(_RISK_LEVEL_ORDER) == set(RiskLevel)

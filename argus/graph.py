@@ -38,11 +38,8 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
 from argus.helpers import (
-    append_degraded_coverage_section,
-    apply_precheck_scanner_failure_gate,
-    build_degraded_coverage_labels,
+    apply_precheck_gate_and_surface_degraded_coverage,
     compute_persisted_finding_counts,
-    coverage_gap_findings_for_round,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
@@ -3192,23 +3189,23 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
 
     # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
     # own docstring (argus/config.py) for the fail-open-vs-fail-closed
-    # tradeoff, and apply_precheck_scanner_failure_gate's for why this is
-    # a helpers.py call rather than inline logic here. Deliberately keyed
-    # on precheck_scanner_failures alone, not the combined failed_labels
-    # computed below -- a killed/timed-out LLM reviewer session is a
-    # different failure class this flag was never scoped to.
-    #
-    # Run this BEFORE building the coverage-gap findings below (not after,
-    # as an earlier round had it): whether a failed precheck scanner
-    # already got its own BLOCKING/deterministic-precheck finding here is
-    # exactly the fact reviewer_only_labels' filter needs, on every call,
-    # not a static assumption baked into the filter itself -- see the
-    # gate_added_precheck_finding usage below for why a static assumption
-    # was wrong.
+    # tradeoff. Both the gate and the degraded-coverage surfacing
+    # (markdown section + structured coverage-gap findings, covering both
+    # killed/timed-out LLM reviewer sessions and crashed/timed-out
+    # deterministic precheck scanners) are combined into one call: see
+    # apply_precheck_gate_and_surface_degraded_coverage's own docstring
+    # for why this fixed ordering must not be pulled back apart into two
+    # separate call sites (that exact split was a round-3 BLOCKING bug).
+    # Precheck scanner failures were already logged once, loudly, inside
+    # precheck.engine.run_precheck itself (this module stays fail-open
+    # regardless of what's surfaced here) -- the logging below is the
+    # second, PR-visible half of that same observability, not a duplicate
+    # warning path.
     precheck_scanner_failures = result.get("precheck_scanner_failures", [])
-    gate_added_precheck_finding = apply_precheck_scanner_failure_gate(
+    gate_added_precheck_finding, failed_labels = apply_precheck_gate_and_surface_degraded_coverage(
         response,
-        precheck_scanner_failures,
+        findings_models,
+        result,
         get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
     )
     if gate_added_precheck_finding:
@@ -3219,33 +3216,12 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
             len(precheck_scanner_failures),
             ", ".join(precheck_scanner_failures),
         )
-
-    # Surface killed/timed-out reviewer sessions AND crashed/timed-out
-    # deterministic precheck scanners instead of letting either collapse
-    # silently into "0 findings" — both in the rendered markdown (not
-    # schema-frozen, safe to append to) and in the logs. Precheck scanner
-    # failures were already logged once, loudly, inside
-    # precheck.engine.run_precheck itself (this module stays fail-open
-    # regardless of what's surfaced here) — this is the second, PR-visible
-    # half of that same observability, not a duplicate warning path.
-    # See build_degraded_coverage_labels' own docstring for why the
-    # precheck_scanner_failures key lookup lives there, not inline here.
-    failed_labels = build_degraded_coverage_labels(findings_models, result)
     if failed_labels:
         logger.warning(
             "Degraded coverage: %d reviewer session(s)/scanner(s) did not complete and "
             "reported 0 findings: %s",
             len(failed_labels),
             ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
-        )
-        response.review_comment = append_degraded_coverage_section(
-            response.review_comment, failed_labels
-        )
-        # See coverage_gap_findings_for_round's own docstring for why this
-        # conditions on gate_added_precheck_finding rather than
-        # unconditionally filtering precheck:-prefixed entries.
-        response.findings.extend(
-            coverage_gap_findings_for_round(failed_labels, gate_added_precheck_finding)
         )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
