@@ -1070,7 +1070,7 @@ class TestOpenAIRunnerDegradedResponseDetection:
 class TestOpenAIRedactInputs:
     async def test_redact_openai_inputs_redacts_settings(self) -> None:
         settings = MagicMock()
-        settings.OPENAI_API_KEY = "sk-secret-12345"
+        settings.OPENAI_API_KEY = "sk-secret-12345"  # gitleaks:allow -- fake test fixture value
         settings.LANGSMITH_PROJECT = "my-project"
         inputs = {"settings": settings, "other": "val"}
 
