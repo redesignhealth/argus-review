@@ -42,6 +42,8 @@ from argus.helpers import (
     apply_precheck_scanner_failure_gate,
     build_degraded_coverage_findings,
     build_degraded_coverage_labels,
+    compute_persisted_finding_counts,
+    reviewer_only_labels,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
@@ -2513,15 +2515,23 @@ async def _node_write_review(state: ReviewState) -> dict[str, Any]:
     plan = ReviewPlan.model_validate(state["plan"])
     # Filter out crashed/timed-out reviewer markers (failure_reason is not
     # None -- see _node_run_reviewer's except branch) before handing
-    # findings to the writer LLM, mirroring the filter _node_collect_findings
-    # already applies. A crash marker is a 0-finding SystemReviewResult with
-    # no signal in the writer prompt distinguishing it from "this area was
-    # reviewed and found clean" -- without this filter, nothing stops the
-    # writer from treating a crashed group as confirmed-clean evidence
-    # toward an APPROVE verdict. The degraded-coverage section/findings
-    # (appended later in run_review, after the writer has already produced
-    # its verdict) are what actually surface these to a human -- the writer
-    # itself should simply never see them.
+    # findings to the writer LLM. This is NOT redundant with
+    # _node_collect_findings: that node only builds a local `successful`
+    # list for its own expected-vs-succeeded accounting and returns `{}` --
+    # it never removes crash markers from state["findings"], which persist
+    # in state throughout the run. This filter is the only place they are
+    # ever excluded, and it is the sole barrier on the gap-fill path
+    # (run_gap_reviewer -> write_review), which bypasses
+    # _node_collect_findings entirely. Do not remove this filter on the
+    # assumption some earlier node already handles it -- none does. A crash
+    # marker is a 0-finding SystemReviewResult with no signal in the writer
+    # prompt distinguishing it from "this area was reviewed and found
+    # clean" -- without this filter, nothing stops the writer from treating
+    # a crashed group as confirmed-clean evidence toward an APPROVE
+    # verdict. The degraded-coverage section/findings (appended later in
+    # run_review, after the writer has already produced its verdict) are
+    # what actually surface these to a human -- the writer itself should
+    # simply never see them.
     findings_models = [
         f
         for f in (SystemReviewResult.model_validate(f) for f in state["findings"])
@@ -3197,11 +3207,12 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
         # combined failed_labels (which also carries `precheck:<name>`
         # entries) here would double-report the same scanner failure as
         # both a SUGGESTION/coverage-gap finding and a BLOCKING/
-        # deterministic-precheck finding, inflating both counts below.
-        reviewer_only_labels = [
-            (label, reason) for label, reason in failed_labels if not label.startswith("precheck:")
-        ]
-        response.findings.extend(build_degraded_coverage_findings(reviewer_only_labels))
+        # deterministic-precheck finding, inflating both counts below. See
+        # reviewer_only_labels' own docstring for why this split is pulled
+        # out into a directly-testable helper.
+        response.findings.extend(
+            build_degraded_coverage_findings(reviewer_only_labels(failed_labels))
+        )
 
     # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
     # own docstring (argus/config.py) for the fail-open-vs-fail-closed
@@ -3227,25 +3238,9 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     # Use head_sha from graph state (populated for both PR and SHA mode)
     reviewed_sha = result.get("head_sha") or request.sha
 
-    # Exclude "coverage-gap" findings (synthesized above from a reviewer
-    # session that timed out or crashed) from the persisted counts -- these
-    # are infra-failure observability markers, not real review findings,
-    # and can never be resolved by a code change to the reviewed PR. Letting
-    # them inflate blocking_count/suggestion_count would corrupt historical
-    # trend analysis over these persisted columns with transient failures
-    # that have nothing to do with the PR's actual quality. They remain
-    # fully visible in response.findings/review_comment above; only the
-    # persisted aggregate counts exclude them.
-    blocking_count = sum(
-        1
-        for f in response.findings
-        if f.severity.value == "BLOCKING" and f.category != "coverage-gap"
-    )
-    suggestion_count = sum(
-        1
-        for f in response.findings
-        if f.severity.value == "SUGGESTION" and f.category != "coverage-gap"
-    )
+    # See compute_persisted_finding_counts' own docstring for why
+    # "coverage-gap" findings are excluded from these two persisted counts.
+    blocking_count, suggestion_count = compute_persisted_finding_counts(response.findings)
 
     logger.info(
         "Pipeline complete: verdict=%s, round=%d, cost=$%.4f, elapsed=%.1fs",

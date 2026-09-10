@@ -157,6 +157,58 @@ class TestNodeRunReviewerTimeoutLogging:
         assert len(state_update["agent_runs"]) == 1
         assert state_update["agent_runs"][0]["failure_reason"] == "worker_crashed"
 
+    async def test_malformed_group_dict_falls_back_to_raw_name(self) -> None:
+        """When SystemGroup.model_validate(inputs["group"]) itself raises
+        (e.g. a missing required field), `group` is never assigned, so the
+        branches keyed on `group` being truthy never match. The except
+        block must still recover a meaningful group name from the raw,
+        unvalidated input dict rather than collapsing to the bare
+        reviewer_type string ("system")."""
+        from argus.graph import _node_run_reviewer
+
+        malformed_group = {"name": "backend-api"}  # missing required "files"/"conventions"/etc.
+        inputs = {
+            "reviewer_type": "system",
+            "group": malformed_group,
+            "specialist": "",
+            "diff": "diff --git a/x b/x",
+            "plan": {},
+        }
+
+        state_update = await _node_run_reviewer(inputs, {"configurable": {}})
+
+        assert len(state_update["findings"]) == 1
+        result = state_update["findings"][0]
+        assert result["failure_reason"] == "worker_crashed"
+        assert result["system_group"] == "backend-api"
+        assert len(state_update["agent_runs"]) == 1
+        assert state_update["agent_runs"][0]["agent_name"] == "system:backend-api"
+
+    async def test_unrecognized_reviewer_type_skips_agent_run_insert(self) -> None:
+        """An anomalous (non-Literal) reviewer_type -- e.g. a typo'd Send
+        arg -- must not be coerced into any of AgentType's real values in
+        the crash-marker telemetry: AgentType has no "unknown" member, and
+        picking an existing one would misattribute this anomalous event's
+        telemetry to a real reviewer kind. The crashed_result finding must
+        still be returned; only the agent_runs insert is skipped."""
+        from argus.graph import _node_run_reviewer
+
+        inputs = {
+            "reviewer_type": "not_a_real_type",
+            "group": {},
+            "specialist": "",
+            "diff": "diff --git a/x b/x",
+            "plan": {},
+        }
+
+        state_update = await _node_run_reviewer(inputs, {"configurable": {}})
+
+        assert len(state_update["findings"]) == 1
+        result = state_update["findings"][0]
+        assert result["failure_reason"] == "worker_crashed"
+        assert result["system_group"] == "not_a_real_type"
+        assert state_update["agent_runs"] == []
+
 
 class TestDegradedCoverageFindings:
     def test_build_degraded_coverage_findings_creates_suggestions(self) -> None:
@@ -178,6 +230,79 @@ class TestDegradedCoverageFindings:
         assert "specialist/security" in findings[1].description
         assert "worker_crashed" in findings[1].description
 
+    def test_build_degraded_coverage_findings_words_precheck_labels_distinctly(self) -> None:
+        """A `precheck:`-prefixed label (a failed deterministic scanner, not
+        a crashed LLM reviewer session) must be worded as a scanner, not a
+        'Reviewer session' -- see build_degraded_coverage_findings' own
+        docstring for the double-reporting concern this defense in depth
+        guards against if a future caller passes an unfiltered label list."""
+        from argus.helpers import build_degraded_coverage_findings
+
+        findings = build_degraded_coverage_findings(
+            [("precheck:zizmor", "scanner did not complete this round")]
+        )
+        assert len(findings) == 1
+        assert "Precheck scanner" in findings[0].description
+        assert "Reviewer session" not in findings[0].description
+        assert "precheck:zizmor" in findings[0].description
+
+    def test_compute_persisted_finding_counts_excludes_coverage_gap(self) -> None:
+        """A synthetic coverage-gap SUGGESTION finding (from a crashed/
+        timed-out reviewer session) must not inflate the persisted
+        blocking_count/suggestion_count columns -- these are infra-failure
+        markers, not real review findings, and would otherwise corrupt
+        historical trend analysis over those columns."""
+        from argus.helpers import compute_persisted_finding_counts
+        from argus.models import Finding, Severity
+
+        findings = [
+            Finding(
+                severity=Severity.BLOCKING,
+                category="security",
+                file=None,
+                line=None,
+                description="real bug",
+                suggestion=None,
+            ),
+            Finding(
+                severity=Severity.SUGGESTION,
+                category="code-quality",
+                file=None,
+                line=None,
+                description="nit",
+                suggestion=None,
+            ),
+            Finding(
+                severity=Severity.SUGGESTION,
+                category="coverage-gap",
+                file=None,
+                line=None,
+                description="reviewer session crashed",
+                suggestion=None,
+            ),
+        ]
+        blocking_count, suggestion_count = compute_persisted_finding_counts(findings)
+        assert blocking_count == 1
+        assert suggestion_count == 1
+
+    def test_reviewer_only_labels_drops_precheck_prefixed_entries(self) -> None:
+        """The graph.run_review call site relies on this filter to avoid
+        double-reporting a failed precheck scanner as both a SUGGESTION/
+        coverage-gap finding and a BLOCKING/deterministic-precheck
+        finding (the latter via apply_precheck_scanner_failure_gate)."""
+        from argus.helpers import reviewer_only_labels
+
+        mixed = [
+            ("system/backend", "timeout"),
+            ("precheck:zizmor", "scanner did not complete this round"),
+            ("specialist/security", "worker_crashed"),
+            ("precheck:trivy", "scanner did not complete this round"),
+        ]
+        assert reviewer_only_labels(mixed) == [
+            ("system/backend", "timeout"),
+            ("specialist/security", "worker_crashed"),
+        ]
+
     def test_failed_reviewer_labels_recognizes_timed_out_field(self) -> None:
         from argus.helpers import failed_reviewer_labels
 
@@ -191,6 +316,67 @@ class TestDegradedCoverageFindings:
         assert result1.failure_reason == "timeout"
         labels = failed_reviewer_labels([result1])
         assert labels == [("group1", "timeout")]
+
+
+class TestSyncTimedOutAndFailureReasonContract:
+    """Direct coverage for the shared pipeline_models._sync_timed_out_and_failure_reason
+    helper's own documented contract, independent of any one caller
+    (SystemReviewResult/AgentRunData's validators, SessionResult's
+    __post_init__, or runners.py's 4 call sites)."""
+
+    def test_forward_sync_timed_out_true_sets_failure_reason(self) -> None:
+        from argus.pipeline_models import _sync_timed_out_and_failure_reason
+
+        timed_out, failure_reason = _sync_timed_out_and_failure_reason(True, None)
+        assert timed_out is True
+        assert failure_reason == "timeout"
+
+    def test_backward_sync_failure_reason_timeout_sets_timed_out(self) -> None:
+        from argus.pipeline_models import _sync_timed_out_and_failure_reason
+
+        timed_out, failure_reason = _sync_timed_out_and_failure_reason(False, "timeout")
+        assert timed_out is True
+        assert failure_reason == "timeout"
+
+    def test_worker_crashed_alone_is_unaffected(self) -> None:
+        from argus.pipeline_models import _sync_timed_out_and_failure_reason
+
+        timed_out, failure_reason = _sync_timed_out_and_failure_reason(False, "worker_crashed")
+        assert timed_out is False
+        assert failure_reason == "worker_crashed"
+
+    def test_contradictory_state_raises(self) -> None:
+        """timed_out=True paired with a failure_reason other than 'timeout'
+        can only mean a caller bug -- neither field existed before this PR
+        introduced them together, so no legitimate historical-data path
+        could produce this combination."""
+        from argus.pipeline_models import _sync_timed_out_and_failure_reason
+
+        with pytest.raises(ValueError, match="Contradictory failure state"):
+            _sync_timed_out_and_failure_reason(True, "worker_crashed")
+
+    def test_contradictory_state_raises_via_system_review_result_constructor(self) -> None:
+        """The same guard fires through SystemReviewResult's own
+        mode='before' validator, not just when calling the helper
+        directly."""
+        with pytest.raises(ValueError, match="Contradictory failure state"):
+            SystemReviewResult(
+                system_group="group1",
+                findings=[],
+                files_explored=[],
+                cost_usd=0.0,
+                timed_out=True,
+                failure_reason="worker_crashed",
+            )
+
+    def test_contradictory_state_raises_via_agent_run_data_constructor(self) -> None:
+        with pytest.raises(ValueError, match="Contradictory failure state"):
+            AgentRunData(
+                agent_name="system:group1",
+                agent_type="system",
+                timed_out=True,
+                failure_reason="worker_crashed",
+            )
 
 
 def _make_plan_dict() -> dict[str, object]:

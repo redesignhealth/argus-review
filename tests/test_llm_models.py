@@ -130,6 +130,16 @@ class TestEstimateCostUsd:
         cost = estimate_cost_usd(GPT_FRONTIER, input_tokens=1_000_000, output_tokens=1_000_000)
         assert cost > 0.0
 
+    def test_gpt_frontier_pinned_to_approved_model(self) -> None:
+        """Regression guard for a round-1 Argus BLOCKING finding on this
+        PR: gpt-frontier previously resolved to gpt-5.5, which was not on
+        the approved model list and may not have been shipped by OpenAI
+        yet. Pin the alias to the approved gpt-5.4 so a future accidental
+        re-bump to an unapproved model string is caught here instead of at
+        review time."""
+        assert ALIAS_MAP["gpt-frontier"] == "gpt-5.4"
+        assert GPT_FRONTIER == "gpt-5.4"
+
 
 class TestResolveOverrides:
     def test_resolve_claude_default_honors_env_override(

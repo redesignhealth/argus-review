@@ -415,6 +415,50 @@ async def test_write_review_no_precheck_findings_leaves_findings_untouched() -> 
 
 
 # ---------------------------------------------------------------------------
+# _node_write_review: crashed/timed-out reviewer markers (failure_reason is
+# not None) must never reach the writer LLM -- see the inline comment in
+# _node_write_review for why this is the only place they are excluded
+# (state["findings"] itself keeps them throughout the run), and why it is
+# mandatory (not merely redundant) on the gap-fill path.
+# ---------------------------------------------------------------------------
+
+
+async def test_write_review_excludes_crash_marker_findings_from_writer_input() -> None:
+    plan: dict[str, list[object]] = {
+        "system_groups": [],
+        "cross_cutting_concerns": [],
+        "file_manifest": [],
+    }
+    clean_result = {
+        "system_group": "backend",
+        "findings": [{"file": "a.py", "line": 1, "description": "real finding"}],
+        "files_explored": ["a.py"],
+        "cost_usd": 0.01,
+    }
+    crashed_result = {
+        "system_group": "frontend",
+        "findings": [],
+        "files_explored": [],
+        "cost_usd": 0.0,
+        "failure_reason": "worker_crashed",
+    }
+    state = _make_state(plan=plan, findings=[clean_result, crashed_result])
+
+    fake_response = ReviewResponse(
+        verdict=Verdict.APPROVE, risk_level=RiskLevel.LOW, review_comment="looks fine"
+    )
+
+    with patch("argus.graph.write_review", new=AsyncMock(return_value=fake_response)) as mock_write:
+        await _node_write_review(state)
+
+    assert mock_write.await_args is not None
+    findings_arg = mock_write.await_args.args[0]
+    assert len(findings_arg) == 1
+    assert findings_arg[0].system_group == "backend"
+    assert findings_arg[0].failure_reason is None
+
+
+# ---------------------------------------------------------------------------
 # Structural: the compiled StateGraph actually has the fan-out/fan-in
 # topology this file's tests otherwise only exercise node-function-by-
 # node-function. LangGraph can silently mis-wire an edge (wrong source,

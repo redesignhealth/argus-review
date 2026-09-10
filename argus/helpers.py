@@ -189,6 +189,33 @@ def build_degraded_coverage_labels(
     return failed_labels
 
 
+def reviewer_only_labels(failed_labels: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Filter a :func:`build_degraded_coverage_labels` list down to
+    reviewer-session entries, dropping ``precheck:``-prefixed scanner
+    failures.
+
+    Pulled out of ``graph.run_review`` for the same reason
+    :func:`build_degraded_coverage_labels` was -- so the precheck/reviewer
+    split has a unit test that doesn't require mocking the full
+    ``run_review`` pipeline. This split matters because a failed precheck
+    *scanner* is surfaced as a structured finding exclusively by
+    ``apply_precheck_scanner_failure_gate`` (a BLOCKING/deterministic-
+    precheck finding, when ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is
+    set); passing an unfiltered ``failed_labels`` list straight to
+    :func:`build_degraded_coverage_findings` would double-report the same
+    scanner failure as a SUGGESTION/coverage-gap finding too.
+
+    Relies on the ``precheck:`` prefix convention ``build_degraded_coverage_labels``
+    itself establishes for scanner-failure labels -- not a dedicated
+    tag/type field -- so a reviewer-session ``SystemGroup.name`` that
+    happens to literally start with ``"precheck:"`` would be misclassified
+    here. ``SystemGroup.name`` is planner/LLM-generated free text with no
+    format constraint against this; accepted as a narrow, low-probability
+    edge case rather than a dedicated-field redesign for this fix.
+    """
+    return [(label, reason) for label, reason in failed_labels if not label.startswith("precheck:")]
+
+
 def build_degraded_coverage_findings(
     failed_labels: list[tuple[str, str]],
 ) -> list[Finding]:
@@ -231,6 +258,32 @@ def build_degraded_coverage_findings(
             )
         )
     return findings
+
+
+def compute_persisted_finding_counts(findings: list[Finding]) -> tuple[int, int]:
+    """Count BLOCKING/SUGGESTION findings for the persisted
+    ``blocking_count``/``suggestion_count`` columns, excluding
+    ``category == "coverage-gap"`` entries.
+
+    Pulled out of ``graph.run_review`` for the same testability reason as
+    :func:`build_degraded_coverage_labels`/:func:`reviewer_only_labels`.
+    A coverage-gap finding (see :func:`build_degraded_coverage_findings`)
+    is an infra-failure observability marker synthesized from a reviewer
+    session that timed out or crashed -- not a real review finding, and
+    not something a code change to the reviewed PR can ever resolve.
+    Letting it inflate these two persisted counts would corrupt historical
+    trend analysis with transient failures that have nothing to do with
+    the PR's actual quality. It remains fully visible in
+    ``response.findings``/``review_comment``; only these two aggregate
+    counts exclude it.
+    """
+    blocking_count = sum(
+        1 for f in findings if f.severity.value == "BLOCKING" and f.category != "coverage-gap"
+    )
+    suggestion_count = sum(
+        1 for f in findings if f.severity.value == "SUGGESTION" and f.category != "coverage-gap"
+    )
+    return blocking_count, suggestion_count
 
 
 # Explicit ordering, not reliance on declaration order or enum identity:
