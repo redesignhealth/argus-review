@@ -144,17 +144,22 @@ class TestEstimateCostUsd:
         assert GPT_FRONTIER == "gpt-5.6-sol"
 
     def test_gpt_mini_pinned_to_approved_model(self) -> None:
-        """Parallel regression guard for gpt-mini: it carries the exact
-        same 'bump once shipped' comment pattern gpt-frontier did, and
-        gpt-5.5-mini is equally unapproved. Pin it too so the same
-        BLOCKING-finding class can't recur on this alias instead.
+        """Parallel regression guard for gpt-mini, alongside gpt-frontier's
+        guard above: the alias has been bumped from gpt-5.4-mini to
+        gpt-5.6-luna, keeping the code default in sync with the policy
+        doc's Default column for OpenAI (see
+        pr-review-specialist-llm-patterns.md) -- gpt-5.6-luna is covered by
+        that same wholesale gpt-5.6 family approval, so this is not a
+        repeat of the gpt-5.5 mistake. gpt-5.5/gpt-5.5-mini remain NOT on
+        the approved list -- do not bump either alias to them until the
+        policy table is updated.
 
         Also exercises estimate_cost_usd(GPT_MINI, ...) directly (not just
         ALIAS_MAP/get_token_cost, covered elsewhere) so this test's home in
         TestEstimateCostUsd actually corresponds to the end-to-end cost
         pipeline it's implicitly claiming to cover for this alias."""
-        assert ALIAS_MAP["gpt-mini"] == "gpt-5.4-mini"
-        assert GPT_MINI == "gpt-5.4-mini"
+        assert ALIAS_MAP["gpt-mini"] == "gpt-5.6-luna"
+        assert GPT_MINI == "gpt-5.6-luna"
         cost = estimate_cost_usd(GPT_MINI, input_tokens=1000, output_tokens=500)
         assert cost > 0.0
 

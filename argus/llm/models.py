@@ -19,6 +19,15 @@ confirm the target model is on the approved list -- and update the policy
 table if it isn't yet -- before editing ``ALIAS_MAP`` and the
 regression-guard test together.
 
+``gpt-mini`` has likewise been bumped, from ``gpt-5.4-mini`` to
+``gpt-5.6-luna`` -- the policy doc's Default column for OpenAI was updated
+to ``gpt-5.6-luna`` in the same change, so the code default and the policy
+doc stay in sync rather than drifting apart. ``gpt-5.6-luna`` is covered by
+that same wholesale ``gpt-5.6`` family approval, so this is not a repeat of
+the gpt-5.5 mistake either. ``test_gpt_mini_pinned_to_approved_model`` in
+``tests/test_llm_models.py`` guards this pin the same way
+``test_gpt_frontier_pinned_to_approved_model`` guards ``gpt-frontier``.
+
 Call sites should import the resolved constants (``GPT_MINI``,
 ``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings.
 
@@ -71,14 +80,16 @@ logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
     # OpenAI -- gpt-5 / gpt-5.6 families
-    # gpt-frontier is bumped to gpt-5.6-sol, as the gpt-5.6 family is now
-    # on the approved model list (see pr-review-specialist-llm-patterns.md).
-    # gpt-5.5/gpt-5.5-mini remain NOT on the approved list -- do not bump
-    # gpt-mini (or re-bump gpt-frontier) to either of them until the policy
-    # table is updated (see the module docstring above). test_llm_models.py
-    # pins both of these exact values as a regression guard.
+    # gpt-frontier is bumped to gpt-5.6-sol, and gpt-mini is bumped to
+    # gpt-5.6-luna, as the gpt-5.6 family is now on the approved model list
+    # (see pr-review-specialist-llm-patterns.md), whose Default column was
+    # updated to gpt-5.6-luna in the same change. gpt-5.5/gpt-5.5-mini
+    # remain NOT on the approved list -- do not bump either alias to them
+    # until the policy table is updated (see the module docstring above).
+    # test_llm_models.py pins both of these exact values as a regression
+    # guard.
     "gpt-frontier": "gpt-5.6-sol",
-    "gpt-mini": "gpt-5.4-mini",
+    "gpt-mini": "gpt-5.6-luna",
     # Anthropic
     "claude-frontier": "claude-fable-5",
     "claude-opus": "claude-opus-5",
