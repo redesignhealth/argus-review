@@ -135,11 +135,13 @@ class TestEstimateCostUsd:
         """Regression guard for a round-1 Argus BLOCKING finding on this
         PR: gpt-frontier previously resolved to gpt-5.5, which was not on
         the approved model list and may not have been shipped by OpenAI
-        yet. Pin the alias to the approved gpt-5.4 so a future accidental
-        re-bump to an unapproved model string is caught here instead of at
-        review time."""
-        assert ALIAS_MAP["gpt-frontier"] == "gpt-5.4"
-        assert GPT_FRONTIER == "gpt-5.4"
+        yet. The alias has since been legitimately re-bumped to gpt-5.6-sol
+        (now on the approved model list -- see
+        pr-review-specialist-llm-patterns.md). Pin the alias to that
+        approved value so a future accidental re-bump to an unapproved
+        model string is caught here instead of at review time."""
+        assert ALIAS_MAP["gpt-frontier"] == "gpt-5.6-sol"
+        assert GPT_FRONTIER == "gpt-5.6-sol"
 
     def test_gpt_mini_pinned_to_approved_model(self) -> None:
         """Parallel regression guard for gpt-mini: it carries the exact
