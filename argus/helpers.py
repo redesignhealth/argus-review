@@ -156,7 +156,7 @@ def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str,
     labels: list[tuple[str, str]] = []
     for result in results:
         reason = result.failure_reason
-        if reason is None and getattr(result, "timed_out", False):
+        if reason is None and result.timed_out:
             reason = "timeout"
         if reason is not None:
             labels.append((result.system_group, reason))
@@ -192,15 +192,28 @@ def build_degraded_coverage_labels(
 def build_degraded_coverage_findings(
     failed_labels: list[tuple[str, str]],
 ) -> list[Finding]:
-    """Build SUGGESTION-level findings for reviewers/scanners that failed to complete.
+    """Build SUGGESTION-level findings for reviewer sessions that failed to complete.
 
-    Surfaces each timed-out or crashed reviewer session (and failed scanner)
-    as an explicit coverage-gap finding so it appears in response.findings
-    and the final review output, rather than only in telemetry.
+    Surfaces each timed-out or crashed reviewer session as an explicit
+    coverage-gap finding so it appears in response.findings and the final
+    review output, rather than only in telemetry.
+
+    Callers should pass only reviewer-session labels (see
+    ``failed_reviewer_labels``), not the combined
+    ``build_degraded_coverage_labels`` output that also carries
+    ``precheck:<name>`` entries -- a failed precheck scanner is handled
+    exclusively by ``apply_precheck_scanner_failure_gate``, which promotes
+    it to a BLOCKING finding when ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE``
+    is set; passing both would double-report the same scanner failure.
+    A ``precheck:``-prefixed label is still handled correctly here (with
+    scanner-appropriate wording, not "Reviewer session") as a defense in
+    depth, in case a future caller passes the combined list anyway.
     """
     findings: list[Finding] = []
     for label, reason in failed_labels:
-        reason_desc = "timed out" if reason == "timeout" else f"failed ({reason})"
+        is_precheck = label.startswith("precheck:")
+        subject = "Precheck scanner" if is_precheck else "Reviewer session"
+        reason_desc = "timed out" if reason == "timeout" else f"did not complete ({reason})"
         findings.append(
             Finding(
                 severity=Severity.SUGGESTION,
@@ -208,7 +221,7 @@ def build_degraded_coverage_findings(
                 file=None,
                 line=None,
                 description=(
-                    f"Reviewer session '{label}' {reason_desc} and produced no findings. "
+                    f"{subject} '{label}' {reason_desc} and produced no findings. "
                     "Coverage for this area is degraded."
                 ),
                 suggestion=(

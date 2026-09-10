@@ -18,6 +18,41 @@ from typing import Any, Literal, get_args
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 
+FailureReason = Literal["timeout", "worker_crashed"]
+
+
+def _sync_timed_out_and_failure_reason(
+    timed_out: bool, failure_reason: FailureReason | None
+) -> tuple[bool, FailureReason | None]:
+    """Reconcile the redundant ``timed_out``/``failure_reason`` pair.
+
+    ``failure_reason`` is the source of truth for *why* a run failed;
+    ``timed_out`` is a narrower back-compat convenience flag kept in sync
+    with it for callers written before ``failure_reason`` existed. Shared
+    by ``SystemReviewResult``/``AgentRunData``'s ``mode='before'``
+    validators and ``argus.runners.SessionResult.__post_init__`` so the
+    two-branch sync logic exists in exactly one place -- previously
+    triplicated, with the risk that a future ``failure_reason`` value
+    only gets handled in one or two of the three copies.
+
+    Raises ``ValueError`` on a contradictory combination (``timed_out=True``
+    with a ``failure_reason`` other than ``"timeout"``) rather than
+    silently picking one side: neither field existed before this pair was
+    introduced together, so there is no legitimate historical-data path
+    that could produce this combination -- it can only mean a caller bug.
+    """
+    if timed_out and failure_reason and failure_reason != "timeout":
+        raise ValueError(
+            f"Contradictory failure state: timed_out=True but failure_reason={failure_reason!r} "
+            "(expected 'timeout' or unset)"
+        )
+    if timed_out and not failure_reason:
+        failure_reason = "timeout"
+    elif failure_reason == "timeout":
+        timed_out = True
+    return timed_out, failure_reason
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Planner output
 # ---------------------------------------------------------------------------
@@ -135,12 +170,14 @@ class SystemReviewResult(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _sync_timed_out_and_failure_reason(cls, data: Any) -> Any:
+    def _sync_timed_out_field(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            if data.get("timed_out") and not data.get("failure_reason"):
-                data["failure_reason"] = "timeout"
-            elif data.get("failure_reason") == "timeout":
-                data["timed_out"] = True
+            data = dict(data)  # avoid mutating the caller's own dict
+            timed_out, failure_reason = _sync_timed_out_and_failure_reason(
+                bool(data.get("timed_out", False)), data.get("failure_reason")
+            )
+            data["timed_out"] = timed_out
+            data["failure_reason"] = failure_reason
         return data
 
 
@@ -310,12 +347,14 @@ class AgentRunData(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _sync_timed_out_and_failure_reason(cls, data: Any) -> Any:
+    def _sync_timed_out_field(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            if data.get("timed_out") and not data.get("failure_reason"):
-                data["failure_reason"] = "timeout"
-            elif data.get("failure_reason") == "timeout":
-                data["timed_out"] = True
+            data = dict(data)  # avoid mutating the caller's own dict
+            timed_out, failure_reason = _sync_timed_out_and_failure_reason(
+                bool(data.get("timed_out", False)), data.get("failure_reason")
+            )
+            data["timed_out"] = timed_out
+            data["failure_reason"] = failure_reason
         return data
 
     @field_validator("started_at", "finished_at", mode="before")

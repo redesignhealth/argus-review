@@ -563,6 +563,12 @@ async def _run_turns(
                                 )
                             if recovered_files:
                                 files_explored = recovered_files
+                        logger.debug(
+                            "OpenAI session [%s] model stopped calling tools on turn %d, "
+                            "terminating",
+                            label or "unlabeled",
+                            _turn,
+                        )
                         break
 
                     tool_outputs = []
@@ -636,6 +642,7 @@ async def _run_turns(
             label or "unlabeled",
             type(exc).__name__,
             exc,
+            exc_info=True,
         )
         return _build_result("worker_crashed")
     finally:
@@ -729,6 +736,7 @@ async def run_session_openai(
             (finished_at - started_at).total_seconds(),
             type(exc).__name__,
             exc,
+            exc_info=True,
         )
         return SessionResult(
             result_text="",

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
     # OpenAI -- gpt-5 family
-    "gpt-frontier": "gpt-5.5",
+    "gpt-frontier": "gpt-5.4",  # bump to gpt-5.5 once formally approved and shipped
     "gpt-mini": "gpt-5.4-mini",  # bump to gpt-5.5-mini once OpenAI ships it
     # Anthropic
     "claude-frontier": "claude-fable-5",

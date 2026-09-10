@@ -51,6 +51,7 @@ def _make_session_result(result_text: str = "", cost_usd: float = 0.0) -> MagicM
     sr.context7_call_count = 0
     sr.model = "claude-sonnet-4-6"
     sr.failure_reason = None
+    sr.timed_out = False
     return sr
 
 
@@ -167,9 +168,11 @@ class TestRunTestsAndDocsReviewer:
             )
 
         assert result.failure_reason == "timeout"
+        assert result.timed_out is True
         assert result.findings == []
         assert agent_run is not None
         assert agent_run.failure_reason == "timeout"
+        assert agent_run.timed_out is True
         call_kwargs = mock_session.call_args.kwargs
         assert call_kwargs["timeout_s"] == 300
 

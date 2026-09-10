@@ -1,10 +1,11 @@
 """Platform-neutral leaf-reviewer tool implementations.
 
-These are plain Python functions intended for reuse by ANY future
-non-Claude runner (Gemini, OpenAI Responses, ...) -- deliberately NOT
-coupled to a specific agent framework's ``@tool``/function-schema
-decorator, since the actual agent-loop implementation that wraps them is
-out of scope here (Track 3). A future runner adapter wraps
+These are plain Python functions intended for reuse by ANY non-Claude
+runner (Gemini, OpenAI Responses, ...) -- deliberately NOT coupled to a
+specific agent framework's ``@tool``/function-schema decorator, since the
+actual agent-loop implementation that wraps them lives elsewhere, per
+runner: ``argus.gemini_runner`` and ``argus.openai_runner`` are the real
+consumers today. Each wraps
 ``read_file``/``glob_files``/``grep``/``report_finding``/``finish_review``
 with whatever tool-declaration shape its own SDK expects.
 

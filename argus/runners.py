@@ -66,6 +66,7 @@ from argus.pipeline_models import (
     SystemReviewResult,
     ValidationVerdict,
     VerificationStatus,
+    _sync_timed_out_and_failure_reason,
 )
 from argus.prompts_runtime import fetch_prompt
 
@@ -351,10 +352,9 @@ class SessionResult:
     timed_out: bool = False
 
     def __post_init__(self) -> None:
-        if self.timed_out and not self.failure_reason:
-            self.failure_reason = "timeout"
-        elif self.failure_reason == "timeout":
-            self.timed_out = True
+        self.timed_out, self.failure_reason = _sync_timed_out_and_failure_reason(
+            self.timed_out, self.failure_reason
+        )
 
 
 def _empty_session_result(
@@ -631,7 +631,15 @@ async def run_system_reviewer(
     )
     result = _parse_review_result(session.result_text, group.name)
     result.cost_usd = session.cost_usd
-    result.failure_reason = session.failure_reason
+    # Set both fields via the shared sync helper (not a bare attribute
+    # assignment) so `result.timed_out` stays correctly synced even before
+    # this object is next reconstructed via model_validate() -- a plain
+    # `result.failure_reason = session.failure_reason` bypasses
+    # SystemReviewResult's `mode="before"` validator entirely, since that
+    # validator only fires at construction time.
+    result.timed_out, result.failure_reason = _sync_timed_out_and_failure_reason(
+        session.timed_out, session.failure_reason
+    )
     agent_run = _build_agent_run(
         session=session,
         agent_name=f"system:{group.name}",
@@ -720,7 +728,15 @@ async def run_specialist_reviewer(
     )
     result = _parse_review_result(session.result_text, f"{group.name}::{specialist}")
     result.cost_usd = session.cost_usd
-    result.failure_reason = session.failure_reason
+    # Set both fields via the shared sync helper (not a bare attribute
+    # assignment) so `result.timed_out` stays correctly synced even before
+    # this object is next reconstructed via model_validate() -- a plain
+    # `result.failure_reason = session.failure_reason` bypasses
+    # SystemReviewResult's `mode="before"` validator entirely, since that
+    # validator only fires at construction time.
+    result.timed_out, result.failure_reason = _sync_timed_out_and_failure_reason(
+        session.timed_out, session.failure_reason
+    )
     agent_run = _build_agent_run(
         session=session,
         agent_name=f"specialist:{group.name}::{specialist}",
@@ -796,7 +812,15 @@ async def run_cross_cutting_reviewer(
     )
     result = _parse_review_result(session.result_text, "cross-cutting")
     result.cost_usd = session.cost_usd
-    result.failure_reason = session.failure_reason
+    # Set both fields via the shared sync helper (not a bare attribute
+    # assignment) so `result.timed_out` stays correctly synced even before
+    # this object is next reconstructed via model_validate() -- a plain
+    # `result.failure_reason = session.failure_reason` bypasses
+    # SystemReviewResult's `mode="before"` validator entirely, since that
+    # validator only fires at construction time.
+    result.timed_out, result.failure_reason = _sync_timed_out_and_failure_reason(
+        session.timed_out, session.failure_reason
+    )
     agent_run = _build_agent_run(
         session=session,
         agent_name="cross-cutting",
@@ -856,7 +880,15 @@ async def run_tests_and_docs_reviewer(
     )
     result = _parse_review_result(session.result_text, "tests-and-docs")
     result.cost_usd = session.cost_usd
-    result.failure_reason = session.failure_reason
+    # Set both fields via the shared sync helper (not a bare attribute
+    # assignment) so `result.timed_out` stays correctly synced even before
+    # this object is next reconstructed via model_validate() -- a plain
+    # `result.failure_reason = session.failure_reason` bypasses
+    # SystemReviewResult's `mode="before"` validator entirely, since that
+    # validator only fires at construction time.
+    result.timed_out, result.failure_reason = _sync_timed_out_and_failure_reason(
+        session.timed_out, session.failure_reason
+    )
     agent_run = _build_agent_run(
         session=session,
         agent_name="tests-and-docs",

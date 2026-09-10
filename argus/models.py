@@ -89,7 +89,13 @@ class Finding(BaseModel):
     severity: Severity
     category: str = Field(
         ...,
-        description="Review category: code-correctness, security, cross-layer, test-adequacy, cross-cutting",
+        description=(
+            "Review category: code-correctness, security, cross-layer, test-adequacy, "
+            "cross-cutting, deterministic-precheck (a candidate-rule hit from a "
+            "deterministic scanner such as semgrep/zizmor), coverage-gap (a reviewer "
+            "session or scanner that timed out or crashed, synthesized by "
+            "helpers.build_degraded_coverage_findings -- not a real code-quality finding)"
+        ),
     )
     file: Optional[str] = Field(None, description="File path, if applicable")
     line: Optional[int] = Field(None, description="Line number, if applicable")
