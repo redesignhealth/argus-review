@@ -11,12 +11,13 @@ gpt-5.4, with a regression-guard test
 (``test_gpt_frontier_pinned_to_approved_model`` in
 ``tests/test_llm_models.py``) added specifically to catch a repeat. The
 alias has since been bumped again, this time to ``gpt-5.6-sol`` -- unlike
-the gpt-5.5 attempt, gpt-5.6-sol genuinely IS on the approved model list
-(added to the table in ``pr-review-specialist-llm-patterns.md`` alongside
-this change), so this is not a repeat of that mistake. Any future bump of
-this alias must likewise confirm the target model is on the approved list
--- and update the policy table if it isn't yet -- before editing
-``ALIAS_MAP`` and the regression-guard test together.
+the gpt-5.5 attempt, the ``gpt-5.6`` family genuinely IS on the approved
+model list (the entire family is approved in
+``pr-review-specialist-llm-patterns.md`` alongside this change), so this is
+not a repeat of that mistake. Any future bump of this alias must likewise
+confirm the target model is on the approved list -- and update the policy
+table if it isn't yet -- before editing ``ALIAS_MAP`` and the
+regression-guard test together.
 
 Call sites should import the resolved constants (``GPT_MINI``,
 ``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings.
@@ -69,13 +70,13 @@ from argus.llm.pricing import estimate_cost_usd
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
-    # OpenAI -- gpt-5 family
-    # gpt-frontier is bumped to gpt-5.6-sol, which is now on the approved
-    # model list (see pr-review-specialist-llm-patterns.md). gpt-5.5/
-    # gpt-5.5-mini remain NOT on the approved list -- do not bump gpt-mini
-    # (or re-bump gpt-frontier) to either of them until the policy table is
-    # updated (see the module docstring above). test_llm_models.py pins
-    # both of these exact values as a regression guard.
+    # OpenAI -- gpt-5 / gpt-5.6 families
+    # gpt-frontier is bumped to gpt-5.6-sol, as the gpt-5.6 family is now
+    # on the approved model list (see pr-review-specialist-llm-patterns.md).
+    # gpt-5.5/gpt-5.5-mini remain NOT on the approved list -- do not bump
+    # gpt-mini (or re-bump gpt-frontier) to either of them until the policy
+    # table is updated (see the module docstring above). test_llm_models.py
+    # pins both of these exact values as a regression guard.
     "gpt-frontier": "gpt-5.6-sol",
     "gpt-mini": "gpt-5.4-mini",
     # Anthropic

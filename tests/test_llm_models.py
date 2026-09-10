@@ -136,7 +136,7 @@ class TestEstimateCostUsd:
         PR: gpt-frontier previously resolved to gpt-5.5, which was not on
         the approved model list and may not have been shipped by OpenAI
         yet. The alias has since been legitimately re-bumped to gpt-5.6-sol
-        (now on the approved model list -- see
+        (the entire gpt-5.6 family is now on the approved model list -- see
         pr-review-specialist-llm-patterns.md). Pin the alias to that
         approved value so a future accidental re-bump to an unapproved
         model string is caught here instead of at review time."""
