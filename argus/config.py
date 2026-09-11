@@ -107,6 +107,7 @@ class Settings(BaseSettings):
             documentation-only Settings field) as ``ARGUS_SPECIALIST_MODEL``
             above.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
+        OPENAI_BASE_URL: Optional override for OpenAI API endpoint (e.g. for proxying).
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
         ARGUS_CONTEXT7_BASE_URL: Override for Context7's MCP endpoint
             (defaults to the real ``https://mcp.context7.com/mcp`` when
@@ -148,6 +149,7 @@ class Settings(BaseSettings):
     ANTHROPIC_AUTH_TOKEN: str | None = None
     GITHUB_TOKEN_RO: str
     OPENAI_API_KEY: str
+    OPENAI_BASE_URL: str | None = None
     GOOGLE_API_KEY: str | None = None
 
     ARGUS_DB_URL: str | None = None

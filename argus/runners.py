@@ -712,9 +712,10 @@ async def run_specialist_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    bench_entry = bench.resolve(f"specialist-{specialist}")
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -725,6 +726,7 @@ async def run_specialist_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label=f"specialist:{group.name}::{specialist}",
+        is_system_reviewer_role=True,
     )
     result = _parse_review_result(session.result_text, f"{group.name}::{specialist}")
     result.cost_usd = session.cost_usd
@@ -766,7 +768,8 @@ async def run_cross_cutting_reviewer(
 
     effective_root = _resolve_repo_root(repo_root, "run_cross_cutting_reviewer")
 
-    base_prompt = await fetch_prompt("pr-review-cross-cutting")
+    bench_entry = bench.resolve("cross-cutting")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
     prior_art_prompt = await fetch_prompt("pr-review-prior-art")
     logger.info("Prior art prompt loaded: %d chars, reviewer=cross-cutting", len(prior_art_prompt))
 
@@ -797,8 +800,9 @@ async def run_cross_cutting_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_CROSS_CUTTING_MODEL,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -809,6 +813,7 @@ async def run_cross_cutting_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="cross-cutting",
+        is_system_reviewer_role=False,
     )
     result = _parse_review_result(session.result_text, "cross-cutting")
     result.cost_usd = session.cost_usd
@@ -850,7 +855,8 @@ async def run_tests_and_docs_reviewer(
 
     effective_root = _resolve_repo_root(repo_root, "run_tests_and_docs_reviewer")
 
-    base_prompt = await fetch_prompt("pr-review-tests-and-docs")
+    bench_entry = bench.resolve("tests-and-docs")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
 
     all_files = "\n".join(f"- {fe.path} ({fe.change_type})" for fe in plan.file_manifest)
@@ -864,9 +870,9 @@ async def run_tests_and_docs_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -877,6 +883,7 @@ async def run_tests_and_docs_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="tests-and-docs",
+        is_system_reviewer_role=True,
     )
     result = _parse_review_result(session.result_text, "tests-and-docs")
     result.cost_usd = session.cost_usd
@@ -927,7 +934,8 @@ async def run_feedback_verifier(
 
     findings_json = json.dumps([f.model_dump() for f in prior_context.findings], indent=2)
 
-    base_prompt = await fetch_prompt("pr-review-feedback-verifier")
+    bench_entry = bench.resolve("feedback-verifier")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
 
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
 
@@ -943,9 +951,9 @@ async def run_feedback_verifier(
 
     # Sonnet, not Opus: feedback verifier checks N prior findings in bulk
     # (resolved/unresolved/regressed) - volume-oriented like system reviewers.
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -956,6 +964,7 @@ async def run_feedback_verifier(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="feedback-verifier",
+        is_system_reviewer_role=True,
     )
 
     result = _parse_verification_result(
@@ -1059,7 +1068,8 @@ async def run_blocking_validator(
 
     effective_root = _resolve_repo_root(repo_root, "run_blocking_validator")
 
-    base_prompt = await fetch_prompt("pr-review-blocking-validator")
+    bench_entry = bench.resolve("blocking-validator")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
     findings_json = json.dumps(blocking_findings, indent=2)
 
@@ -1073,9 +1083,9 @@ async def run_blocking_validator(
         "Grep to verify. Return your validation results."
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -1086,6 +1096,7 @@ async def run_blocking_validator(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="blocking-validator",
+        is_system_reviewer_role=True,
     )
 
     result = _parse_validation_result(session.result_text, len(blocking_findings), session.cost_usd)

@@ -238,3 +238,17 @@ def test_no_prompt_overrides_parses_truthy_env_value(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("ARGUS_NO_PROMPT_OVERRIDES", "1")
     settings = get_settings()
     assert settings.ARGUS_NO_PROMPT_OVERRIDES is True
+
+
+def test_openai_base_url_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    settings = get_settings()
+    assert settings.OPENAI_BASE_URL is None
+
+
+def test_openai_base_url_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.com/v1")
+    settings = get_settings()
+    assert settings.OPENAI_BASE_URL == "https://proxy.example.com/v1"

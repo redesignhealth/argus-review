@@ -472,8 +472,9 @@ def render_summary_block(response: "ReviewResponse", elapsed: float) -> str:
     ``argus-review-loop`` skill screen-parses this exact block. Do not change
     the field order, labels, or spacing without updating the skill in lockstep.
     """
-    blocking = sum(1 for f in response.findings if f.severity.value == "BLOCKING")
-    suggestion = sum(1 for f in response.findings if f.severity.value == "SUGGESTION")
+    from argus.helpers import compute_persisted_finding_counts
+
+    blocking, suggestion = compute_persisted_finding_counts(response.findings)
     round_label = (
         f"{response.review_round} (Lite Mode)" if response.lite_mode else str(response.review_round)
     )

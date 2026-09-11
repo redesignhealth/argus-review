@@ -621,6 +621,7 @@ async def _run_turns(
                         label or "unlabeled",
                         _MAX_TURNS,
                     )
+                    return _build_result("worker_crashed")
 
         return _build_result(None)
     except (TimeoutError, APITimeoutError, httpx.TimeoutException):
@@ -646,7 +647,15 @@ async def _run_turns(
         )
         return _build_result("worker_crashed")
     finally:
-        await asyncio.shield(client.close())
+        try:
+            await asyncio.shield(client.close())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "OpenAI client close failed [%s]: %s",
+                label or "unlabeled",
+                exc,
+                exc_info=True,
+            )
 
 
 def _redact_openai_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:

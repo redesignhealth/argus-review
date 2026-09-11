@@ -12,34 +12,21 @@
 # standalone file for full control.
 #
 # *** WIRING STATUS *** (see argus/bench.py's "Wiring status" docstring
-# section and _WIRED_ROLES for the full explanation): only the
-# "system-generalist" entry of [bulk_reviewer] below is actually consulted
-# by a runner function today (argus.runners.run_system_reviewer). Every
-# other entry here -- the rest of [bulk_reviewer] (tests-and-docs, every
-# specialist-*) and all three [roles.*] tables -- parses and validates
-# exactly the same way, and bench.resolve() will happily resolve them (with
-# a logged warning), but NO runner calls resolve() for them yet: those
-# reviewers still call argus.runners._run_session_isolated directly with a
-# hardcoded model. Overriding any of THOSE keys below currently has NO
-# effect on a real review run. This is deliberate, incremental scope, not
-# an oversight -- extend _WIRED_ROLES in argus/bench.py as each runner is
-# migrated to route through the bench.
+# section and _WIRED_ROLES for the full explanation): all leaf-reviewer
+# roles below are wired to their respective runner functions via
+# bench.resolve() and bench.runner_for(). Overriding any of these keys in
+# bench.toml will take effect on an actual review run.
 
 [bulk_reviewer]
 # Applies as one unit to run_system_reviewer (per system group, including
 # gap-fill reviewers), every named specialist, and the tests-and-docs
 # reviewer. Each of those still resolves its own existing prompt file.
-# NOTE: of the roles that route through this table, only
-# "system-generalist" is wired to a runner today -- see WIRING STATUS above.
 platform = "claude-sdk"
 model    = "claude-default"
 caching  = "auto"
 
-# NOTE: none of the three [roles.*] tables below are wired to a runner yet
-# -- see WIRING STATUS above. They parse, validate, and resolve, but
-# overriding them has no effect on a real review run until their runner
-# functions (run_cross_cutting_reviewer, run_blocking_validator,
-# run_feedback_verifier) are migrated to call bench.resolve().
+# The three [roles.*] tables below configure independent roles:
+# cross-cutting, blocking-validator, and feedback-verifier.
 
 [roles.cross-cutting]
 platform    = "claude-sdk"

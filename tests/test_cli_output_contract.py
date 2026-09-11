@@ -104,6 +104,27 @@ class TestRenderSummaryBlock:
         block = render_summary_block(response, elapsed=10.0)
         assert "Round:      2 (Lite Mode)" in block
 
+    def test_render_summary_block_excludes_coverage_gap_findings(self) -> None:
+        """Synthetic coverage-gap findings are excluded from the summary counts,
+        matching compute_persisted_finding_counts for DB persistence."""
+        from argus.helpers import compute_persisted_finding_counts
+
+        response = _fixture_response()
+        response.findings.append(
+            Finding(
+                severity=Severity.SUGGESTION,
+                category="coverage-gap",
+                file=None,
+                line=None,
+                description="Reviewer timed out (coverage degraded for this group)",
+            )
+        )
+        block = render_summary_block(response, elapsed=60.0)
+        expected_blocking, expected_suggestions = compute_persisted_finding_counts(response.findings)
+        assert expected_blocking == 1
+        assert expected_suggestions == 1
+        assert f"Findings:   {expected_blocking} blocking, {expected_suggestions} suggestions" in block
+
 
 class TestRenderReviewOutput:
     def test_matches_pre_refactor_print_sequence_exactly(self) -> None:

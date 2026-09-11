@@ -299,7 +299,7 @@ class TestOpenAIRunnerBasicLoop:
                 repo_root=str(tmp_path),
             )
 
-        assert result.failure_reason is None
+        assert result.failure_reason == "worker_crashed"
         from argus.runners import _MAX_TURNS
 
         assert client.responses.create.call_count == _MAX_TURNS
@@ -796,6 +796,60 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         client.close.assert_called_once()
+
+    async def test_client_close_exception_does_not_mask_session_result(self, tmp_path: Any) -> None:
+        """Exceptions in client.close() are caught and do not clobber a good SessionResult."""
+        finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
+        client = _make_fake_client([_make_response(calls=[finding_call]), _make_response(calls=[])])
+        client.close = AsyncMock(side_effect=RuntimeError("connection pool shutdown failed"))
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason is None
+        client.close.assert_called_once()
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert len(parsed.findings) == 1
+
+    async def test_settings_openai_base_url_passed_to_build_client(self, tmp_path: Any) -> None:
+        """OPENAI_BASE_URL on settings is passed to _build_client."""
+        settings = _make_settings()
+        settings.OPENAI_BASE_URL = "https://proxy.example.com/v1"
+        client = _make_fake_client([_make_response(calls=[])])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client) as mock_init:
+            await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=settings,
+                repo_root=str(tmp_path),
+            )
+
+        mock_init.assert_called_once()
+        assert mock_init.call_args.kwargs["base_url"] == "https://proxy.example.com/v1"
+
+    async def test_build_client_passes_base_url_to_async_openai(self) -> None:
+        """_build_client forwards base_url to the AsyncOpenAI constructor."""
+        with patch("argus.openai_runner.AsyncOpenAI") as mock_cls:
+            from argus.openai_runner import _build_client
+
+            _build_client(api_key="sk-test", base_url="https://custom.proxy/v1", timeout=30.0)
+            mock_cls.assert_called_once_with(
+                api_key="sk-test",
+                base_url="https://custom.proxy/v1",
+                timeout=30.0,
+            )
 
 
 class TestOpenAIRunnerPartialProgressOnFailure:
