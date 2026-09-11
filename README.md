@@ -385,6 +385,8 @@ see the [write-up](https://www.redesignhealth.com/content/agentic-code-review-ha
   contract for self-hosters.
 - [`docs/BUILDING_A_REVIEW_LOOP.md`](docs/BUILDING_A_REVIEW_LOOP.md) — how to
   wrap Argus in a review → fix → re-review automation loop gated on CI.
+- [`docs/BENCH.md`](docs/BENCH.md) — configure the static reviewer bench to
+  choose platforms and models for leaf reviewers.
 - [`docs/PRECHECKS.md`](docs/PRECHECKS.md) — the deterministic, non-LLM gate
   that runs before the LLM pipeline: CI-status routing signal and custom
   semgrep rules mined from Argus's own recurring findings.

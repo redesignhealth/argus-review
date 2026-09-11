@@ -105,7 +105,12 @@ ALIAS_MAP: Final[dict[str, str]] = {
     # TODO: upgrade to stable gemini-3.1-pro (non-preview) when GA;
     # re-eval by 2026-11-01.
     "gemini-frontier": "gemini-3.1-pro-preview",
-    "gemini-mini": "gemini-3-flash-preview",
+    # gemini-3-flash-preview has been superseded by gemini-3.8-flash, the
+    # stable (non-preview) release -- same reasoning as gemini-frontier's
+    # move off a deprecated preview above: prefer the stable successor over
+    # a preview model once one exists. test_llm_models.py pins this exact
+    # value as a regression guard.
+    "gemini-mini": "gemini-3.8-flash",
 }
 
 # Short-lived pins for evals / preview models. Anything in here is a known

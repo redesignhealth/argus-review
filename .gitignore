@@ -12,3 +12,4 @@ build/
 .env.local
 .env.*.local
 !.env.example
+.argus/

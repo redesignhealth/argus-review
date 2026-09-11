@@ -14,6 +14,7 @@ from argus.llm.models import (
     CLAUDE_DEFAULT,
     EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
+    GEMINI_MINI,
     GPT_FRONTIER,
     GPT_MINI,
     estimate_cost_usd,
@@ -161,6 +162,20 @@ class TestEstimateCostUsd:
         assert ALIAS_MAP["gpt-mini"] == "gpt-5.6-luna"
         assert GPT_MINI == "gpt-5.6-luna"
         cost = estimate_cost_usd(GPT_MINI, input_tokens=1000, output_tokens=500)
+        assert cost > 0.0
+
+    def test_gemini_mini_pinned_to_approved_model(self) -> None:
+        """Regression guard for gemini-mini, alongside gpt-frontier and
+        gpt-mini's guards above: gemini-3-flash-preview has been superseded by
+        gemini-3.8-flash, the stable (non-preview) release on the approved model
+        list (see pr-review-specialist-llm-patterns.md). Pin the alias to that
+        approved value so an accidental regression to a preview model or
+        unapproved string is caught here instead of at review time.
+
+        Also exercises estimate_cost_usd(GEMINI_MINI, ...) directly."""
+        assert ALIAS_MAP["gemini-mini"] == "gemini-3.8-flash"
+        assert GEMINI_MINI == "gemini-3.8-flash"
+        cost = estimate_cost_usd(GEMINI_MINI, input_tokens=1000, output_tokens=500)
         assert cost > 0.0
 
 
