@@ -284,7 +284,7 @@ class TestOpenAIRunnerBasicLoop:
         assert outputs[1]["call_id"] == "call_2"
 
     async def test_exhausting_max_turns_still_returns_a_result(self, tmp_path: Any) -> None:
-        """Exhausting _MAX_TURNS stops and builds whatever findings were reported."""
+        """Exhausting _MAX_TURNS stops and builds whatever findings were reported with failure_reason=None."""
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [_make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(35)]
         client = _make_fake_client(responses)
@@ -299,7 +299,7 @@ class TestOpenAIRunnerBasicLoop:
                 repo_root=str(tmp_path),
             )
 
-        assert result.failure_reason == "worker_crashed"
+        assert result.failure_reason is None
         from argus.runners import _MAX_TURNS
 
         assert client.responses.create.call_count == _MAX_TURNS
@@ -312,11 +312,9 @@ class TestOpenAIRunnerBasicLoop:
         self, tmp_path: Any
     ) -> None:
         """A successful finish_review on the LAST allowed turn (_MAX_TURNS) must
-        still be treated as a clean completion (failure_reason=None), not
-        turn-budget exhaustion (failure_reason="worker_crashed"). The turn
-        loop's `for...else` only runs its exhaustion branch when the loop
-        completes without `break` -- a `finish_review` on the final turn still
-        `break`s, so this must not regress into a false "worker_crashed"."""
+        still be treated as a clean completion with files_explored populated.
+        The turn loop's `for...else` only runs its exhaustion branch when the loop
+        completes without `break`."""
         from argus.runners import _MAX_TURNS
 
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})

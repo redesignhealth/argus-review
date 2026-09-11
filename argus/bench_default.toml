@@ -15,7 +15,8 @@
 # section and _WIRED_ROLES for the full explanation): all leaf-reviewer
 # roles below are wired to their respective runner functions via
 # bench.resolve() and bench.runner_for(). Overriding any of these keys in
-# bench.toml will take effect on an actual review run.
+# bench.toml will take effect on an actual full review run (lite review and
+# planner/writer/coverage paths remain bench-independent).
 
 [bulk_reviewer]
 # Applies as one unit to run_system_reviewer (per system group, including

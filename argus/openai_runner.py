@@ -381,6 +381,7 @@ def _build_client(
     client_kwargs: dict[str, Any] = {}
     if api_key:
         client_kwargs["api_key"] = api_key
+    # base_url is only passed when truthy; None safely defaults to the standard OpenAI endpoint
     if base_url:
         client_kwargs["base_url"] = base_url
     if timeout is not None:
@@ -616,12 +617,16 @@ async def _run_turns(
 
                     previous_response_id = getattr(response, "id", None)
                 else:
+                    # `for...else`: only reached if every one of _MAX_TURNS
+                    # iterations executed a function call and none of them was
+                    # finish_review -- i.e. the turn budget was exhausted.
+                    # We preserve all accumulated findings with failure_reason=None
+                    # so partial progress is not discarded by the review graph.
                     logger.warning(
                         "OpenAI session [%s] exhausted its %d-turn budget without a finish_review call",
                         label or "unlabeled",
                         _MAX_TURNS,
                     )
-                    return _build_result("worker_crashed")
 
         return _build_result(None)
     except (TimeoutError, APITimeoutError, httpx.TimeoutException):

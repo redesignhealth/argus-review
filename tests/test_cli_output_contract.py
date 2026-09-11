@@ -125,9 +125,7 @@ class TestRenderSummaryBlock:
         )
         assert expected_blocking == 1
         assert expected_suggestions == 1
-        assert (
-            f"Findings:   {expected_blocking} blocking, {expected_suggestions} suggestions" in block
-        )
+        assert "Findings:   1 blocking, 1 suggestions" in block
 
 
 class TestRenderReviewOutput:

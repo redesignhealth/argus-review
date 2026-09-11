@@ -101,8 +101,10 @@ class OpenAIClientSync:
                 "OPENAI_API_KEY not configured. "
                 "Set it in environment or pass api_key to constructor."
             )
+        # base_url=None is safe and causes the OpenAI SDK to use its default endpoint
+        base_url = settings.OPENAI_BASE_URL if settings.OPENAI_BASE_URL else None
         self._client = wrap_openai(
-            OpenAI(api_key=self._api_key, base_url=settings.OPENAI_BASE_URL, timeout=timeout)
+            OpenAI(api_key=self._api_key, base_url=base_url, timeout=timeout)
         )
         self._timeout = timeout
 
@@ -285,6 +287,5 @@ def get_async_openai_client() -> AsyncOpenAI:
         Wrapped AsyncOpenAI client with the API key from settings.
     """
     settings = get_settings()
-    return wrap_openai(
-        AsyncOpenAI(api_key=settings.OPENAI_API_KEY, base_url=settings.OPENAI_BASE_URL)
-    )
+    base_url = settings.OPENAI_BASE_URL if settings.OPENAI_BASE_URL else None
+    return wrap_openai(AsyncOpenAI(api_key=settings.OPENAI_API_KEY, base_url=base_url))

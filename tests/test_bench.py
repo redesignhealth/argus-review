@@ -446,8 +446,10 @@ class TestResolveWiringStatusWarning:
         matching = [r for r in caplog.records if "cross-cutting" in r.message]
         assert len(matching) == 1
 
-    def test_wired_roles_covers_all_declared_roles(self) -> None:
+    def test_wired_roles_covers_all_declared_roles(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Sanity guard: every declared role is now wired."""
+        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", "1")
+        bench.clear_cache()
         raw = bench.load_bench()
         all_roles = set(bench.BULK_ROLE_PROMPTS) | set(raw.get("roles", {}))
         assert bench._WIRED_ROLES == all_roles
@@ -804,6 +806,7 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
 
     @pytest.mark.asyncio
     async def test_run_cross_cutting_reviewer_routes_through_bench_to_same_model(self) -> None:
@@ -856,6 +859,7 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._CROSS_CUTTING_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is False
 
     @pytest.mark.asyncio
     async def test_run_tests_and_docs_reviewer_routes_through_bench(self) -> None:
@@ -906,6 +910,7 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
 
     @pytest.mark.asyncio
     async def test_run_blocking_validator_routes_through_bench(self) -> None:
@@ -949,6 +954,7 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
 
     @pytest.mark.asyncio
     async def test_run_feedback_verifier_routes_through_bench(self) -> None:
@@ -999,6 +1005,7 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -472,6 +472,7 @@ def render_summary_block(response: "ReviewResponse", elapsed: float) -> str:
     ``argus-review-loop`` skill screen-parses this exact block. Do not change
     the field order, labels, or spacing without updating the skill in lockstep.
     """
+    # Lazy import: startup optimization so helpers.py is only loaded when rendering summary blocks
     from argus.helpers import compute_persisted_finding_counts
 
     blocking, suggestion = compute_persisted_finding_counts(response.findings)

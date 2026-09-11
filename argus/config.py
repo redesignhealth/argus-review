@@ -108,6 +108,8 @@ class Settings(BaseSettings):
             above.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         OPENAI_BASE_URL: Optional override for OpenAI API endpoint (e.g. for proxying).
+            Note that OPENAI_API_KEY will be forwarded as a Bearer token to whatever
+            endpoint is configured here; point only at trusted proxy hosts.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
         ARGUS_CONTEXT7_BASE_URL: Override for Context7's MCP endpoint
             (defaults to the real ``https://mcp.context7.com/mcp`` when
