@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-11
+
+### Added
+
+- `docs/BENCH.md`, documenting the reviewer bench's config-driven platform,
+  model, and caching selection for leaf-reviewer roles, including the override
+  chain, valid values, platform credentials, and a worked Gemini configuration.
+  README and `docs/BUILDING_A_REVIEW_LOOP.md` now point to the new guide.
+
+### Fixed
+
+- Updated the `gemini-mini` alias from the superseded `gemini-3-flash-preview`
+  model to the stable `gemini-3.8-flash` release. The approved-model policy
+  table's Google default now matches, and a regression test pins the alias to
+  the approved value.
+
 ## [0.2.1] - 2026-09-10
 
 ### Added
@@ -187,7 +203,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/redesignhealth/argus-review/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/redesignhealth/argus-review/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/redesignhealth/argus-review/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/redesignhealth/argus-review/compare/v0.1.4...v0.1.5
