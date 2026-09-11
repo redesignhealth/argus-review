@@ -1,0 +1,25 @@
+# Known false positives for the `secrets-scan` CI job (gitleaks).
+#
+# Each entry is a gitleaks Fingerprint (<commit>:<file>:<rule-id>:<line>) --
+# see https://github.com/gitleaks/gitleaks#gitleaksignore. gitleaks scans
+# `git log -p`, i.e. each historical commit's own patch content, so a fixed
+# string already committed cannot be un-flagged by editing it in a later
+# commit (that only changes what the *new* commit's patch contains); this
+# file is the supported way to allowlist a specific historical finding
+# without rewriting git history.
+
+# tests/test_openai_runner.py: a hardcoded OPENAI_API_KEY-shaped placeholder
+# value in a unit test fixture (asserting the mocked OpenAI client is
+# constructed with the settings-provided key), not a real credential. Its
+# "sk-"-prefixed shape trips gitleaks' generic-api-key rule on
+# entropy/prefix alone. NOTE: do not paste the actual placeholder string
+# into this comment -- gitleaks scans this file's own content too, and a
+# literal copy here would just create a second, self-inflicted finding
+# (see the commit this exact mistake was fixed in).
+3e0d6eec44789a789aa2c40ad63e27864e314031:tests/test_openai_runner.py:generic-api-key:743
+
+# The first fix for the above (commit 9f4481f) made exactly the mistake
+# this file's own comment now warns against: it quoted the placeholder
+# value verbatim in this file's own explanatory comment, which created a
+# second, self-inflicted finding in .gitleaksignore itself at that commit.
+9f4481f32408a1a182661f06639418a5d9cffa7c:.gitleaksignore:generic-api-key:11

@@ -415,6 +415,50 @@ async def test_write_review_no_precheck_findings_leaves_findings_untouched() -> 
 
 
 # ---------------------------------------------------------------------------
+# _node_write_review: crashed/timed-out reviewer markers (failure_reason is
+# not None) must never reach the writer LLM -- see the inline comment in
+# _node_write_review for why this is the only place they are excluded
+# (state["findings"] itself keeps them throughout the run), and why it is
+# mandatory (not merely redundant) on the gap-fill path.
+# ---------------------------------------------------------------------------
+
+
+async def test_write_review_excludes_crash_marker_findings_from_writer_input() -> None:
+    plan: dict[str, list[object]] = {
+        "system_groups": [],
+        "cross_cutting_concerns": [],
+        "file_manifest": [],
+    }
+    clean_result = {
+        "system_group": "backend",
+        "findings": [{"file": "a.py", "line": 1, "description": "real finding"}],
+        "files_explored": ["a.py"],
+        "cost_usd": 0.01,
+    }
+    crashed_result = {
+        "system_group": "frontend",
+        "findings": [],
+        "files_explored": [],
+        "cost_usd": 0.0,
+        "failure_reason": "worker_crashed",
+    }
+    state = _make_state(plan=plan, findings=[clean_result, crashed_result])
+
+    fake_response = ReviewResponse(
+        verdict=Verdict.APPROVE, risk_level=RiskLevel.LOW, review_comment="looks fine"
+    )
+
+    with patch("argus.graph.write_review", new=AsyncMock(return_value=fake_response)) as mock_write:
+        await _node_write_review(state)
+
+    assert mock_write.await_args is not None
+    findings_arg = mock_write.await_args.args[0]
+    assert len(findings_arg) == 1
+    assert findings_arg[0].system_group == "backend"
+    assert findings_arg[0].failure_reason is None
+
+
+# ---------------------------------------------------------------------------
 # Structural: the compiled StateGraph actually has the fan-out/fan-in
 # topology this file's tests otherwise only exercise node-function-by-
 # node-function. LangGraph can silently mis-wire an edge (wrong source,
@@ -444,3 +488,26 @@ def test_graph_wires_precheck_fan_out_and_fan_in() -> None:
     assert ("precheck_join", "precheck_fail") in edges
     assert ("precheck_join", "early_verifier") in edges
     assert ("precheck_fail", "__end__") in edges
+
+
+def test_graph_gap_fill_path_bypasses_collect_findings() -> None:
+    """Structural regression test for the claim documented inline in
+    _node_write_review: the gap-fill path (fill_gaps -> run_gap_reviewer ->
+    write_review) never routes through collect_findings, unlike the normal
+    fan-out path (run_reviewer -> collect_findings -> check_coverage).
+    _node_write_review's own crash-marker filter is therefore the SOLE
+    barrier preventing a crashed gap-fill reviewer's marker from reaching
+    the writer LLM on this path -- if a future refactor ever rewired
+    run_gap_reviewer through collect_findings, this test would catch it."""
+    from argus.graph import _build_review_graph
+
+    compiled = _build_review_graph().compile()
+    graph = compiled.get_graph()
+    edges = {(e.source, e.target) for e in graph.edges}
+
+    assert ("run_gap_reviewer", "write_review") in edges
+    assert ("run_gap_reviewer", "collect_findings") not in edges
+    # Sanity check on the contrasting normal-path topology this test's
+    # docstring claims is different.
+    assert ("run_reviewer", "collect_findings") in edges
+    assert ("collect_findings", "check_coverage") in edges

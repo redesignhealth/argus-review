@@ -153,11 +153,14 @@ def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str,
     as a timed-out one's, and the previous timeout-only check silently treated
     a crash as a clean result.
     """
-    return [
-        (result.system_group, result.failure_reason)
-        for result in results
-        if result.failure_reason is not None
-    ]
+    labels: list[tuple[str, str]] = []
+    for result in results:
+        reason = result.failure_reason
+        if reason is None and result.timed_out:
+            reason = "timeout"
+        if reason is not None:
+            labels.append((result.system_group, reason))
+    return labels
 
 
 def build_degraded_coverage_labels(
@@ -184,6 +187,203 @@ def build_degraded_coverage_labels(
         for name in graph_result.get("precheck_scanner_failures", [])
     ]
     return failed_labels
+
+
+def reviewer_only_labels(failed_labels: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Filter a :func:`build_degraded_coverage_labels` list down to
+    reviewer-session entries, dropping ``precheck:``-prefixed scanner
+    failures.
+
+    Pulled out of ``graph.run_review`` for the same reason
+    :func:`build_degraded_coverage_labels` was -- so the precheck/reviewer
+    split has a unit test that doesn't require mocking the full
+    ``run_review`` pipeline.
+
+    **Call this ONLY when the caller has confirmed
+    ``apply_precheck_scanner_failure_gate`` already added its own
+    BLOCKING/deterministic-precheck finding for the same precheck
+    failures this round** (i.e. its return value was ``True`` --
+    :func:`apply_precheck_gate_and_surface_degraded_coverage` calls the
+    gate before this function specifically so that fact is known; that
+    combined function, not ``graph.run_review`` directly, is what actually
+    threads the gate's return value through today). That gate is a no-op
+    whenever
+    ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is unset (the default) or
+    the verdict is already BLOCKING for some other reason -- in either
+    case it adds no finding at all, and unconditionally dropping precheck
+    entries here would leave a crashed precheck scanner with ZERO
+    structured findings, not merely a de-duplicated one. When the gate DID
+    fire, passing an unfiltered ``failed_labels`` list straight to
+    :func:`build_degraded_coverage_findings` would double-report the same
+    scanner failure as a SUGGESTION/coverage-gap finding too -- that's the
+    only case this filter exists to prevent.
+
+    Relies on the ``precheck:`` prefix convention ``build_degraded_coverage_labels``
+    itself establishes for scanner-failure labels -- not a dedicated
+    tag/type field -- so a reviewer-session ``SystemGroup.name`` that
+    happens to literally start with ``"precheck:"`` would be misclassified
+    here. ``SystemGroup.name`` is planner/LLM-generated free text with no
+    format constraint against this; accepted as a narrow, low-probability
+    edge case rather than a dedicated-field redesign for this fix.
+    """
+    return [(label, reason) for label, reason in failed_labels if not label.startswith("precheck:")]
+
+
+def build_degraded_coverage_findings(
+    failed_labels: list[tuple[str, str]],
+) -> list[Finding]:
+    """Build SUGGESTION-level findings for reviewer sessions that failed to complete.
+
+    Surfaces each timed-out or crashed reviewer session (and, per below,
+    a crashed precheck scanner when appropriate) as an explicit
+    coverage-gap finding so it appears in response.findings and the final
+    review output, rather than only in telemetry.
+
+    The production caller is :func:`coverage_gap_findings_for_round`,
+    which passes the FULL combined ``build_degraded_coverage_labels``
+    output -- including ``precheck:<name>`` entries -- on its own default
+    (non-``gate_added_precheck_finding``) path. Passing precheck entries
+    through to this function is intended behavior in that case, not an
+    edge case: a failed precheck scanner is only ever additionally
+    surfaced as its own BLOCKING/deterministic-precheck finding by
+    ``apply_precheck_scanner_failure_gate`` when
+    ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` is set AND that gate
+    actually fired this round; in every other case (the default config),
+    this function is the ONLY place a crashed precheck scanner is
+    surfaced as a structured finding at all, so dropping precheck entries
+    unconditionally here (a real round-3 BLOCKING bug on this file) would
+    leave it with zero structured findings. Do not "fix" this function to
+    unconditionally filter ``precheck:`` labels again -- that regresses
+    the exact bug ``coverage_gap_findings_for_round`` exists to prevent.
+    The ``is_precheck``-branch wording below (scanner-appropriate, not
+    "Reviewer session") reflects that this is a first-class, expected
+    input shape, not defense in depth for a caller mistake.
+    """
+    findings: list[Finding] = []
+    for label, reason in failed_labels:
+        is_precheck = label.startswith("precheck:")
+        subject = "Precheck scanner" if is_precheck else "Reviewer session"
+        reason_desc = "timed out" if reason == "timeout" else f"did not complete ({reason})"
+        findings.append(
+            Finding(
+                severity=Severity.SUGGESTION,
+                category="coverage-gap",
+                file=None,
+                line=None,
+                description=(
+                    f"{subject} '{label}' {reason_desc} and produced no findings. "
+                    "Coverage for this area is degraded."
+                ),
+                suggestion=(
+                    f"Re-run the review or manually inspect the changes in '{label}' "
+                    f"to ensure potential issues were not missed due to {reason}."
+                ),
+            )
+        )
+    return findings
+
+
+def coverage_gap_findings_for_round(
+    failed_labels: list[tuple[str, str]], gate_added_precheck_finding: bool
+) -> list[Finding]:
+    """Build the structured coverage-gap findings for one review round,
+    encoding the fix for a round-3 Argus BLOCKING finding on this PR:
+    ``reviewer_only_labels`` must be applied ONLY when
+    ``apply_precheck_scanner_failure_gate`` already added its own
+    BLOCKING/deterministic-precheck finding for the same precheck
+    failures this round (``gate_added_precheck_finding``).
+
+    Unconditionally filtering ``precheck:``-prefixed entries (an earlier
+    round's bug) silently dropped a crashed precheck scanner to ZERO
+    structured findings whenever ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE``
+    is unset (the default) -- the gate is a no-op in that case and adds no
+    finding of its own, so nothing else would have surfaced the failure.
+    When the gate DID fire, passing the precheck entries through
+    unfiltered would double-report the same failure as both a
+    SUGGESTION/coverage-gap finding and the gate's own BLOCKING finding.
+
+    Pulled out into its own directly-testable function, mirroring
+    :func:`build_degraded_coverage_labels`/:func:`reviewer_only_labels`'s
+    own testability rationale, so this exact conditional -- the actual
+    site of the round-3 bug -- has a unit test that doesn't require
+    mocking the full ``run_review`` pipeline.
+    """
+    labels = reviewer_only_labels(failed_labels) if gate_added_precheck_finding else failed_labels
+    return build_degraded_coverage_findings(labels)
+
+
+def apply_precheck_gate_and_surface_degraded_coverage(
+    response: ReviewResponse,
+    findings_models: list[SystemReviewResult],
+    graph_result: dict[str, Any],
+    block_on_failure: bool,
+) -> tuple[bool, list[tuple[str, str]]]:
+    """Apply the precheck scanner-failure gate, THEN surface this round's
+    degraded coverage (the markdown section and the structured
+    coverage-gap findings) -- combined into one function specifically so
+    this ordering can never be silently violated by a future refactor
+    that pulls the two apart again.
+
+    This ordering IS the round-3 BLOCKING fix: :func:`coverage_gap_findings_for_round`
+    needs to know whether :func:`apply_precheck_scanner_failure_gate`
+    already added its own finding THIS round, which is only knowable once
+    the gate has actually run against this round's real
+    ``precheck_scanner_failures``/``block_on_failure`` -- a hand-supplied
+    boolean in a unit test can verify each half in isolation (see
+    :func:`coverage_gap_findings_for_round`'s own tests) but cannot catch
+    a refactor that reorders the two real call sites. Wrapping both in one
+    function removes the reordering opportunity entirely: there is only
+    one place left to call, and its own body fixes the order.
+
+    Mutates ``response`` in place (verdict/risk_level/review_comment/
+    findings), via the same effects
+    ``apply_precheck_scanner_failure_gate``/``append_degraded_coverage_section``/
+    ``coverage_gap_findings_for_round`` already document individually.
+    Returns ``(gate_added_precheck_finding, failed_labels)`` so the caller
+    can log accordingly -- this function does no logging itself, matching
+    ``apply_precheck_scanner_failure_gate``'s own return-value-for-logging
+    convention (logging lives in ``graph.run_review``, which has the
+    logger and the rest of this round's context).
+    """
+    precheck_scanner_failures = graph_result.get("precheck_scanner_failures", [])
+    gate_added_precheck_finding = apply_precheck_scanner_failure_gate(
+        response, precheck_scanner_failures, block_on_failure
+    )
+    failed_labels = build_degraded_coverage_labels(findings_models, graph_result)
+    if failed_labels:
+        response.review_comment = append_degraded_coverage_section(
+            response.review_comment, failed_labels
+        )
+        response.findings.extend(
+            coverage_gap_findings_for_round(failed_labels, gate_added_precheck_finding)
+        )
+    return gate_added_precheck_finding, failed_labels
+
+
+def compute_persisted_finding_counts(findings: list[Finding]) -> tuple[int, int]:
+    """Count BLOCKING/SUGGESTION findings for the persisted
+    ``blocking_count``/``suggestion_count`` columns, excluding
+    ``category == "coverage-gap"`` entries.
+
+    Pulled out of ``graph.run_review`` for the same testability reason as
+    :func:`build_degraded_coverage_labels`/:func:`reviewer_only_labels`.
+    A coverage-gap finding (see :func:`build_degraded_coverage_findings`)
+    is an infra-failure observability marker synthesized from a reviewer
+    session that timed out or crashed -- not a real review finding, and
+    not something a code change to the reviewed PR can ever resolve.
+    Letting it inflate these two persisted counts would corrupt historical
+    trend analysis with transient failures that have nothing to do with
+    the PR's actual quality. It remains fully visible in
+    ``response.findings``/``review_comment``; only these two aggregate
+    counts exclude it.
+    """
+    blocking_count = sum(
+        1 for f in findings if f.severity.value == "BLOCKING" and f.category != "coverage-gap"
+    )
+    suggestion_count = sum(
+        1 for f in findings if f.severity.value == "SUGGESTION" and f.category != "coverage-gap"
+    )
+    return blocking_count, suggestion_count
 
 
 # Explicit ordering, not reliance on declaration order or enum identity:
@@ -265,7 +465,7 @@ def apply_precheck_scanner_failure_gate(
             description=note,
             suggestion=(
                 "Re-run once the underlying scanner failure is resolved -- see this "
-                "round's logs (or the degraded-coverage section above) for which "
+                "round's logs (or the degraded-coverage section below) for which "
                 "scanner(s) failed and why."
             ),
         )
@@ -322,6 +522,8 @@ def append_degraded_coverage_section(
         "The following did not complete this round and produced no findings "
         "as a result, not because the area was clean. Treat these areas as "
         "**not reviewed** this round:\n\n"
-        f"{bullets}\n"
+        f"{bullets}\n\n"
+        "**Suggestion**: Re-run the review or manually inspect the unreviewed areas "
+        "above to cover potential gaps.\n"
     )
     return review_comment + section

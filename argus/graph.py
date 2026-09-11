@@ -38,9 +38,8 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
 from argus.helpers import (
-    append_degraded_coverage_section,
-    apply_precheck_scanner_failure_gate,
-    build_degraded_coverage_labels,
+    apply_precheck_gate_and_surface_degraded_coverage,
+    compute_persisted_finding_counts,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
@@ -75,6 +74,7 @@ from argus.models import (
 )
 from argus.pipeline_models import (
     AgentRunData,
+    AgentType,
     CoverageResult,
     DismissedFinding,
     FeedbackVerificationResult,
@@ -2281,7 +2281,72 @@ async def _node_run_reviewer(inputs: ReviewerInput, config: RunnableConfig) -> d
         raise
     except Exception as exc:
         logger.error("Reviewer %s failed: %s", reviewer_type, exc, exc_info=True)
-        return {"findings": [], "agent_runs": []}
+        known_reviewer_type = reviewer_type in (
+            "system",
+            "specialist",
+            "cross_cutting",
+            "tests_and_docs",
+        )
+        if reviewer_type == "system" and group:
+            grp_name = group.name
+            agent_name = f"system:{group.name}"
+        elif reviewer_type == "specialist" and group:
+            spec = inputs.get("specialist", "unknown")
+            grp_name = f"{group.name}::{spec}"
+            agent_name = f"specialist:{group.name}::{spec}"
+        elif reviewer_type == "cross_cutting":
+            grp_name = "cross-cutting"
+            agent_name = "cross-cutting"
+        elif reviewer_type == "tests_and_docs":
+            grp_name = "tests-and-docs"
+            agent_name = "tests-and-docs"
+        elif reviewer_type in ("system", "specialist"):
+            # `group` failed to validate (e.g. a malformed group dict) before
+            # it could be assigned, so the branches above that key off of
+            # `group` never matched. Fall back to the raw, unvalidated input
+            # dict so the crash marker still carries a group name instead of
+            # collapsing to the bare reviewer_type string.
+            raw_group = inputs.get("group")
+            raw_name = raw_group.get("name") if isinstance(raw_group, dict) else None
+            grp_name = raw_name or str(reviewer_type)
+            agent_name = f"{reviewer_type}:{grp_name}"
+        else:
+            grp_name = str(reviewer_type)
+            agent_name = str(reviewer_type)
+
+        crashed_result = SystemReviewResult(
+            system_group=grp_name,
+            findings=[],
+            files_explored=[],
+            # NOTE: any cost/duration a partially-completed session had
+            # already accrued is discarded here -- this except block catches
+            # an exception from the reviewer call itself (or from
+            # SystemGroup/ReviewPlan validation before it), so there is no
+            # SessionResult in scope at this point to recover partial
+            # accounting from. Known gap; the runner-level equivalent
+            # (openai_runner._build_result's failure path) does preserve
+            # partial accounting because it has a SessionResult available.
+            cost_usd=0.0,
+            failure_reason="worker_crashed",
+        )
+        crash_state_update: dict[str, Any] = {"findings": [crashed_result.model_dump()]}
+        if known_reviewer_type:
+            crashed_agent_run = AgentRunData(
+                agent_name=agent_name,
+                agent_type=cast(AgentType, reviewer_type),
+                duration_seconds=0.0,
+                failure_reason="worker_crashed",
+            )
+            crash_state_update["agent_runs"] = [crashed_agent_run.model_dump(mode="json")]
+        else:
+            # reviewer_type is anomalous (e.g. a typo'd Send arg) -- AgentType
+            # has no "unknown" member, and coercing to an existing type would
+            # misattribute this anomalous event's telemetry to a real
+            # reviewer kind. Skip the AgentRunData insert rather than record
+            # a wrong agent_type; the crashed_result finding above still
+            # surfaces the failure.
+            crash_state_update["agent_runs"] = []
+        return crash_state_update
 
     # Build a human-readable label for this reviewer. Wrapped in try/except so
     # a label-formatting bug can never discard a successfully-computed result.
@@ -2341,6 +2406,17 @@ async def _node_collect_findings(state: ReviewState) -> dict[str, Any]:
 
     Logs a warning when some reviewers failed so partial failures are
     visible in the orchestrator's logs.
+
+    A crashed/timed-out reviewer still contributes a (marker) result to
+    ``state["findings"]`` (see ``_node_run_reviewer``'s except branch) --
+    a 0-finding ``SystemReviewResult`` with ``failure_reason`` set. Simply
+    checking ``len(findings)`` therefore cannot distinguish "every reviewer
+    crashed" from "every reviewer succeeded": both produce a
+    non-empty, full-length ``findings`` list. Only entries with
+    ``failure_reason is None`` count as a genuine successful review; if
+    that count is zero, treat it exactly like the "no results at all"
+    case and fail the pipeline rather than silently continuing toward a
+    clean-looking verdict built on zero real coverage.
     """
     findings = state.get("findings", [])
 
@@ -2351,10 +2427,12 @@ async def _node_collect_findings(state: ReviewState) -> dict[str, Any]:
         expected += 1  # system reviewer
         expected += len(group.specialists_needed)  # specialist reviewers
 
-    if not findings:
+    successful = [f for f in findings if f.get("failure_reason") is None]
+
+    if not successful:
         raise RuntimeError("All reviewers failed -- no findings collected")
 
-    succeeded = len(findings)
+    succeeded = len(successful)
     failed = expected - succeeded
     if failed > 0:
         logger.warning(
@@ -2370,7 +2448,21 @@ async def _node_collect_findings(state: ReviewState) -> dict[str, Any]:
 async def _node_check_coverage(state: ReviewState) -> dict[str, Any]:
     """Run coverage check on collected findings."""
     plan = ReviewPlan.model_validate(state["plan"])
-    findings_models = [SystemReviewResult.model_validate(f) for f in state["findings"]]
+    # Filter out crashed/timed-out reviewer markers before this reaches
+    # check_coverage, same as _node_write_review's own filter and for the
+    # same reason: a crash marker's files_explored is always empty, so the
+    # mechanical manifest-vs-reviewed set-difference already treats its
+    # files as uncovered regardless of this filter -- but when that
+    # triggers the LLM-triage path (ambiguous-gap fallback), leaving the
+    # crash marker in the findings list serialized into the LLM prompt
+    # would present a 0-finding, failed session as if it were a genuinely
+    # completed review, risking the LLM reasoning its way into treating a
+    # real gap as already covered.
+    findings_models = [
+        f
+        for f in (SystemReviewResult.model_validate(f) for f in state["findings"])
+        if f.failure_reason is None
+    ]
     coverage = await check_coverage(plan, findings_models)
     return {"coverage": coverage.model_dump()}
 
@@ -2431,7 +2523,30 @@ def _edge_fan_out_gap_fills(state: ReviewState) -> list[Send]:
 async def _node_write_review(state: ReviewState) -> dict[str, Any]:
     """Run the writer to produce the final ReviewResponse."""
     plan = ReviewPlan.model_validate(state["plan"])
-    findings_models = [SystemReviewResult.model_validate(f) for f in state["findings"]]
+    # Filter out crashed/timed-out reviewer markers (failure_reason is not
+    # None -- see _node_run_reviewer's except branch) before handing
+    # findings to the writer LLM. This is NOT redundant with
+    # _node_collect_findings: that node only builds a local `successful`
+    # list for its own expected-vs-succeeded accounting and returns `{}` --
+    # it never removes crash markers from state["findings"], which persist
+    # in state throughout the run. This filter is the only place they are
+    # ever excluded, and it is the sole barrier on the gap-fill path
+    # (run_gap_reviewer -> write_review), which bypasses
+    # _node_collect_findings entirely. Do not remove this filter on the
+    # assumption some earlier node already handles it -- none does. A crash
+    # marker is a 0-finding SystemReviewResult with no signal in the writer
+    # prompt distinguishing it from "this area was reviewed and found
+    # clean" -- without this filter, nothing stops the writer from treating
+    # a crashed group as confirmed-clean evidence toward an APPROVE
+    # verdict. The degraded-coverage section/findings (appended later in
+    # run_review, after the writer has already produced its verdict) are
+    # what actually surface these to a human -- the writer itself should
+    # simply never see them.
+    findings_models = [
+        f
+        for f in (SystemReviewResult.model_validate(f) for f in state["findings"])
+        if f.failure_reason is None
+    ]
 
     # Deterministic-precheck candidate-rule hits, appended here (not into
     # state["findings"] itself) so _node_collect_findings's expected-vs-
@@ -3072,41 +3187,28 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
 
     response.usage.cost_usd = total_cost_usd
 
-    # Surface killed/timed-out reviewer sessions AND crashed/timed-out
-    # deterministic precheck scanners instead of letting either collapse
-    # silently into "0 findings" — both in the rendered markdown (not
-    # schema-frozen, safe to append to) and in the logs. Precheck scanner
-    # failures were already logged once, loudly, inside
-    # precheck.engine.run_precheck itself (this module stays fail-open
-    # regardless of what's surfaced here) — this is the second, PR-visible
-    # half of that same observability, not a duplicate warning path.
-    # See build_degraded_coverage_labels' own docstring for why the
-    # precheck_scanner_failures key lookup lives there, not inline here.
-    failed_labels = build_degraded_coverage_labels(findings_models, result)
-    if failed_labels:
-        logger.warning(
-            "Degraded coverage: %d reviewer session(s)/scanner(s) did not complete and "
-            "reported 0 findings: %s",
-            len(failed_labels),
-            ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
-        )
-        response.review_comment = append_degraded_coverage_section(
-            response.review_comment, failed_labels
-        )
-
     # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's
     # own docstring (argus/config.py) for the fail-open-vs-fail-closed
-    # tradeoff, and apply_precheck_scanner_failure_gate's for why this is
-    # a helpers.py call rather than inline logic here. Deliberately keyed
-    # on precheck_scanner_failures alone, not the combined failed_labels
-    # above -- a killed/timed-out LLM reviewer session is a different
-    # failure class this flag was never scoped to.
+    # tradeoff. Both the gate and the degraded-coverage surfacing
+    # (markdown section + structured coverage-gap findings, covering both
+    # killed/timed-out LLM reviewer sessions and crashed/timed-out
+    # deterministic precheck scanners) are combined into one call: see
+    # apply_precheck_gate_and_surface_degraded_coverage's own docstring
+    # for why this fixed ordering must not be pulled back apart into two
+    # separate call sites (that exact split was a round-3 BLOCKING bug).
+    # Precheck scanner failures were already logged once, loudly, inside
+    # precheck.engine.run_precheck itself (this module stays fail-open
+    # regardless of what's surfaced here) -- the logging below is the
+    # second, PR-visible half of that same observability, not a duplicate
+    # warning path.
     precheck_scanner_failures = result.get("precheck_scanner_failures", [])
-    if apply_precheck_scanner_failure_gate(
+    gate_added_precheck_finding, failed_labels = apply_precheck_gate_and_surface_degraded_coverage(
         response,
-        precheck_scanner_failures,
+        findings_models,
+        result,
         get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
-    ):
+    )
+    if gate_added_precheck_finding:
         logger.warning(
             "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set -- forced verdict to BLOCKING "
             "(risk_level=%s) because %d precheck scanner(s) did not complete this round: %s",
@@ -3114,12 +3216,20 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
             len(precheck_scanner_failures),
             ", ".join(precheck_scanner_failures),
         )
+    if failed_labels:
+        logger.warning(
+            "Degraded coverage: %d reviewer session(s)/scanner(s) did not complete and "
+            "reported 0 findings: %s",
+            len(failed_labels),
+            ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
+        )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
     reviewed_sha = result.get("head_sha") or request.sha
 
-    blocking_count = sum(1 for f in response.findings if f.severity.value == "BLOCKING")
-    suggestion_count = sum(1 for f in response.findings if f.severity.value == "SUGGESTION")
+    # See compute_persisted_finding_counts' own docstring for why
+    # "coverage-gap" findings are excluded from these two persisted counts.
+    blocking_count, suggestion_count = compute_persisted_finding_counts(response.findings)
 
     logger.info(
         "Pipeline complete: verdict=%s, round=%d, cost=$%.4f, elapsed=%.1fs",

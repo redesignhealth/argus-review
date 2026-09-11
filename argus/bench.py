@@ -2,10 +2,9 @@
 
 A "bench" is a lightweight, human-edited TOML config that decides which
 LLM *platform* (Claude Agent SDK is the packaged default; Gemini has a
-real runner too, see ``argus.gemini_runner``, but is opt-in only --
-OpenAI Responses is wired as a valid value but has no runner yet, see
-``PLATFORM_RUNNERS``) and *model* each leaf reviewer in the review
-pipeline runs on. This is
+real runner too, see ``argus.gemini_runner``; OpenAI Responses has a
+real runner too, see ``argus.openai_runner``; both are opt-in only) and
+*model* each leaf reviewer in the review pipeline runs on. This is
 deliberately NOT a dynamic/adaptive routing system -- it is a static,
 PR-reviewed config with a human-editable override chain, in the same
 spirit as ``argus.prompts_runtime``'s prompt override chain.
@@ -560,26 +559,52 @@ async def _gemini_runner(
     )
 
 
-async def _unimplemented_runner(*, entry: BenchEntry, **_kwargs: Any) -> Any:
-    """Stub for platforms wired into the enum but not yet implemented.
+async def _openai_runner(
+    *,
+    entry: BenchEntry,
+    system_prompt: str,
+    user_message: str,
+    anthropic_api_key: str | None = None,
+    anthropic_auth_token: str | None = None,
+    context7_key: str | None = None,
+    context7_library_id: str | None = None,
+    context7_base_url: str | None = None,
+    timeout_s: int,
+    cwd: str,
+    label: str,
+    is_system_reviewer_role: bool = False,
+) -> Any:
+    """Thin adapter for the ``openai-responses`` platform.
 
-    Track 3 (a real OpenAI Responses runner) is out of scope for this
-    change; this stub exists so the bench resolution mechanism
-    (``resolve`` + ``runner_for``) is fully testable end-to-end today,
-    and so a caller who points a role at ``"openai-responses"`` fails
-    loudly and immediately instead of silently no-op'ing.
+    Mirrors ``_gemini_runner``'s adapter role exactly: translates from the
+    shared ``RunnerFn`` signature into ``run_session_openai``'s signature.
     """
+    from argus.config import get_settings
+    from argus.openai_runner import run_session_openai
+
+    return await run_session_openai(
+        entry=entry,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        settings=get_settings(),
+        label=label,
+        repo_root=cwd,
+        timeout_s=timeout_s,
+    )
+
+
+async def _unimplemented_runner(*, entry: BenchEntry, **_kwargs: Any) -> Any:
+    """Stub for platforms wired into the enum but not yet implemented."""
     raise NotImplementedError(
         f"Bench platform {entry.platform!r} has no runner implementation yet "
-        f"(role={entry.role!r}, model={entry.model!r}). This is Track 3 work, "
-        "blocked on a separate repo, and is not available yet."
+        f"(role={entry.role!r}, model={entry.model!r})."
     )
 
 
 PLATFORM_RUNNERS: Final[dict[str, RunnerFn]] = {
     "claude-sdk": _claude_sdk_runner,
     "gemini": _gemini_runner,
-    "openai-responses": _unimplemented_runner,
+    "openai-responses": _openai_runner,
 }
 
 

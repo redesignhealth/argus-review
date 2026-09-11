@@ -14,6 +14,8 @@ from argus.llm.models import (
     CLAUDE_DEFAULT,
     EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
+    GPT_FRONTIER,
+    GPT_MINI,
     estimate_cost_usd,
 )
 from argus.llm.pricing import get_token_cost
@@ -121,6 +123,44 @@ class TestEstimateCostUsd:
         """Gemini pricing is real in litellm, so token count must estimate
         a real, nonzero cost."""
         cost = estimate_cost_usd(GEMINI_FRONTIER, input_tokens=1_000_000, output_tokens=1_000_000)
+        assert cost > 0.0
+
+    def test_openai_model_estimates_real_nonzero_cost(self) -> None:
+        """OpenAI pricing is real in litellm, so token count must estimate
+        a real, nonzero cost."""
+        cost = estimate_cost_usd(GPT_FRONTIER, input_tokens=1_000_000, output_tokens=1_000_000)
+        assert cost > 0.0
+
+    def test_gpt_frontier_pinned_to_approved_model(self) -> None:
+        """Regression guard for a round-1 Argus BLOCKING finding on this
+        PR: gpt-frontier previously resolved to gpt-5.5, which was not on
+        the approved model list and may not have been shipped by OpenAI
+        yet. The alias has since been legitimately re-bumped to gpt-5.6-sol
+        (the entire gpt-5.6 family is now on the approved model list -- see
+        pr-review-specialist-llm-patterns.md). Pin the alias to that
+        approved value so a future accidental re-bump to an unapproved
+        model string is caught here instead of at review time."""
+        assert ALIAS_MAP["gpt-frontier"] == "gpt-5.6-sol"
+        assert GPT_FRONTIER == "gpt-5.6-sol"
+
+    def test_gpt_mini_pinned_to_approved_model(self) -> None:
+        """Parallel regression guard for gpt-mini, alongside gpt-frontier's
+        guard above: the alias has been bumped from gpt-5.4-mini to
+        gpt-5.6-luna, keeping the code default in sync with the policy
+        doc's Default column for OpenAI (see
+        pr-review-specialist-llm-patterns.md) -- gpt-5.6-luna is covered by
+        that same wholesale gpt-5.6 family approval, so this is not a
+        repeat of the gpt-5.5 mistake. gpt-5.5/gpt-5.5-mini remain NOT on
+        the approved list -- do not bump either alias to them until the
+        policy table is updated.
+
+        Also exercises estimate_cost_usd(GPT_MINI, ...) directly (not just
+        ALIAS_MAP/get_token_cost, covered elsewhere) so this test's home in
+        TestEstimateCostUsd actually corresponds to the end-to-end cost
+        pipeline it's implicitly claiming to cover for this alias."""
+        assert ALIAS_MAP["gpt-mini"] == "gpt-5.6-luna"
+        assert GPT_MINI == "gpt-5.6-luna"
+        cost = estimate_cost_usd(GPT_MINI, input_tokens=1000, output_tokens=500)
         assert cost > 0.0
 
 

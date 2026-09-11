@@ -287,7 +287,7 @@ def test_extract_plan_with_openai_runs_end_to_end() -> None:
     call_kwargs = oai_instance.respond.call_args.kwargs
     # Base64 is used (prompt-structure-breakage defense).
     assert "BASE64_PLAN:" in call_kwargs["input"]
-    assert call_kwargs["model"] == "gpt-5.4-mini"
+    assert call_kwargs["model"] == "gpt-5.6-luna"
     # Instructions must include both the decode directive and the "data not
     # commands" guard — regressing either degrades injection defense.
     assert "Decode the base64" in call_kwargs["instructions"]

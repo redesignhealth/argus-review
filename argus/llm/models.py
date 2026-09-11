@@ -1,23 +1,47 @@
 """Central model alias registry.
 
 Single source of truth for which concrete LLM each logical alias resolves to.
-To upgrade a model family across the codebase (e.g. GPT-5.4 -> GPT-5.5), edit
-``ALIAS_MAP`` below and nothing else.
+To upgrade a model family across the codebase (e.g. Claude Sonnet 4.6 ->
+4.7, once formally approved), update the alias in ``ALIAS_MAP`` below, the
+approved-model policy table (``pr-review-specialist-llm-patterns.md``), and
+the corresponding pinning test in ``tests/test_llm_models.py`` together --
+not ``ALIAS_MAP`` alone.
+Note the history on ``gpt-frontier`` specifically: an earlier bump of this
+same alias (GPT-5.4 -> GPT-5.5) was a real BLOCKING finding, because
+gpt-5.5 was NOT on the approved model list (see
+``pr-review-specialist-llm-patterns.md``) -- it was reverted back to
+gpt-5.4, with a regression-guard test
+(``test_gpt_frontier_pinned_to_approved_model`` in
+``tests/test_llm_models.py``) added specifically to catch a repeat. The
+alias has since been bumped again, this time to ``gpt-5.6-sol`` -- unlike
+the gpt-5.5 attempt, the ``gpt-5.6`` family genuinely IS on the approved
+model list (the entire family is approved in
+``pr-review-specialist-llm-patterns.md`` alongside this change), so this is
+not a repeat of that mistake. Any future bump of this alias must likewise
+confirm the target model is on the approved list -- and update the policy
+table if it isn't yet -- before editing ``ALIAS_MAP`` and the
+regression-guard test together.
+
+``gpt-mini`` has likewise been bumped, from ``gpt-5.4-mini`` to
+``gpt-5.6-luna`` -- the policy doc's Default column for OpenAI was updated
+to ``gpt-5.6-luna`` in the same change, so the code default and the policy
+doc stay in sync rather than drifting apart. ``gpt-5.6-luna`` is covered by
+that same wholesale ``gpt-5.6`` family approval, so this is not a repeat of
+the gpt-5.5 mistake either. ``test_gpt_mini_pinned_to_approved_model`` in
+``tests/test_llm_models.py`` guards this pin the same way
+``test_gpt_frontier_pinned_to_approved_model`` guards ``gpt-frontier``.
 
 Call sites should import the resolved constants (``GPT_MINI``,
-``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings like
-``"gpt-5.5-mini"``.
+``CLAUDE_FRONTIER``, etc.) rather than hardcoding model strings.
 
 Only aliases with a real call site are registered in ``ALIAS_MAP`` -- this is
 a standalone, isolated package, not the larger monorepo it was extracted
 from, so there's no value in carrying registry entries with no real caller.
-``gemini-frontier``/``gemini-mini`` ARE real call sites (Track 3's
-``argus.gemini_runner``, dispatched via ``argus.bench``'s ``"gemini"``
-platform, resolves ``entry.model`` through this same ``ALIAS_MAP``) and stay
-registered; ``gpt-frontier``/``gpt-nano`` have no runner yet (``argus.bench``'s
-``"openai-responses"`` platform is ``_unimplemented_runner``) and are NOT
-registered here. Add an alias back to ``ALIAS_MAP`` if a future call
-site actually needs it.
+``gemini-frontier``/``gemini-mini`` and ``gpt-frontier``/``gpt-mini`` ARE
+real call sites (dispatched via ``argus.bench``'s ``"gemini"`` and
+``"openai-responses"`` platforms, respectively, resolving ``entry.model``
+through this same ``ALIAS_MAP``) and stay registered. Add an alias back
+to ``ALIAS_MAP`` if a future call site actually needs it.
 
 Per-token model pricing is sourced centrally from ``argus.llm.pricing``
 (litellm-backed); ``estimate_cost_usd`` is re-exported here for call sites.
@@ -58,8 +82,17 @@ from argus.llm.pricing import estimate_cost_usd
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
-    # OpenAI -- gpt-5 family
-    "gpt-mini": "gpt-5.4-mini",  # bump to gpt-5.5-mini once OpenAI ships it
+    # OpenAI -- gpt-5.4 / gpt-5.6 families
+    # gpt-frontier is bumped to gpt-5.6-sol, and gpt-mini is bumped to
+    # gpt-5.6-luna, as the gpt-5.6 family is now on the approved model list
+    # (see pr-review-specialist-llm-patterns.md), whose Default column was
+    # updated to gpt-5.6-luna in the same change. gpt-5.5/gpt-5.5-mini
+    # remain NOT on the approved list -- do not bump either alias to them
+    # until the policy table is updated (see the module docstring above).
+    # test_llm_models.py pins both of these exact values as a regression
+    # guard.
+    "gpt-frontier": "gpt-5.6-sol",
+    "gpt-mini": "gpt-5.6-luna",
     # Anthropic
     "claude-frontier": "claude-fable-5",
     "claude-opus": "claude-opus-5",
@@ -158,6 +191,7 @@ def _env_override(env_var: str, default: str) -> str:
     return resolved
 
 
+GPT_FRONTIER: Final[str] = ALIAS_MAP["gpt-frontier"]
 GPT_MINI: Final[str] = ALIAS_MAP["gpt-mini"]
 CLAUDE_FRONTIER: Final[str] = _env_override("ARGUS_FRONTIER_MODEL", ALIAS_MAP["claude-frontier"])
 CLAUDE_OPUS: Final[str] = _env_override("ARGUS_FRONTIER_MODEL", ALIAS_MAP["claude-opus"])
@@ -175,6 +209,7 @@ __all__ = [
     "EXPERIMENTAL_MODELS",
     "GEMINI_FRONTIER",
     "GEMINI_MINI",
+    "GPT_FRONTIER",
     "GPT_MINI",
     "build_chat_model",
     "estimate_cost_usd",

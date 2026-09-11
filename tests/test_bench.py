@@ -602,7 +602,7 @@ class TestPlatformRunners:
         assert call_kwargs["timeout_s"] == 42
 
     @pytest.mark.asyncio
-    async def test_openai_responses_runner_raises_not_implemented_naming_platform(self) -> None:
+    async def test_openai_responses_runner_delegates_to_run_session_openai(self) -> None:
         entry = bench.BenchEntry(
             role="cross-cutting",
             platform="openai-responses",
@@ -611,8 +611,65 @@ class TestPlatformRunners:
         )
         runner = bench.runner_for(entry)
 
-        with pytest.raises(NotImplementedError, match="openai-responses"):
-            await runner(entry=entry)
+        with patch(
+            "argus.openai_runner.run_session_openai",
+            new_callable=AsyncMock,
+            return_value="openai-session-result-sentinel",
+        ) as mock_run_session_openai:
+            result = await runner(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                anthropic_api_key=None,
+                anthropic_auth_token=None,
+                context7_key=None,
+                context7_library_id=None,
+                timeout_s=300,
+                cwd="/tmp/repo",
+                label="cross-cutting",
+            )
+
+        assert result == "openai-session-result-sentinel"
+        mock_run_session_openai.assert_called_once()
+        call_kwargs = mock_run_session_openai.call_args.kwargs
+        assert call_kwargs["entry"] is entry
+        assert call_kwargs["system_prompt"] == "sys"
+        assert call_kwargs["user_message"] == "msg"
+        assert call_kwargs["label"] == "cross-cutting"
+        assert call_kwargs["repo_root"] == "/tmp/repo"
+        assert call_kwargs["timeout_s"] == 300
+        assert "settings" in call_kwargs
+
+    @pytest.mark.asyncio
+    async def test_openai_runner_threads_caller_supplied_timeout_s_through(self) -> None:
+        entry = bench.BenchEntry(
+            role="cross-cutting",
+            platform="openai-responses",
+            model="gpt-mini",
+            prompt_name="pr-review-cross-cutting",
+        )
+        runner = bench.runner_for(entry)
+
+        with patch(
+            "argus.openai_runner.run_session_openai",
+            new_callable=AsyncMock,
+            return_value="sentinel",
+        ) as mock_run_session_openai:
+            await runner(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                anthropic_api_key=None,
+                anthropic_auth_token=None,
+                context7_key=None,
+                context7_library_id=None,
+                timeout_s=42,
+                cwd="/tmp/repo",
+                label="cross-cutting",
+            )
+
+        call_kwargs = mock_run_session_openai.call_args.kwargs
+        assert call_kwargs["timeout_s"] == 42
 
     def test_runner_for_unregistered_platform_raises(self) -> None:
         entry = bench.BenchEntry(
@@ -653,6 +710,7 @@ class TestRunSystemReviewerBenchWiring:
         fake_session = MagicMock()
         fake_session.result_text = ""
         fake_session.failure_reason = None
+        fake_session.timed_out = False
         fake_session.cost_usd = 0.0
         fake_session.tool_call_count = 0
         fake_session.tool_names = []
@@ -723,6 +781,7 @@ class TestPackagedDefaultNeverTouchesGeminiRunner:
         fake_session = MagicMock()
         fake_session.result_text = ""
         fake_session.failure_reason = None
+        fake_session.timed_out = False
         fake_session.cost_usd = 0.0
         fake_session.tool_call_count = 0
         fake_session.tool_names = []
