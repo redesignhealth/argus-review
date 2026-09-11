@@ -415,34 +415,44 @@ class TestResolveWiringStatusWarning:
     warned loudly -- overriding it in bench.toml would otherwise silently
     do nothing (see argus.bench's 'Wiring status' docstring section)."""
 
-    def test_wired_role_does_not_warn(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level("WARNING", logger="argus.bench"):
-            bench.resolve("system-generalist")
-        assert "system-generalist" not in caplog.text
-
     @pytest.mark.parametrize(
         "role",
-        ["tests-and-docs", "specialist-security", "cross-cutting", "blocking-validator"],
+        [
+            "system-generalist",
+            "tests-and-docs",
+            "specialist-security",
+            "cross-cutting",
+            "blocking-validator",
+            "feedback-verifier",
+        ],
     )
-    def test_unwired_role_warns(self, role: str, caplog: pytest.LogCaptureFixture) -> None:
+    def test_wired_role_does_not_warn(self, role: str, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("WARNING", logger="argus.bench"):
             bench.resolve(role)
-        assert any(role in record.message for record in caplog.records)
+        assert role not in caplog.text
+
+    def test_unwired_role_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        with patch("argus.bench._WIRED_ROLES", frozenset({"system-generalist"})):
+            with caplog.at_level("WARNING", logger="argus.bench"):
+                bench.resolve("cross-cutting")
+        assert any("cross-cutting" in record.message for record in caplog.records)
         assert any("no effect" in record.message.lower() for record in caplog.records)
 
     def test_unwired_role_warns_only_once(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level("WARNING", logger="argus.bench"):
-            bench.resolve("cross-cutting")
-            bench.resolve("cross-cutting")
+        with patch("argus.bench._WIRED_ROLES", frozenset({"system-generalist"})):
+            with caplog.at_level("WARNING", logger="argus.bench"):
+                bench.resolve("cross-cutting")
+                bench.resolve("cross-cutting")
         matching = [r for r in caplog.records if "cross-cutting" in r.message]
         assert len(matching) == 1
 
-    def test_wired_roles_is_a_subset_of_all_declared_roles(self) -> None:
-        """Sanity guard: every name in _WIRED_ROLES must actually be a real,
-        resolvable role -- catches a typo in _WIRED_ROLES itself."""
+    def test_wired_roles_covers_all_declared_roles(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Sanity guard: every declared role is now wired."""
+        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", "1")
+        bench.clear_cache()
         raw = bench.load_bench()
         all_roles = set(bench.BULK_ROLE_PROMPTS) | set(raw.get("roles", {}))
-        assert bench._WIRED_ROLES <= all_roles
+        assert bench._WIRED_ROLES == all_roles
 
     def test_load_bench_warns_on_unwired_overlay_role(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -459,8 +469,9 @@ class TestResolveWiringStatusWarning:
         )
         monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
         bench.clear_cache()
-        with caplog.at_level("WARNING", logger="argus.bench"):
-            bench.load_bench()
+        with patch("argus.bench._WIRED_ROLES", frozenset({"system-generalist"})):
+            with caplog.at_level("WARNING", logger="argus.bench"):
+                bench.load_bench()
         assert "cross-cutting" in caplog.text
 
 
@@ -743,6 +754,258 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+
+    @pytest.mark.asyncio
+    async def test_run_specialist_reviewer_routes_through_bench_to_same_model(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import SystemGroup
+
+        group = SystemGroup(
+            name="backend",
+            files=["src/app.py"],
+            conventions="",
+            review_focus="",
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock(
+            result_text="",
+            failure_reason=None,
+            timed_out=False,
+            cost_usd=0.0,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model=runners_module._SYSTEM_REVIEWER_MODEL,
+            result_text_length=0,
+            duration_seconds=1.0,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_isolated,
+        ):
+            await runners_module.run_specialist_reviewer(
+                specialist="security",
+                group=group,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_isolated.assert_called_once()
+        assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_cross_cutting_reviewer_routes_through_bench_to_same_model(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import FileEntry, ReviewPlan, SystemGroup
+
+        plan = ReviewPlan(
+            system_groups=[
+                SystemGroup(name="b", files=["src/app.py"], conventions="", review_focus="")
+            ],
+            file_manifest=[FileEntry(path="src/app.py", change_type="modified")],
+            cross_cutting_concerns=[],
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock(
+            result_text="",
+            failure_reason=None,
+            timed_out=False,
+            cost_usd=0.0,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model=runners_module._CROSS_CUTTING_MODEL,
+            result_text_length=0,
+            duration_seconds=1.0,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_isolated,
+        ):
+            await runners_module.run_cross_cutting_reviewer(
+                plan=plan,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_isolated.assert_called_once()
+        assert mock_isolated.call_args.kwargs["model"] == runners_module._CROSS_CUTTING_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_tests_and_docs_reviewer_routes_through_bench(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import FileEntry, ReviewPlan
+
+        plan = ReviewPlan(
+            system_groups=[],
+            file_manifest=[FileEntry(path="src/app.py", change_type="modified")],
+            cross_cutting_concerns=[],
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock(
+            result_text="",
+            failure_reason=None,
+            timed_out=False,
+            cost_usd=0.0,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model=runners_module._SYSTEM_REVIEWER_MODEL,
+            result_text_length=0,
+            duration_seconds=1.0,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_isolated,
+        ):
+            await runners_module.run_tests_and_docs_reviewer(
+                plan=plan,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_isolated.assert_called_once()
+        assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_blocking_validator_routes_through_bench(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock(
+            result_text='{"items": []}',
+            failure_reason=None,
+            timed_out=False,
+            cost_usd=0.0,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model=runners_module._SYSTEM_REVIEWER_MODEL,
+            result_text_length=0,
+            duration_seconds=1.0,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_isolated,
+        ):
+            await runners_module.run_blocking_validator(
+                blocking_findings=[{"file": "a.py", "line": 1, "description": "d"}],
+                diff_text="diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_isolated.assert_called_once()
+        assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_feedback_verifier_routes_through_bench(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import PriorFinding, PriorReviewContext
+
+        prior_context = PriorReviewContext(
+            review_id="00000000-0000-0000-0000-000000000000",
+            reviewed_sha="a" * 40,
+            findings=[PriorFinding(severity="BLOCKING", description="d")],
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock(
+            result_text='{"items": []}',
+            failure_reason=None,
+            timed_out=False,
+            cost_usd=0.0,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model=runners_module._SYSTEM_REVIEWER_MODEL,
+            result_text_length=0,
+            duration_seconds=1.0,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_isolated,
+        ):
+            await runners_module.run_feedback_verifier(
+                prior_context=prior_context,
+                diff_text="diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_isolated.assert_called_once()
+        assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
 
 
 # ---------------------------------------------------------------------------

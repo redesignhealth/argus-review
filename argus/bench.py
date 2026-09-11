@@ -51,34 +51,23 @@ There is deliberately NO safety floor / minimum-tier guardrail here: the
 bench is PR-reviewed for its defaults, and a caller who overrides it at
 runtime is trusted to know what they're doing.
 
-## Wiring status -- READ THIS BEFORE ASSUMING AN OVERRIDE DOES ANYTHING
+## Wiring status
 
-As of this writing, only ONE role is actually consulted by a runner
-function: ``"system-generalist"``, resolved by
-``argus.runners.run_system_reviewer`` (see ``_WIRED_ROLES`` below).
-Every other role documented above -- ``"tests-and-docs"``, every
-``"specialist-<name>"``, ``"cross-cutting"``, ``"blocking-validator"``,
-``"feedback-verifier"`` -- parses, merges, and validates exactly like
-``"system-generalist"``, and ``bench.resolve(role)`` happily resolves
-them, but NO runner function calls ``resolve()`` for them yet:
-``run_specialist_reviewer``, ``run_cross_cutting_reviewer``,
-``run_tests_and_docs_reviewer``, ``run_blocking_validator``, and
-``run_feedback_verifier`` all still call
-``argus.runners._run_session_isolated`` directly with a hardcoded model
-constant (``_SYSTEM_REVIEWER_MODEL``/``_CROSS_CUTTING_MODEL`` in
-``argus/runners.py``), completely bypassing the bench.
+All leaf-reviewer roles defined in this module are wired to their respective
+runner functions in ``argus.runners`` via ``bench.resolve(role)`` and
+``bench.runner_for(entry)(...)``:
+- Bulk-reviewer roles (via ``[bulk_reviewer]``):
+  - ``"system-generalist"``: ``run_system_reviewer`` (including gap-fill reviewers)
+  - ``"tests-and-docs"``: ``run_tests_and_docs_reviewer``
+  - ``"specialist-<name>"``: ``run_specialist_reviewer`` for each specialist
+- Individual roles (via ``[roles.<name>]``):
+  - ``"cross-cutting"``: ``run_cross_cutting_reviewer``
+  - ``"blocking-validator"``: ``run_blocking_validator``
+  - ``"feedback-verifier"``: ``run_feedback_verifier``
 
-This means overriding any bench.toml key for one of those NOT-yet-wired
-roles today changes nothing about an actual review run -- it's a
-config value that parses and validates, but has no observable effect.
-Converting every runner to route through the bench was an explicit,
-deliberate scope decision for the change that introduced this module
-(one runner first, as a proof of the mechanism); wiring the rest is
-tracked follow-up work -- extend ``_WIRED_ROLES`` as each runner
-migrates. ``resolve()`` logs a warning whenever a caller resolves a
-role outside ``_WIRED_ROLES``, specifically so this gap can't go
-unnoticed by someone editing the config without reading this docstring
-first.
+``resolve()`` logs a warning whenever a caller resolves a role outside
+``_WIRED_ROLES``, ensuring any future or unmapped roles that are not wired
+fail loudly rather than silently having no effect.
 """
 
 from __future__ import annotations
@@ -115,13 +104,18 @@ _TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({"bulk_reviewer", "roles"})
 _BULK_KEYS: Final[frozenset[str]] = frozenset({"platform", "model", "caching"})
 _ROLE_KEYS: Final[frozenset[str]] = frozenset({"platform", "model", "prompt_name", "caching"})
 
-# Roles a runner function actually resolves via bench.resolve() today. See
-# the "Wiring status" section of this module's docstring above -- every
-# other bulk/role name is resolvable and validated but currently inert.
-# Add a role here in the SAME commit that migrates its runner function to
-# call bench.resolve()/runner_for() instead of _run_session_isolated
-# directly.
-_WIRED_ROLES: Final[frozenset[str]] = frozenset({"system-generalist"})
+# Roles a runner function actually resolves via bench.resolve(). Every bulk
+# role and every individual role is wired to its corresponding runner function.
+_WIRED_ROLES: Final[frozenset[str]] = frozenset(
+    {
+        "system-generalist",
+        "tests-and-docs",
+        *(f"specialist-{name}" for name in get_args(SpecialistName)),
+        "cross-cutting",
+        "blocking-validator",
+        "feedback-verifier",
+    }
+)
 
 # The bulk-bucket role registry: role name -> the prompt file that role
 # already resolves for itself (unchanged by the bench). Names mirror

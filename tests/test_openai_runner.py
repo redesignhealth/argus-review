@@ -284,7 +284,7 @@ class TestOpenAIRunnerBasicLoop:
         assert outputs[1]["call_id"] == "call_2"
 
     async def test_exhausting_max_turns_still_returns_a_result(self, tmp_path: Any) -> None:
-        """Exhausting _MAX_TURNS stops and builds whatever findings were reported."""
+        """Exhausting _MAX_TURNS stops and builds whatever findings were reported with failure_reason=None."""
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [_make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(35)]
         client = _make_fake_client(responses)
@@ -307,6 +307,41 @@ class TestOpenAIRunnerBasicLoop:
 
         parsed = parse_review_result(result.result_text, "test-group")
         assert len(parsed.findings) == _MAX_TURNS
+
+    async def test_finish_review_on_final_turn_is_clean_completion_not_exhaustion(
+        self, tmp_path: Any
+    ) -> None:
+        """A successful finish_review on the LAST allowed turn (_MAX_TURNS) must
+        still be treated as a clean completion with files_explored populated.
+        The turn loop's `for...else` only runs its exhaustion branch when the loop
+        completes without `break`."""
+        from argus.runners import _MAX_TURNS
+
+        finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
+        responses = [
+            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS - 1)
+        ]
+        responses.append(
+            _make_response(
+                calls=[("finish_review", {"files_explored": ["f.py"]})],
+                resp_id=f"r_{_MAX_TURNS - 1}",
+            )
+        )
+        client = _make_fake_client(responses)
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason is None
+        assert client.responses.create.call_count == _MAX_TURNS
+        assert "finish_review" in result.tool_names
 
 
 class TestOpenAIRunnerUsageAndCost:
@@ -721,7 +756,7 @@ class TestOpenAIRunnerTimeoutsAndFailures:
 
     async def test_explicit_timeout_s_overrides_settings_default(self, tmp_path: Any) -> None:
         """Explicit timeout_s overrides Settings.ARGUS_SESSION_TIMEOUT."""
-        settings = _make_settings(session_timeout=600)
+        settings = _make_settings(session_timeout=900)
         client = _make_fake_client([_make_response(calls=[])])
         entry = _make_entry()
 
@@ -738,8 +773,8 @@ class TestOpenAIRunnerTimeoutsAndFailures:
         mock_init.assert_called_once()
         assert mock_init.call_args.kwargs["timeout"] == 42.0
 
-    async def test_default_timeout_is_600_seconds(self, tmp_path: Any) -> None:
-        """When neither timeout_s nor ARGUS_SESSION_TIMEOUT is passed, defaults to 600s."""
+    async def test_default_timeout_is_900_seconds(self, tmp_path: Any) -> None:
+        """When neither timeout_s nor ARGUS_SESSION_TIMEOUT is passed, defaults to 900s."""
         settings = MagicMock(spec=[])
         settings.OPENAI_API_KEY = "key"
         client = _make_fake_client([_make_response(calls=[])])
@@ -755,7 +790,7 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         mock_init.assert_called_once()
-        assert mock_init.call_args.kwargs["timeout"] == 600
+        assert mock_init.call_args.kwargs["timeout"] == 900
 
     async def test_client_closed_on_normal_completion(self, tmp_path: Any) -> None:
         """client.close is called when session completes normally."""
@@ -796,6 +831,60 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         client.close.assert_called_once()
+
+    async def test_client_close_exception_does_not_mask_session_result(self, tmp_path: Any) -> None:
+        """Exceptions in client.close() are caught and do not clobber a good SessionResult."""
+        finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
+        client = _make_fake_client([_make_response(calls=[finding_call]), _make_response(calls=[])])
+        client.close = AsyncMock(side_effect=RuntimeError("connection pool shutdown failed"))
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason is None
+        client.close.assert_called_once()
+        from argus.helpers import parse_review_result
+
+        parsed = parse_review_result(result.result_text, "test-group")
+        assert len(parsed.findings) == 1
+
+    async def test_settings_openai_base_url_passed_to_build_client(self, tmp_path: Any) -> None:
+        """OPENAI_BASE_URL on settings is passed to _build_client."""
+        settings = _make_settings()
+        settings.OPENAI_BASE_URL = "https://proxy.example.com/v1"
+        client = _make_fake_client([_make_response(calls=[])])
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client) as mock_init:
+            await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=settings,
+                repo_root=str(tmp_path),
+            )
+
+        mock_init.assert_called_once()
+        assert mock_init.call_args.kwargs["base_url"] == "https://proxy.example.com/v1"
+
+    async def test_build_client_passes_base_url_to_async_openai(self) -> None:
+        """_build_client forwards base_url to the AsyncOpenAI constructor."""
+        with patch("argus.openai_runner.AsyncOpenAI") as mock_cls:
+            from argus.openai_runner import _build_client
+
+            _build_client(api_key="sk-test", base_url="https://custom.proxy/v1", timeout=30.0)
+            mock_cls.assert_called_once_with(
+                api_key="sk-test",
+                base_url="https://custom.proxy/v1",
+                timeout=30.0,
+            )
 
 
 class TestOpenAIRunnerPartialProgressOnFailure:

@@ -56,7 +56,7 @@ creation or lifecycle management. Tokens read from cache are reported in
 reduced cache-read rate via ``argus.llm.pricing``.
 
 Timeout handling: ``asyncio.timeout()`` inside ``_run_turns`` bounds the
-entire multi-turn session against ``effective_timeout_s`` (default 600s,
+entire multi-turn session against ``effective_timeout_s`` (default 900s,
 consistent across platforms). The ``AsyncOpenAI`` client is constructed with
 ``timeout=effective_timeout_s``, bounding individual HTTP calls natively in the
 SDK. Timeouts raise ``TimeoutError``, ``APITimeoutError``, or
@@ -381,6 +381,7 @@ def _build_client(
     client_kwargs: dict[str, Any] = {}
     if api_key:
         client_kwargs["api_key"] = api_key
+    # base_url is only passed when truthy; None safely defaults to the standard OpenAI endpoint
     if base_url:
         client_kwargs["base_url"] = base_url
     if timeout is not None:
@@ -616,6 +617,11 @@ async def _run_turns(
 
                     previous_response_id = getattr(response, "id", None)
                 else:
+                    # `for...else`: only reached if every one of _MAX_TURNS
+                    # iterations executed a function call and none of them was
+                    # finish_review -- i.e. the turn budget was exhausted.
+                    # We preserve all accumulated findings with failure_reason=None
+                    # so partial progress is not discarded by the review graph.
                     logger.warning(
                         "OpenAI session [%s] exhausted its %d-turn budget without a finish_review call",
                         label or "unlabeled",
@@ -646,7 +652,15 @@ async def _run_turns(
         )
         return _build_result("worker_crashed")
     finally:
-        await asyncio.shield(client.close())
+        try:
+            await asyncio.shield(client.close())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "OpenAI client close failed [%s]: %s",
+                label or "unlabeled",
+                exc,
+                exc_info=True,
+            )
 
 
 def _redact_openai_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:

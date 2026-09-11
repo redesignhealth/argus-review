@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ``argus.runners._SUBPROCESS_TIMEOUT_S`` (the fallback used when no Settings
 # instance is available, mostly tests) imports this same constant rather than
 # hardcoding its own copy, so the two can never drift out of sync.
-DEFAULT_ARGUS_SESSION_TIMEOUT_S = 600
+DEFAULT_ARGUS_SESSION_TIMEOUT_S = 900
 
 
 class Settings(BaseSettings):
@@ -107,6 +107,9 @@ class Settings(BaseSettings):
             documentation-only Settings field) as ``ARGUS_SPECIALIST_MODEL``
             above.
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
+        OPENAI_BASE_URL: Optional override for OpenAI API endpoint (e.g. for proxying).
+            Note that OPENAI_API_KEY will be forwarded as a Bearer token to whatever
+            endpoint is configured here; point only at trusted proxy hosts.
         CONTEXT7_API_KEY / ARGUS_CONTEXT7_LIBRARY_ID: Context7 docs MCP.
         ARGUS_CONTEXT7_BASE_URL: Override for Context7's MCP endpoint
             (defaults to the real ``https://mcp.context7.com/mcp`` when
@@ -118,13 +121,14 @@ class Settings(BaseSettings):
             Context7 call.
         ARGUS_SESSION_TIMEOUT: Wall-clock seconds a reviewer subprocess is
             allowed to run before it is killed and reported as a failure.
-            Defaults to 600 (10 minutes) — first raised from 300 to 420 after
+            Defaults to 900 (15 minutes) — first raised from 300 to 420 after
             production logs showed legitimate (non-runaway) specialist
             reviewers finishing as late as 294s, right at the old timeout's
             edge; raised again to 600 to match rh-data-platform's
             production-proven value ahead of this package taking over as the
             actual production reviewer (rh-data-platform's review_service is
-            being retired in its favor).
+            being retired in its favor); raised once more to 900 for
+            additional headroom across all three reviewer platforms.
         GOOGLE_API_KEY: Gemini platform credential, consumed via the
             ``google_credential`` property by ``argus.gemini_runner``
             (Track 3) whenever a role's bench entry resolves to
@@ -148,6 +152,7 @@ class Settings(BaseSettings):
     ANTHROPIC_AUTH_TOKEN: str | None = None
     GITHUB_TOKEN_RO: str
     OPENAI_API_KEY: str
+    OPENAI_BASE_URL: str | None = None
     GOOGLE_API_KEY: str | None = None
 
     ARGUS_DB_URL: str | None = None

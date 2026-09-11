@@ -674,8 +674,7 @@ async def run_specialist_reviewer(
     if settings is None:
         settings = get_settings()
 
-    prompt_name = _SPECIALIST_PROMPT_MAP.get(specialist)
-    if not prompt_name:
+    if specialist not in _SPECIALIST_PROMPT_MAP:
         raise ValueError(f"Unknown specialist: {specialist!r}")
 
     effective_root = _resolve_repo_root(repo_root, "run_specialist_reviewer")
@@ -689,7 +688,8 @@ async def run_specialist_reviewer(
             None,
         )
 
-    base_prompt = await fetch_prompt(prompt_name)
+    bench_entry = bench.resolve(f"specialist-{specialist}")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
 
     system_prompt = (
         f"{base_prompt}\n\n"
@@ -712,9 +712,9 @@ async def run_specialist_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -725,6 +725,7 @@ async def run_specialist_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label=f"specialist:{group.name}::{specialist}",
+        is_system_reviewer_role=True,
     )
     result = _parse_review_result(session.result_text, f"{group.name}::{specialist}")
     result.cost_usd = session.cost_usd
@@ -766,7 +767,10 @@ async def run_cross_cutting_reviewer(
 
     effective_root = _resolve_repo_root(repo_root, "run_cross_cutting_reviewer")
 
-    base_prompt = await fetch_prompt("pr-review-cross-cutting")
+    bench_entry = bench.resolve("cross-cutting")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
+    # The prior-art supplement is always appended to the cross-cutting review prompt
+    # and is intentionally not configurable via bench.toml.
     prior_art_prompt = await fetch_prompt("pr-review-prior-art")
     logger.info("Prior art prompt loaded: %d chars, reviewer=cross-cutting", len(prior_art_prompt))
 
@@ -797,8 +801,9 @@ async def run_cross_cutting_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_CROSS_CUTTING_MODEL,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -809,6 +814,7 @@ async def run_cross_cutting_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="cross-cutting",
+        is_system_reviewer_role=False,
     )
     result = _parse_review_result(session.result_text, "cross-cutting")
     result.cost_usd = session.cost_usd
@@ -850,7 +856,8 @@ async def run_tests_and_docs_reviewer(
 
     effective_root = _resolve_repo_root(repo_root, "run_tests_and_docs_reviewer")
 
-    base_prompt = await fetch_prompt("pr-review-tests-and-docs")
+    bench_entry = bench.resolve("tests-and-docs")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
 
     all_files = "\n".join(f"- {fe.path} ({fe.change_type})" for fe in plan.file_manifest)
@@ -864,9 +871,9 @@ async def run_tests_and_docs_reviewer(
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -877,6 +884,7 @@ async def run_tests_and_docs_reviewer(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="tests-and-docs",
+        is_system_reviewer_role=True,
     )
     result = _parse_review_result(session.result_text, "tests-and-docs")
     result.cost_usd = session.cost_usd
@@ -927,7 +935,8 @@ async def run_feedback_verifier(
 
     findings_json = json.dumps([f.model_dump() for f in prior_context.findings], indent=2)
 
-    base_prompt = await fetch_prompt("pr-review-feedback-verifier")
+    bench_entry = bench.resolve("feedback-verifier")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
 
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
 
@@ -943,9 +952,9 @@ async def run_feedback_verifier(
 
     # Sonnet, not Opus: feedback verifier checks N prior findings in bulk
     # (resolved/unresolved/regressed) - volume-oriented like system reviewers.
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -956,6 +965,7 @@ async def run_feedback_verifier(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="feedback-verifier",
+        is_system_reviewer_role=True,
     )
 
     result = _parse_verification_result(
@@ -1059,7 +1069,8 @@ async def run_blocking_validator(
 
     effective_root = _resolve_repo_root(repo_root, "run_blocking_validator")
 
-    base_prompt = await fetch_prompt("pr-review-blocking-validator")
+    bench_entry = bench.resolve("blocking-validator")
+    base_prompt = await fetch_prompt(bench_entry.prompt_name)
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
     findings_json = json.dumps(blocking_findings, indent=2)
 
@@ -1073,9 +1084,9 @@ async def run_blocking_validator(
         "Grep to verify. Return your validation results."
     )
 
-    session = await _run_session_isolated(
-        model=_SYSTEM_REVIEWER_MODEL,
-        is_system_reviewer_role=True,
+    runner = bench.runner_for(bench_entry)
+    session = await runner(
+        entry=bench_entry,
         system_prompt=system_prompt,
         user_message=user_message,
         anthropic_api_key=settings.ANTHROPIC_API_KEY,
@@ -1086,6 +1097,7 @@ async def run_blocking_validator(
         timeout_s=getattr(settings, "ARGUS_SESSION_TIMEOUT", _SUBPROCESS_TIMEOUT_S),
         cwd=effective_root,
         label="blocking-validator",
+        is_system_reviewer_role=True,
     )
 
     result = _parse_validation_result(session.result_text, len(blocking_findings), session.cost_usd)
@@ -1595,25 +1607,26 @@ async def _run_claude_session(
     #     that can't be defeated by a future override collision.
     #
     # A live dogfood round found a further gap in the role-only gate above:
-    # `run_system_reviewer` (the only caller that routes through
-    # `argus.bench` today) always passes `is_system_reviewer_role=True`
-    # regardless of what `bench.toml` actually resolved `model` to --
-    # `[bulk_reviewer].model` can point "system-generalist" at ANY alias
-    # (e.g. `claude-opus`, `claude-mini`, a future `EXPERIMENTAL_MODELS`
-    # pin), and this beta was only ever empirically verified against the
-    # sonnet-tier `claude-default` pin (see the probe above). Gating on
-    # role alone would silently attach an unverified-for-that-model beta
-    # to whatever a bench override picked. Re-adding a plain
-    # `model == _SYSTEM_REVIEWER_MODEL` comparison does NOT reintroduce
-    # the collision risk described above, because it's ANDed with
-    # `is_system_reviewer_role` here, not evaluated alone: the
-    # cross-cutting call site always passes `is_system_reviewer_role=False`
-    # and short-circuits before this comparison is ever reached, so an
-    # accidental `_CROSS_CUTTING_MODEL == _SYSTEM_REVIEWER_MODEL` value
-    # collision (e.g. via --frontier-model) still can't leak the beta onto
-    # cross-cutting. This closes the bench-override gap for the ONE
-    # caller that can currently reach it, whether the model got here via
-    # the default no-override path or an explicit bench.toml override.
+    # callers that route through `argus.bench` with `is_system_reviewer_role=True`
+    # (run_system_reviewer, run_specialist_reviewer, run_tests_and_docs_reviewer,
+    # run_blocking_validator, run_feedback_verifier) pass
+    # `is_system_reviewer_role=True` regardless of what `bench.toml` actually
+    # resolved `model` to -- `[bulk_reviewer].model` or `[roles.*].model` can
+    # point any of these roles at ANY alias (e.g. `claude-opus`, `claude-mini`,
+    # a future `EXPERIMENTAL_MODELS` pin), and this beta was only ever
+    # empirically verified against the sonnet-tier `claude-default` pin (see the
+    # probe above). Gating on role alone would silently attach an
+    # unverified-for-that-model beta to whatever a bench override picked.
+    # Re-adding a plain `model == _SYSTEM_REVIEWER_MODEL` comparison does NOT
+    # reintroduce the collision risk described above, because it's ANDed with
+    # `is_system_reviewer_role` here, not evaluated alone: the cross-cutting call
+    # site always passes `is_system_reviewer_role=False` and short-circuits
+    # before this comparison is ever reached, so an accidental
+    # `_CROSS_CUTTING_MODEL == _SYSTEM_REVIEWER_MODEL` value collision (e.g. via
+    # --frontier-model) still can't leak the beta onto cross-cutting. This closes
+    # the bench-override gap for all callers that can reach it, whether the
+    # model got here via the default no-override path or an explicit bench.toml
+    # override.
     _attach_1m_context_beta = (
         is_system_reviewer_role
         and _SYSTEM_REVIEWER_UNOVERRIDDEN
