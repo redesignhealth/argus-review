@@ -56,7 +56,7 @@ creation or lifecycle management. Tokens read from cache are reported in
 reduced cache-read rate via ``argus.llm.pricing``.
 
 Timeout handling: ``asyncio.timeout()`` inside ``_run_turns`` bounds the
-entire multi-turn session against ``effective_timeout_s`` (default 600s,
+entire multi-turn session against ``effective_timeout_s`` (default 900s,
 consistent across platforms). The ``AsyncOpenAI`` client is constructed with
 ``timeout=effective_timeout_s``, bounding individual HTTP calls natively in the
 SDK. Timeouts raise ``TimeoutError``, ``APITimeoutError``, or

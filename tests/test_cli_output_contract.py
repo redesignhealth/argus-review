@@ -120,10 +120,14 @@ class TestRenderSummaryBlock:
             )
         )
         block = render_summary_block(response, elapsed=60.0)
-        expected_blocking, expected_suggestions = compute_persisted_finding_counts(response.findings)
+        expected_blocking, expected_suggestions = compute_persisted_finding_counts(
+            response.findings
+        )
         assert expected_blocking == 1
         assert expected_suggestions == 1
-        assert f"Findings:   {expected_blocking} blocking, {expected_suggestions} suggestions" in block
+        assert (
+            f"Findings:   {expected_blocking} blocking, {expected_suggestions} suggestions" in block
+        )
 
 
 class TestRenderReviewOutput:
