@@ -149,6 +149,7 @@ def test_optional_fields_default_to_none(monkeypatch: pytest.MonkeyPatch) -> Non
         "ARGUS_CONTEXT7_LIBRARY_ID",
         "ARGUS_CONTEXT7_BASE_URL",
         "GOOGLE_API_KEY",
+        "GOOGLE_BASE_URL",
         "ARGUS_BENCH_FILE",
         "ARGUS_GEMINI_CACHE_DIR",
     ):
@@ -160,6 +161,7 @@ def test_optional_fields_default_to_none(monkeypatch: pytest.MonkeyPatch) -> Non
     assert settings.ARGUS_CONTEXT7_BASE_URL is None
     assert settings.ARGUS_PROMPTS_DIR is None
     assert settings.GOOGLE_API_KEY is None
+    assert settings.GOOGLE_BASE_URL is None
     assert settings.ARGUS_BENCH_FILE is None
     assert settings.ARGUS_GEMINI_CACHE_DIR is None
 
@@ -252,3 +254,17 @@ def test_openai_base_url_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://proxy.example.com/v1")
     settings = get_settings()
     assert settings.OPENAI_BASE_URL == "https://proxy.example.com/v1"
+
+
+def test_google_base_url_defaults_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.delenv("GOOGLE_BASE_URL", raising=False)
+    settings = get_settings()
+    assert settings.GOOGLE_BASE_URL is None
+
+
+def test_google_base_url_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required(monkeypatch)
+    monkeypatch.setenv("GOOGLE_BASE_URL", "https://proxy.example.com/v1beta")
+    settings = get_settings()
+    assert settings.GOOGLE_BASE_URL == "https://proxy.example.com/v1beta"

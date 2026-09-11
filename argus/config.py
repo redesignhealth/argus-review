@@ -135,6 +135,10 @@ class Settings(BaseSettings):
             ``platform = "gemini"``. Only required if you actually
             opt a role into that platform (see ``argus.bench``'s
             override chain) -- the packaged default bench never does.
+        GOOGLE_BASE_URL: Optional override for the Gemini API endpoint (e.g. for
+            proxying). Mirrors ``OPENAI_BASE_URL`` above. Note that GOOGLE_API_KEY
+            will be forwarded to whatever endpoint is configured here; point only
+            at trusted proxy hosts.
         ARGUS_BENCH_FILE: Highest-priority bench-config override file. See
             ``argus.bench`` for the full override search chain.
         ARGUS_NO_BENCH_OVERRIDES: Set truthy to ignore every bench override
@@ -154,6 +158,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str
     OPENAI_BASE_URL: str | None = None
     GOOGLE_API_KEY: str | None = None
+    GOOGLE_BASE_URL: str | None = None
 
     ARGUS_DB_URL: str | None = None
     SUPABASE_DB_URL: str | None = None

@@ -607,7 +607,21 @@ async def _run_turns(
     # clause catches and translates into a clean `failure_reason="timeout"` result
     # -- rather than racing the outer deadline so closely that the raw
     # httpx exception could escape uncaught instead.
-    http_options = types.HttpOptions(timeout=int(timeout_s * _HTTP_TIMEOUT_FRACTION * 1000))
+    #
+    # `base_url` is only set when truthy; `None` safely defaults to the
+    # standard Gemini endpoint (`generativelanguage.googleapis.com`) --
+    # mirrors `OPENAI_BASE_URL`'s exact same optional-proxy pattern in
+    # `argus.openai_runner`/`argus.openai_client`. This same `http_options`
+    # instance is reused as-is by `_maybe_activate_cache`'s own
+    # short-lived `genai.Client` (see that function's docstring for why it
+    # needs a separate client instance), so threading `base_url` through
+    # here covers both `genai.Client(...)` construction sites in this
+    # module without a second read of `settings.GOOGLE_BASE_URL`.
+    base_url = getattr(settings, "GOOGLE_BASE_URL", None)
+    http_options = types.HttpOptions(
+        timeout=int(timeout_s * _HTTP_TIMEOUT_FRACTION * 1000),
+        base_url=base_url if isinstance(base_url, str) and base_url else None,
+    )
     client = genai.Client(api_key=api_key, http_options=http_options)
     logger.info(
         "Gemini session started: %s model=%s caching=%s timeout=%ss",
