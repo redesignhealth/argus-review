@@ -1395,3 +1395,122 @@ class TestGeminiRedactionHooks:
         inputs = {"label": "test"}
         redacted = _redact_gemini_inputs(inputs)
         assert redacted == {"label": "test"}
+
+
+# ---------------------------------------------------------------------------
+# GOOGLE_BASE_URL threading (mirrors OPENAI_BASE_URL in
+# tests/test_openai_runner.py / tests/test_openai_client.py): a proxy base
+# URL configured via settings must reach the underlying `genai.Client`'s
+# `http_options.base_url`, at every `genai.Client(...)` construction site in
+# this module -- the session's own client (`_run_turns`) AND the dedicated,
+# short-lived client `_maybe_activate_cache`'s `_create_fn` builds for
+# `caches.create()`.
+# ---------------------------------------------------------------------------
+
+
+class TestGoogleBaseUrlOverride:
+    async def test_settings_google_base_url_reaches_session_client_http_options(self) -> None:
+        """GOOGLE_BASE_URL on settings is threaded through to the session's
+        own `genai.Client`'s `http_options.base_url`."""
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+        settings.GOOGLE_BASE_URL = "https://proxy.example.com/v1beta"
+        response = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([response])
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client) as mock_ctor:
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason is None
+        mock_ctor.assert_called_once()
+        http_options = mock_ctor.call_args.kwargs["http_options"]
+        assert http_options.base_url == "https://proxy.example.com/v1beta"
+
+    async def test_no_google_base_url_defaults_to_sdk_default(self) -> None:
+        """Without an override, `http_options.base_url` stays `None` -- the
+        SDK's own default (`generativelanguage.googleapis.com`) applies,
+        exactly like the OPENAI_BASE_URL/AsyncOpenAI pattern this mirrors."""
+        entry = _make_entry(caching="off")
+        settings = _make_settings()  # GOOGLE_BASE_URL never set on this MagicMock
+        response = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([response])
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client) as mock_ctor:
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason is None
+        http_options = mock_ctor.call_args.kwargs["http_options"]
+        assert http_options.base_url is None
+
+    async def test_google_base_url_composes_with_existing_timeout(self) -> None:
+        """A `base_url` override must compose with the existing `timeout=`
+        `HttpOptions` field -- both set together on the same instance --
+        rather than one replacing the other."""
+        from argus.gemini_runner import _HTTP_TIMEOUT_FRACTION
+
+        entry = _make_entry(caching="off")
+        settings = _make_settings(session_timeout=300)
+        settings.GOOGLE_BASE_URL = "https://proxy.example.com/v1beta"
+        response = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([response])
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client) as mock_ctor:
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+                timeout_s=10.0,
+            )
+
+        assert result.failure_reason is None
+        http_options = mock_ctor.call_args.kwargs["http_options"]
+        assert http_options.base_url == "https://proxy.example.com/v1beta"
+        assert http_options.timeout == int(10.0 * _HTTP_TIMEOUT_FRACTION * 1000)
+
+    async def test_google_base_url_also_reaches_the_cache_creation_client(self) -> None:
+        """`_maybe_activate_cache`'s `_create_fn` builds its own, separate
+        `genai.Client` for `caches.create()` (see that function's docstring)
+        -- it must carry the same `base_url` override as the session's own
+        client, not silently fall back to the real API host."""
+        entry = _make_entry(caching="on")
+        settings = _make_settings()
+        settings.GOOGLE_BASE_URL = "https://proxy.example.com/v1beta"
+        response = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([response], cache_name="cachedContents/abc123")
+
+        constructed_http_options: list[types.HttpOptions] = []
+
+        def _new_client(*args: Any, **kwargs: Any) -> MagicMock:
+            constructed_http_options.append(kwargs["http_options"])
+            return fake_client
+
+        with patch("argus.gemini_runner.genai.Client", side_effect=_new_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason is None
+        # Two `genai.Client` constructions: the session's own, and the
+        # dedicated cache-creation client -- both must carry the override.
+        assert len(constructed_http_options) == 2
+        assert all(
+            ho.base_url == "https://proxy.example.com/v1beta" for ho in constructed_http_options
+        )
