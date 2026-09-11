@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-10
+
+### Added
+
+- Config-driven reviewer bench system (`argus/bench.py` and `argus/bench_default.toml`):
+  allows configuring the execution platform (`claude-sdk`, `gemini`, `openai`)
+  and model per reviewer role via TOML, with a sparse-overlay hierarchy
+  (packaged default -> user-global `~/.config/argus/bench.toml` -> repo-local
+  `.argus/bench.toml` -> `ARGUS_BENCH_FILE`), plus `--bench-file` and
+  `--no-bench-overrides`/`ARGUS_NO_BENCH_OVERRIDES` controls.
+- Real Gemini leaf-reviewer platform (`argus/gemini_runner.py`) backed by the
+  `google-genai` SDK with explicit context caching (`argus/gemini_cache.py`)
+  for cost and latency optimization; available via the optional `[gemini]` extra.
+- Real OpenAI Responses-API leaf-reviewer platform (`argus/openai_runner.py`):
+  native multi-turn tool execution loop using the OpenAI Responses API, with
+  support for `OPENAI_BASE_URL` and credential proxying.
+- Shared reviewer tools (`argus/review_tools.py`) providing decoupled, sandboxed
+  tool execution (read_file, edit_file, grep, bash, webfetch) for non-Claude-SDK
+  runners.
+- Loud timeout and crash surfacing (TECH-6146): reviewer subprocess crashes and
+  timeouts that were previously swallowed into silent 0-finding results now record
+  `failure_reason`, surface as structured coverage-gap findings in review comments,
+  and trigger a guard preventing all-failed reviewer rounds from issuing a clean
+  verdict on zero actual coverage.
+- Approved OpenAI model family updates: `gpt-frontier` default updated to
+  `gpt-5.6-sol` and `gpt-mini` to `gpt-5.6-luna`.
+
+### Changed
+
+- All leaf-reviewer roles are now wired through the bench system:
+  `system-generalist`, `specialist-infra-security`, `specialist-api-patterns`,
+  `specialist-testing-observability`, and `cross-cutting-synthesizer` now resolve
+  their platform and model dynamically via `bench.resolve()`.
+- Default reviewer session timeout increased from 10 minutes (600s) to 15 minutes
+  (900s) across all three runner platforms (`DEFAULT_ARGUS_SESSION_TIMEOUT_S`).
+
+### Fixed
+
+- Preserved partial turn usage, tool call counts, and cost metrics when an OpenAI
+  or Gemini reviewer session crashes or times out mid-execution.
+- Degraded-response detection for OpenAI Responses API (incomplete token budget,
+  refusals, or error statuses now properly fail closed with a worker-crashed reason).
+- Resolved false-positive double-reporting of precheck scanner failures in
+  coverage-gap finding lists.
+
 ## [0.1.5] - 2026-08-07
 
 ### Added
@@ -130,7 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/redesignhealth/argus-review/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/redesignhealth/argus-review/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/redesignhealth/argus-review/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/redesignhealth/argus-review/compare/v0.1.2...v0.1.3
