@@ -239,6 +239,8 @@ build-backend = "hatchling.build"
 source = "vcs"
 
 [tool.hatch.build.targets.wheel]
+# Pin to 2.4 so hatchling>=1.32 does not emit Core Metadata 2.5 (PEP 794) before PyPI/twine supports it
+core-metadata-version = "2.4"
 packages = ["argus"]
 # argus/prompts/*.md and any other package-relative data files are included
 # by hatchling's default wheel packaging (whole-package copy) — no extra
@@ -250,6 +252,7 @@ packages = ["argus"]
 # imports, so it ships in the sdist below but not the wheel.
 
 [tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
 include = [
     "/argus",
     "/schema",
