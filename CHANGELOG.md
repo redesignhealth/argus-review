@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-10
+
+### Added
+
+- `GOOGLE_BASE_URL` proxy support for the Gemini runner (`argus/gemini_runner.py`),
+  mirroring `OPENAI_BASE_URL`: closes a gap where the Gemini platform could only
+  be used with a raw, unproxied `GOOGLE_API_KEY` talking directly to
+  `generativelanguage.googleapis.com`, unlike the OpenAI (`OPENAI_BASE_URL`) and
+  Claude (`ANTHROPIC_BASE_URL`) paths that the `argus-review-loop` skill relies
+  on to route through a short-lived, PR-scoped credential proxy instead of a
+  standing API key.
+
 ## [0.2.0] - 2026-09-10
 
 ### Added
@@ -175,7 +187,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/redesignhealth/argus-review/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/redesignhealth/argus-review/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/redesignhealth/argus-review/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/redesignhealth/argus-review/compare/v0.1.3...v0.1.4
