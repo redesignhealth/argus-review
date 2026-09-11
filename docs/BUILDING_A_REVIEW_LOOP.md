@@ -93,6 +93,11 @@ A review loop built on Argus needs five things:
    so the loop's prompts stay independent of whatever the operator running
    the CLI by hand has set locally.
 
+   If the loop should run leaf reviewers on a different LLM platform or model,
+   configure the static reviewer bench rather than adding routing logic to the
+   loop. See [`docs/BENCH.md`](BENCH.md) for the reviewable TOML override chain,
+   platform credentials, and the roles it currently wires to runners.
+
 ## Putting it together as a Claude Code skill
 
 If you're building this as a Claude Code

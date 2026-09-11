@@ -9,7 +9,7 @@ Only approved model families. Check model strings in code against this table:
 |----------|----------|---------|
 | Anthropic | claude-opus-4, claude-sonnet-4, claude-haiku-4 (use `CLAUDE_MINI`), claude-fable-5 (use `CLAUDE_FRONTIER`), claude-opus-5 (use `CLAUDE_OPUS`), claude-sonnet-4-6 (use `CLAUDE_DEFAULT`) families; claude-sonnet-5 (the previous `CLAUDE_DEFAULT` pin) remains valid as an explicit `ARGUS_SPECIALIST_MODEL`/`--specialist-model` override value, not as a new hardcoded default | claude-sonnet-4-6 |
 | OpenAI | gpt-5.4 family (gpt-5.4, gpt-5.4-mini) and gpt-5.6 family | gpt-5.6-luna |
-| Google | gemini-3 family | gemini-3-flash |
+| Google | gemini-3 family | gemini-3.8-flash |
 
 Flag any use of: o3, o1, gpt-4 family, gpt-5-mini, claude-3/3.5 family, gemini-1.5/2.5 family.
 
