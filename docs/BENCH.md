@@ -38,8 +38,11 @@ following layers in this order, from lowest to highest priority:
 1. Packaged `argus/bench_default.toml`.
 2. `~/.config/argus/bench.toml`, respecting `$XDG_CONFIG_HOME` when it is set.
 3. `./.argus/bench.toml`, resolved as `Path.cwd() / ".argus" / "bench.toml"`.
-   This means it is relative to the working directory of the `argus` process
-   when it runs, not necessarily the repository root.
+   This is resolved relative to the *process's* current working directory at
+   the moment `argus review` runs—not the PR's cloned or checked-out worktree.
+   If you invoke `argus review` from a directory other than the target repo's
+   checkout, a `.argus/bench.toml` sitting in that repo will not be picked up
+   automatically.
 4. The file named by `ARGUS_BENCH_FILE`, an explicit override file merged on
    top of all the others. If this path does not exist or is not a file, Argus
    raises an error instead of silently ignoring the request.
@@ -48,9 +51,55 @@ The standard user and working-directory files are optional and skipped when
 absent. Every overlay is **sparse**: include only the keys you want to change;
 omitted keys fall through to the layer below.
 
-Set `ARGUS_NO_BENCH_OVERRIDES` to a truthy value to skip layers 2–4 and force
-the packaged default only. This is useful for CI or official runs that must
+Set `ARGUS_NO_BENCH_OVERRIDES=true` (or any truthy value) to skip layers 2–4 and
+force the packaged default only. This is useful for CI or official runs that must
 not accidentally inherit a developer's local configuration.
+
+### No auto-discovery and zero filename semantics
+
+Argus **never** auto-discovers bench files by directory scanning, glob patterns,
+or naming conventions. It consults only the four exact locations listed above.
+There is no mechanism scanning for files matching `*bench*.toml` or similar patterns.
+
+Furthermore, a bench file's filename carries **zero semantic meaning** to
+Argus. For example, naming a file `argus-bench-<owner>-<repo>-<pr-number>.toml`
+does **not** scope that configuration to that specific repository or pull request.
+Bench configurations are global to whichever `argus` process loads them—the filename
+is entirely arbitrary, and Argus will never load it unless it sits at one of the
+fixed paths above or is explicitly passed via `ARGUS_BENCH_FILE`. An agent or
+developer should never assume a plausibly-named bench file is scoped to or
+intended for a specific PR based on its filename alone.
+
+### Running with a bench override
+
+To run a review with a custom bench file, export `ARGUS_BENCH_FILE` or set it
+inline:
+
+```bash
+export ARGUS_BENCH_FILE=/path/to/my-bench.toml
+argus review owner/repo --pr 123
+```
+
+Or as a single command:
+
+```bash
+ARGUS_BENCH_FILE=/path/to/my-bench.toml argus review owner/repo --pr 123
+```
+
+When relying on repo-local configuration via `./.argus/bench.toml`, ensure the
+command runs from the repository checkout directory:
+
+```bash
+cd /path/to/repo
+argus review owner/repo --pr 123
+```
+
+To bypass all local and environment overrides and guarantee only the packaged
+default is used (e.g. in CI or automated verification runs):
+
+```bash
+ARGUS_NO_BENCH_OVERRIDES=true argus review owner/repo --pr 123
+```
 
 ## Values and credentials
 
@@ -110,7 +159,13 @@ reviewed Argus change while this configuration remains stable.
 Place this snippet in `.argus/bench.toml` for the current process working
 directory, in the XDG user config for a user-wide setting, or in an explicit
 file selected with `ARGUS_BENCH_FILE`. Ensure `GOOGLE_API_KEY` is available to
-the process before running the review.
+the process before running the review:
+
+```bash
+export GOOGLE_API_KEY="your-google-api-key"
+export ARGUS_BENCH_FILE=/path/to/gemini-bench.toml
+argus review owner/repo --pr 123
+```
 
 For an individual role, use a sparse `[roles.<name>]` overlay instead. Because
 the overlay layers are merged recursively onto `argus/bench_default.toml`, an
