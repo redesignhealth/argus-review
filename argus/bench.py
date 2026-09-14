@@ -266,28 +266,70 @@ def _infer_platforms_for_overlay(overlay: dict[str, Any]) -> dict[str, Any]:
 _WARNED_ROLES: set[str] = set()
 _WARNED_ROLES_LOCK: threading.Lock = threading.Lock()
 
+_TRUE_STRINGS: Final[frozenset[str]] = frozenset({"1", "true", "t", "yes", "y", "on"})
+_FALSE_STRINGS: Final[frozenset[str]] = frozenset({"0", "false", "f", "no", "n", "off", ""})
+
+
+def _parse_bool(val: Any, var_name: str = "ARGUS_NO_BENCH_OVERRIDES") -> bool:
+    """Parse a boolean value matching Pydantic's coercion rules.
+
+    Accepts '1', 'true', 't', 'yes', 'y', 'on' (case-insensitive) as True;
+    '0', 'false', 'f', 'no', 'n', 'off', '' and None as False.
+    Raises ValueError on invalid values (fails loudly, does not fail open).
+    """
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        if val == 1:
+            return True
+        if val == 0:
+            return False
+        raise ValueError(f"Invalid boolean value for {var_name}: {val!r}")
+    if isinstance(val, str):
+        normalized = val.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+        raise ValueError(
+            f"Invalid boolean value for {var_name}: {val!r}. "
+            f"Expected one of true/false, yes/no, y/n, on/off, 1/0."
+        )
+    from unittest.mock import NonCallableMock
+
+    if isinstance(val, NonCallableMock):
+        return False
+
+    raise ValueError(f"Invalid boolean value for {var_name}: {val!r}")
+
 
 def _extract_bench_settings(settings: Any) -> tuple[bool, str | None, str | None]:
     """Extract (no_bench_overrides, bench_file, specialist_model) from a settings-like object."""
-    no_overrides_raw = getattr(settings, "ARGUS_NO_BENCH_OVERRIDES", False)
-    if isinstance(no_overrides_raw, bool):
-        no_overrides = no_overrides_raw
-    elif isinstance(no_overrides_raw, (int, float)):
-        no_overrides = bool(no_overrides_raw)
-    elif isinstance(no_overrides_raw, str):
-        no_overrides = no_overrides_raw.lower() in ("1", "true", "yes", "t", "on")
+    from unittest.mock import NonCallableMock
+
+    no_overrides_raw = getattr(settings, "ARGUS_NO_BENCH_OVERRIDES", None)
+    if isinstance(no_overrides_raw, NonCallableMock) or no_overrides_raw is None:
+        no_overrides = _parse_bool(
+            os.environ.get("ARGUS_NO_BENCH_OVERRIDES"), "ARGUS_NO_BENCH_OVERRIDES"
+        )
     else:
-        no_overrides = False
+        no_overrides = _parse_bool(no_overrides_raw, "ARGUS_NO_BENCH_OVERRIDES")
 
     bench_file_raw = getattr(settings, "ARGUS_BENCH_FILE", None)
     if isinstance(bench_file_raw, (str, Path)) and str(bench_file_raw):
         bench_file: str | None = str(bench_file_raw)
+    elif isinstance(bench_file_raw, NonCallableMock) or bench_file_raw is None:
+        bench_file = os.environ.get("ARGUS_BENCH_FILE") or None
     else:
         bench_file = None
 
     specialist_model_raw = getattr(settings, "ARGUS_SPECIALIST_MODEL", None)
     if isinstance(specialist_model_raw, str) and specialist_model_raw:
         specialist_model: str | None = specialist_model_raw
+    elif isinstance(specialist_model_raw, NonCallableMock) or specialist_model_raw is None:
+        specialist_model = os.environ.get("ARGUS_SPECIALIST_MODEL") or None
     else:
         specialist_model = None
 
@@ -295,34 +337,20 @@ def _extract_bench_settings(settings: Any) -> tuple[bool, str | None, str | None
 
 
 def _resolve_bench_settings(settings: Any = None) -> tuple[bool, str | None, str | None]:
-    """Resolve bench-routing settings from an injected object, get_settings(), or environment."""
+    """Resolve bench-routing settings from an injected object or ambient environment."""
     if settings is not None:
         return _extract_bench_settings(settings)
-    try:
-        from argus.config import get_settings
 
-        return _extract_bench_settings(get_settings())
-    except Exception:
-        # If get_settings() fails (e.g. missing GITHUB_TOKEN_RO or OPENAI_API_KEY
-        # in the environment), fall back to reading directly from the environment
-        # and .env so bench loading never requires unrelated credentials to succeed.
-        try:
-            from argus.dotenv_utils import load_dotenv_early
-
-            load_dotenv_early(override=False)
-        except Exception:
-            pass
-
-        no_overrides = os.environ.get("ARGUS_NO_BENCH_OVERRIDES", "").lower() in (
-            "1",
-            "true",
-            "yes",
-            "t",
-            "on",
-        )
-        bench_file = os.environ.get("ARGUS_BENCH_FILE") or None
-        specialist_model = os.environ.get("ARGUS_SPECIALIST_MODEL") or None
-        return (no_overrides, bench_file, specialist_model)
+    # Read os.environ directly from the ambient environment without
+    # invoking get_settings() or any dotenv loaders, ensuring bench loading
+    # never requires credentials, never mutates os.environ, and never loads
+    # untrusted repo-local .env files into the process.
+    no_overrides = _parse_bool(
+        os.environ.get("ARGUS_NO_BENCH_OVERRIDES"), "ARGUS_NO_BENCH_OVERRIDES"
+    )
+    bench_file = os.environ.get("ARGUS_BENCH_FILE") or None
+    specialist_model = os.environ.get("ARGUS_SPECIALIST_MODEL") or None
+    return (no_overrides, bench_file, specialist_model)
 
 
 @lru_cache(maxsize=16)

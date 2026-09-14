@@ -1518,3 +1518,143 @@ class TestBenchCredentialIndependenceAndDependencyInjection:
         entry = bench.resolve("system-generalist", settings=mock_settings)
         assert entry.platform == "claude-sdk"
         assert entry.model == "claude-default"
+
+    def test_load_bench_fallback_does_not_load_untrusted_repo_dotenv(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The env fallback path must NOT call load_dotenv_early or import untrusted .env files."""
+        untrusted_env = tmp_path / ".env"
+        untrusted_env.write_text(
+            "OPENAI_BASE_URL=https://evil.attacker.com/v1\nUNTRUSTED_VAR=malicious_payload\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("UNTRUSTED_VAR", raising=False)
+        for var in ("GITHUB_TOKEN_RO", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        clear_settings_cache()
+        bench.clear_cache()
+
+        raw = bench.load_bench()
+        assert "bulk_reviewer" in raw
+        assert "OPENAI_BASE_URL" not in os.environ
+        assert "UNTRUSTED_VAR" not in os.environ
+
+    @pytest.mark.parametrize(
+        "val", ["y", "Y", "yes", "YES", "1", "on", "ON", "true", "True", "t", "T"]
+    )
+    def test_no_bench_overrides_parses_truthy_coercions(
+        self, monkeypatch: pytest.MonkeyPatch, val: str
+    ) -> None:
+        """Pydantic-compatible truthy values ('y', 'yes', '1', 'on', 'true', 't') enable the flag."""
+        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", val)
+        bench.clear_cache()
+        no_overrides, _, _ = bench._resolve_bench_settings()
+        assert no_overrides is True
+
+    @pytest.mark.parametrize(
+        "val", ["n", "N", "no", "NO", "0", "off", "OFF", "false", "False", "f", "F", ""]
+    )
+    def test_no_bench_overrides_parses_falsy_coercions(
+        self, monkeypatch: pytest.MonkeyPatch, val: str
+    ) -> None:
+        """Pydantic-compatible falsy values ('n', 'no', '0', 'off', 'false', 'f', '') disable the flag."""
+        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", val)
+        bench.clear_cache()
+        no_overrides, _, _ = bench._resolve_bench_settings()
+        assert no_overrides is False
+
+    def test_no_bench_overrides_unset_defaults_to_false(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset ARGUS_NO_BENCH_OVERRIDES defaults to False."""
+        monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+        bench.clear_cache()
+        no_overrides, _, _ = bench._resolve_bench_settings()
+        assert no_overrides is False
+
+    @pytest.mark.parametrize("val", ["invalid", "2", "maybe", "truthy", "falsy"])
+    def test_no_bench_overrides_invalid_value_raises_value_error(
+        self, monkeypatch: pytest.MonkeyPatch, val: str
+    ) -> None:
+        """Invalid boolean strings must fail loudly with ValueError (do not fail open to False)."""
+        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", val)
+        bench.clear_cache()
+        with pytest.raises(ValueError, match="Invalid boolean value for ARGUS_NO_BENCH_OVERRIDES"):
+            bench.load_bench()
+
+    @pytest.mark.asyncio
+    async def test_injected_settings_drives_both_preflight_and_runner_routing_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same injected settings object drives both CLI preflight validation
+        and runtime runner routing, preventing divergence."""
+        from datetime import datetime, timezone
+
+        from argus.cli import _check_settings
+        from argus.pipeline_models import SystemGroup
+
+        # Scrub ambient environment of all provider credentials
+        for var in ("GITHUB_TOKEN_RO", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        clear_settings_cache()
+        bench.clear_cache()
+
+        # Injected settings: no GOOGLE_API_KEY, but forces specialist model override
+        # which routes bulk_reviewer to claude-sdk with claude-default
+        mock_settings = MagicMock()
+        mock_settings.ANTHROPIC_API_KEY = "test-anthropic"
+        mock_settings.ANTHROPIC_AUTH_TOKEN = None
+        mock_settings.GITHUB_TOKEN_RO = "test-github"
+        mock_settings.OPENAI_API_KEY = "test-openai"
+        mock_settings.GOOGLE_API_KEY = None  # None: would exit if Gemini were required
+        mock_settings.ARGUS_SPECIALIST_MODEL = "claude-haiku-4-5"
+        mock_settings.ARGUS_NO_BENCH_OVERRIDES = False
+        mock_settings.ARGUS_BENCH_FILE = None
+        mock_settings.db_url = None
+
+        # 1. Preflight check: must pass because bench resolves to claude-sdk via injected settings
+        _check_settings(mock_settings)
+
+        # 2. Runtime execution: run_system_reviewer must route to claude-sdk, NOT Gemini
+        group = SystemGroup(name="test-group", files=["app.py"], conventions="", review_focus="")
+        fake_session = MagicMock()
+        fake_session.result_text = '{"findings": [], "files_explored": []}'
+        fake_session.failure_reason = None
+        fake_session.timed_out = False
+        fake_session.cost_usd = 0.0
+        fake_session.tool_call_count = 0
+        fake_session.tool_names = []
+        fake_session.context7_call_count = 0
+        fake_session.model = "claude-sonnet-4-6"
+        fake_session.duration_seconds = 1.0
+        fake_session.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        fake_session.finished_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        gemini_called = False
+
+        async def _gemini_boom(*args: object, **kwargs: object) -> None:
+            nonlocal gemini_called
+            gemini_called = True
+            raise AssertionError(
+                "Gemini runner must not be invoked when injected settings routes to claude-sdk"
+            )
+
+        with (
+            patch("argus.runners.fetch_prompt", new_callable=AsyncMock, return_value="prompt"),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_claude,
+            patch("argus.gemini_runner.run_session_gemini", side_effect=_gemini_boom),
+        ):
+            res, _ = await runners_module.run_system_reviewer(
+                group=group,
+                diff_text="diff --git a/app.py b/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        assert mock_claude.called
+        assert not gemini_called
+        assert res.system_group == "test-group"
