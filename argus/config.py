@@ -92,14 +92,9 @@ class Settings(BaseSettings):
             path (``argus.llm.models.CLAUDE_DEFAULT``, default
             ``claude-sonnet-4-6``). Set via ``--specialist-model``; read
             directly from ``os.environ`` by ``argus.llm.models`` at import
-            time (module-level constant resolution, not a per-request
-            Settings lookup), so this field is never actually read off a
-            ``Settings`` instance anywhere in the codebase -- unlike
-            ``ARGUS_NO_PROMPT_OVERRIDES`` above, which genuinely is
-            (``prompts_runtime.override_dirs`` reads
-            ``settings.ARGUS_NO_PROMPT_OVERRIDES``). It's declared here
-            purely for documentation/discoverability, same as any other
-            env var this class's docstring covers.
+            time and by ``argus.bench`` (where setting it forces bulk reviewers
+            to claude-sdk with claude-default). Also read off a ``Settings``
+            instance during bench resolution when dependency-injected.
         ARGUS_FRONTIER_MODEL: Override the model used by the planner,
             coverage check, and cross-cutting reviewer
             (``argus.llm.models.CLAUDE_FRONTIER`` / ``CLAUDE_OPUS``). Set via

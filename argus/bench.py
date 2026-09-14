@@ -82,6 +82,8 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Final, Literal, get_args
 
+from pydantic import TypeAdapter, ValidationError
+
 from argus.llm import models as model_aliases
 from argus.pipeline_models import SpecialistName
 from argus.prompts_runtime import known_packaged_prompts
@@ -266,73 +268,73 @@ def _infer_platforms_for_overlay(overlay: dict[str, Any]) -> dict[str, Any]:
 _WARNED_ROLES: set[str] = set()
 _WARNED_ROLES_LOCK: threading.Lock = threading.Lock()
 
-_TRUE_STRINGS: Final[frozenset[str]] = frozenset({"1", "true", "t", "yes", "y", "on"})
-_FALSE_STRINGS: Final[frozenset[str]] = frozenset({"0", "false", "f", "no", "n", "off", ""})
+_BOOL_ADAPTER: Final[TypeAdapter[bool]] = TypeAdapter(bool)
 
 
 def _parse_bool(val: Any, var_name: str = "ARGUS_NO_BENCH_OVERRIDES") -> bool:
     """Parse a boolean value matching Pydantic's coercion rules.
 
-    Accepts '1', 'true', 't', 'yes', 'y', 'on' (case-insensitive) as True;
-    '0', 'false', 'f', 'no', 'n', 'off', '' and None as False.
-    Raises ValueError on invalid values (fails loudly, does not fail open).
+    When val is None (i.e. env var unset), returns False default.
+    Otherwise delegates directly to Pydantic's TypeAdapter(bool)
+    and converts ValidationError to ValueError with a clear message.
     """
     if val is None:
         return False
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, int):
-        if val == 1:
-            return True
-        if val == 0:
-            return False
-        raise ValueError(f"Invalid boolean value for {var_name}: {val!r}")
-    if isinstance(val, str):
-        normalized = val.strip().lower()
-        if normalized in _TRUE_STRINGS:
-            return True
-        if normalized in _FALSE_STRINGS:
-            return False
-        raise ValueError(
-            f"Invalid boolean value for {var_name}: {val!r}. "
-            f"Expected one of true/false, yes/no, y/n, on/off, 1/0."
-        )
     from unittest.mock import NonCallableMock
 
     if isinstance(val, NonCallableMock):
         return False
-
-    raise ValueError(f"Invalid boolean value for {var_name}: {val!r}")
+    try:
+        return _BOOL_ADAPTER.validate_python(val)
+    except ValidationError as exc:
+        raise ValueError(
+            f"Invalid boolean value for {var_name}: {val!r}. "
+            f"Expected a valid boolean (e.g. true/false, yes/no, 1/0, on/off)."
+        ) from exc
 
 
 def _extract_bench_settings(settings: Any) -> tuple[bool, str | None, str | None]:
-    """Extract (no_bench_overrides, bench_file, specialist_model) from a settings-like object."""
+    """Extract (no_bench_overrides, bench_file, specialist_model) from a settings-like object.
+
+    When settings is provided, its fields are authoritative and never fall back to
+    ambient os.environ (preserving dependency injection). For unit test mocks
+    (MagicMock), unconfigured attributes that were never set on the mock fall back to
+    os.environ so ambient test fixtures can supply values.
+    """
     from unittest.mock import NonCallableMock
 
-    no_overrides_raw = getattr(settings, "ARGUS_NO_BENCH_OVERRIDES", None)
-    if isinstance(no_overrides_raw, NonCallableMock) or no_overrides_raw is None:
-        no_overrides = _parse_bool(
-            os.environ.get("ARGUS_NO_BENCH_OVERRIDES"), "ARGUS_NO_BENCH_OVERRIDES"
-        )
-    else:
-        no_overrides = _parse_bool(no_overrides_raw, "ARGUS_NO_BENCH_OVERRIDES")
+    if isinstance(settings, NonCallableMock):
+        if "ARGUS_NO_BENCH_OVERRIDES" in settings.__dict__:
+            no_overrides = _parse_bool(
+                settings.ARGUS_NO_BENCH_OVERRIDES, "ARGUS_NO_BENCH_OVERRIDES"
+            )
+        else:
+            no_overrides = _parse_bool(
+                os.environ.get("ARGUS_NO_BENCH_OVERRIDES"), "ARGUS_NO_BENCH_OVERRIDES"
+            )
 
-    bench_file_raw = getattr(settings, "ARGUS_BENCH_FILE", None)
-    if isinstance(bench_file_raw, (str, Path)) and str(bench_file_raw):
-        bench_file: str | None = str(bench_file_raw)
-    elif isinstance(bench_file_raw, NonCallableMock) or bench_file_raw is None:
-        bench_file = os.environ.get("ARGUS_BENCH_FILE") or None
-    else:
-        bench_file = None
+        if "ARGUS_BENCH_FILE" in settings.__dict__:
+            bf = settings.ARGUS_BENCH_FILE
+            bench_file = str(bf) if isinstance(bf, (str, Path)) and str(bf) else None
+        else:
+            bench_file = os.environ.get("ARGUS_BENCH_FILE") or None
 
-    specialist_model_raw = getattr(settings, "ARGUS_SPECIALIST_MODEL", None)
-    if isinstance(specialist_model_raw, str) and specialist_model_raw:
-        specialist_model: str | None = specialist_model_raw
-    elif isinstance(specialist_model_raw, NonCallableMock) or specialist_model_raw is None:
-        specialist_model = os.environ.get("ARGUS_SPECIALIST_MODEL") or None
-    else:
-        specialist_model = None
+        if "ARGUS_SPECIALIST_MODEL" in settings.__dict__:
+            sm = settings.ARGUS_SPECIALIST_MODEL
+            specialist_model = str(sm) if isinstance(sm, str) and sm else None
+        else:
+            specialist_model = os.environ.get("ARGUS_SPECIALIST_MODEL") or None
 
+        return (no_overrides, bench_file, specialist_model)
+
+    # Real Settings or dataclass: strictly authoritative, NEVER fall back to os.environ
+    no_overrides = _parse_bool(
+        getattr(settings, "ARGUS_NO_BENCH_OVERRIDES", False), "ARGUS_NO_BENCH_OVERRIDES"
+    )
+    bf = getattr(settings, "ARGUS_BENCH_FILE", None)
+    bench_file = str(bf) if isinstance(bf, (str, Path)) and str(bf) else None
+    sm = getattr(settings, "ARGUS_SPECIALIST_MODEL", None)
+    specialist_model = str(sm) if isinstance(sm, str) and sm else None
     return (no_overrides, bench_file, specialist_model)
 
 

@@ -1522,13 +1522,17 @@ class TestBenchCredentialIndependenceAndDependencyInjection:
     def test_load_bench_fallback_does_not_load_untrusted_repo_dotenv(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """The env fallback path must NOT call load_dotenv_early or import untrusted .env files."""
-        untrusted_env = tmp_path / ".env"
-        untrusted_env.write_text(
-            "OPENAI_BASE_URL=https://evil.attacker.com/v1\nUNTRUSTED_VAR=malicious_payload\n"
+        """The env fallback path must NOT call load_dotenv_early or import untrusted .env / .env.local files."""
+        untrusted_local = tmp_path / ".env.local"
+        untrusted_local.write_text(
+            "OPENAI_BASE_URL=https://evil.attacker.com/v1\nHOSTILE_LOCAL=pwned\n"
         )
+        untrusted_env = tmp_path / ".env"
+        untrusted_env.write_text("UNTRUSTED_VAR=malicious_payload\n")
+
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+        monkeypatch.delenv("HOSTILE_LOCAL", raising=False)
         monkeypatch.delenv("UNTRUSTED_VAR", raising=False)
         for var in ("GITHUB_TOKEN_RO", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):
             monkeypatch.delenv(var, raising=False)
@@ -1538,31 +1542,86 @@ class TestBenchCredentialIndependenceAndDependencyInjection:
         raw = bench.load_bench()
         assert "bulk_reviewer" in raw
         assert "OPENAI_BASE_URL" not in os.environ
+        assert "HOSTILE_LOCAL" not in os.environ
         assert "UNTRUSTED_VAR" not in os.environ
 
     @pytest.mark.parametrize(
-        "val", ["y", "Y", "yes", "YES", "1", "on", "ON", "true", "True", "t", "T"]
+        "val",
+        [
+            "y",
+            "Y",
+            "yes",
+            "YES",
+            "1",
+            "on",
+            "ON",
+            "true",
+            "True",
+            "t",
+            "T",
+            b"true",
+            b"1",
+            b"yes",
+            b"y",
+            b"on",
+            b"t",
+            1,
+            1.0,
+        ],
     )
     def test_no_bench_overrides_parses_truthy_coercions(
-        self, monkeypatch: pytest.MonkeyPatch, val: str
+        self, monkeypatch: pytest.MonkeyPatch, val: object
     ) -> None:
-        """Pydantic-compatible truthy values ('y', 'yes', '1', 'on', 'true', 't') enable the flag."""
-        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", val)
-        bench.clear_cache()
-        no_overrides, _, _ = bench._resolve_bench_settings()
-        assert no_overrides is True
+        """Pydantic-compatible truthy values ('y', 'yes', '1', 'on', 'true', 't', bytes, 1.0) enable the flag."""
+        if isinstance(val, (str, bytes)):
+            monkeypatch.setenv(
+                "ARGUS_NO_BENCH_OVERRIDES",
+                val.decode("utf-8") if isinstance(val, bytes) else val,
+            )
+            bench.clear_cache()
+            no_overrides, _, _ = bench._resolve_bench_settings()
+            assert no_overrides is True
+        # Direct _parse_bool verification for typed values
+        assert bench._parse_bool(val) is True
 
     @pytest.mark.parametrize(
-        "val", ["n", "N", "no", "NO", "0", "off", "OFF", "false", "False", "f", "F", ""]
+        "val",
+        [
+            "n",
+            "N",
+            "no",
+            "NO",
+            "0",
+            "off",
+            "OFF",
+            "false",
+            "False",
+            "f",
+            "F",
+            b"false",
+            b"0",
+            b"no",
+            b"off",
+            b"f",
+            b"n",
+            0,
+            0.0,
+        ],
     )
     def test_no_bench_overrides_parses_falsy_coercions(
-        self, monkeypatch: pytest.MonkeyPatch, val: str
+        self, monkeypatch: pytest.MonkeyPatch, val: object
     ) -> None:
-        """Pydantic-compatible falsy values ('n', 'no', '0', 'off', 'false', 'f', '') disable the flag."""
-        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", val)
-        bench.clear_cache()
-        no_overrides, _, _ = bench._resolve_bench_settings()
-        assert no_overrides is False
+        """Pydantic-compatible falsy values ('n', 'no', '0', 'off', 'false', 'f', bytes, 0.0) disable the flag."""
+        if isinstance(val, (str, bytes)):
+            monkeypatch.setenv(
+                "ARGUS_NO_BENCH_OVERRIDES",
+                val.decode("utf-8") if isinstance(val, bytes) else val,
+            )
+            bench.clear_cache()
+            no_overrides, _, _ = bench._resolve_bench_settings()
+            assert no_overrides is False
+        # Direct _parse_bool verification for typed values
+        assert bench._parse_bool(val) is False
 
     def test_no_bench_overrides_unset_defaults_to_false(
         self, monkeypatch: pytest.MonkeyPatch
@@ -1573,15 +1632,71 @@ class TestBenchCredentialIndependenceAndDependencyInjection:
         no_overrides, _, _ = bench._resolve_bench_settings()
         assert no_overrides is False
 
-    @pytest.mark.parametrize("val", ["invalid", "2", "maybe", "truthy", "falsy"])
+    @pytest.mark.parametrize(
+        "val",
+        [
+            "",
+            " true ",
+            " false ",
+            " 1 ",
+            " 0 ",
+            "invalid",
+            "2",
+            "maybe",
+            "truthy",
+            "falsy",
+            "0.0",
+            "1.0",
+        ],
+    )
     def test_no_bench_overrides_invalid_value_raises_value_error(
         self, monkeypatch: pytest.MonkeyPatch, val: str
     ) -> None:
-        """Invalid boolean strings must fail loudly with ValueError (do not fail open to False)."""
+        """Invalid boolean strings, padded strings, and empty strings must fail loudly with ValueError."""
         monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", val)
         bench.clear_cache()
         with pytest.raises(ValueError, match="Invalid boolean value for ARGUS_NO_BENCH_OVERRIDES"):
             bench.load_bench()
+
+    def test_injected_settings_not_overridden_by_ambient_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An explicitly injected settings object (even with None/False fields)
+        must never be overridden by ambient os.environ values."""
+        from dataclasses import dataclass
+
+        @dataclass
+        class InjectedSettings:
+            ARGUS_NO_BENCH_OVERRIDES: bool = False
+            ARGUS_BENCH_FILE: str | None = None
+            ARGUS_SPECIALIST_MODEL: str | None = None
+
+        ambient_bench_file = tmp_path / "ambient-bench.toml"
+        _write_toml(
+            ambient_bench_file,
+            '[bulk_reviewer]\nplatform = "claude-sdk"\nmodel = "claude-mini"\n',
+        )
+
+        monkeypatch.setenv("ARGUS_NO_BENCH_OVERRIDES", "1")
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(ambient_bench_file))
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-haiku-4-5")
+        bench.clear_cache()
+
+        injected = InjectedSettings(
+            ARGUS_NO_BENCH_OVERRIDES=False,
+            ARGUS_BENCH_FILE=None,
+            ARGUS_SPECIALIST_MODEL=None,
+        )
+
+        no_overrides, bench_file, specialist_model = bench._resolve_bench_settings(injected)
+        assert no_overrides is False
+        assert bench_file is None
+        assert specialist_model is None
+
+        # load_bench with injected settings must use packaged defaults, ignoring ambient overrides
+        raw = bench.load_bench(settings=injected)
+        assert raw["bulk_reviewer"]["platform"] == "gemini"
+        assert raw["bulk_reviewer"]["model"] == "gemini-mini"
 
     @pytest.mark.asyncio
     async def test_injected_settings_drives_both_preflight_and_runner_routing_end_to_end(
