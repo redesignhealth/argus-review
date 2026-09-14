@@ -131,10 +131,9 @@ class Settings(BaseSettings):
             additional headroom across all three reviewer platforms.
         GOOGLE_API_KEY: Gemini platform credential, consumed via the
             ``google_credential`` property by ``argus.gemini_runner``
-            (Track 3) whenever a role's bench entry resolves to
-            ``platform = "gemini"``. Only required if you actually
-            opt a role into that platform (see ``argus.bench``'s
-            override chain) -- the packaged default bench never does.
+            whenever a role's bench entry resolves to
+            ``platform = "gemini"``. Required for default review runs
+            since ``[bulk_reviewer]`` defaults to Gemini.
         GOOGLE_BASE_URL: Optional override for the Gemini API endpoint (e.g. for
             proxying). Mirrors ``OPENAI_BASE_URL`` above. Note that GOOGLE_API_KEY
             will be forwarded to whatever endpoint is configured here; point only

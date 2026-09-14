@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Moved `google-genai` from the optional `[gemini]` extra into core `dependencies`
   in `pyproject.toml`, ensuring the default Gemini bulk reviewer works out of
   the box without requiring an extra install.
+- In `argus/bench.py`, sparse model-only bench overrides (e.g. `model = "claude-mini"`)
+  now automatically infer their compatible platform (`claude-sdk`, `gemini`, or
+  `openai-responses`) so model overrides do not inherit an incompatible platform
+  from lower bench layers. Explicit platform/model mismatches fail validation early
+  with clear migration guidance.
+- Made `--specialist-model` / `ARGUS_SPECIALIST_MODEL` apply as a highest-priority
+  override forcing `[bulk_reviewer]` to `claude-sdk` with `claude-default` so
+  the CLI flag continues to control system and specialist reviewers as documented.
+- Made CLI preflight credential validation conditional on effective bench requirements:
+  `GOOGLE_API_KEY` is now required when the resolved bench config includes `gemini`.
 
 ## [0.2.2] - 2026-09-11
 

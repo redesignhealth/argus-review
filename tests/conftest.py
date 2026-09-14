@@ -120,6 +120,7 @@ def _mock_settings_impl(node: pytest.Item, monkeypatch: pytest.MonkeyPatch) -> N
     else:
         monkeypatch.setenv("GITHUB_TOKEN_RO", "test-github-token")
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-google-key")
 
     # Default the history-backend/checkpointer resolution to "postgres" so
     # the many existing graph.py tests that mock a Postgres session factory

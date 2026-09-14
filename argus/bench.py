@@ -104,6 +104,23 @@ _TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({"bulk_reviewer", "roles"})
 _BULK_KEYS: Final[frozenset[str]] = frozenset({"platform", "model", "caching"})
 _ROLE_KEYS: Final[frozenset[str]] = frozenset({"platform", "model", "prompt_name", "caching"})
 
+_MODEL_FAMILY_TO_PLATFORM: Final[dict[str, Platform]] = {
+    "claude": "claude-sdk",
+    "gemini": "gemini",
+    "gpt": "openai-responses",
+}
+
+
+def infer_platform_for_model(model: str) -> Platform | None:
+    """Infer the execution platform from a model alias or model name.
+
+    Returns the Platform matching the model family prefix ('claude-*' -> 'claude-sdk',
+    'gemini-*' -> 'gemini', 'gpt-*' -> 'openai-responses'), or None if unknown.
+    """
+    family = model.lower().split("-", 1)[0]
+    return _MODEL_FAMILY_TO_PLATFORM.get(family)
+
+
 # Roles a runner function actually resolves via bench.resolve(). Every bulk
 # role and every individual role is wired to its corresponding runner function.
 _WIRED_ROLES: Final[frozenset[str]] = frozenset(
@@ -213,6 +230,34 @@ def _overlay_layers(settings: Any) -> list[Path]:
     return layers
 
 
+def _infer_platforms_for_overlay(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Infer the compatible platform for any table that specifies `model` but omits `platform`.
+
+    Prevents sparse model-only overrides (such as `model = "claude-mini"`) from inheriting
+    an incompatible platform (like the default `platform = "gemini"`) from a lower layer.
+    """
+    result = dict(overlay)
+    if "bulk_reviewer" in result and isinstance(result["bulk_reviewer"], dict):
+        bulk = dict(result["bulk_reviewer"])
+        if "model" in bulk and isinstance(bulk["model"], str) and "platform" not in bulk:
+            inferred = infer_platform_for_model(bulk["model"])
+            if inferred is not None:
+                bulk["platform"] = inferred
+        result["bulk_reviewer"] = bulk
+    if "roles" in result and isinstance(result["roles"], dict):
+        roles = dict(result["roles"])
+        for role_name, role_table in roles.items():
+            if isinstance(role_table, dict):
+                r = dict(role_table)
+                if "model" in r and isinstance(r["model"], str) and "platform" not in r:
+                    inferred = infer_platform_for_model(r["model"])
+                    if inferred is not None:
+                        r["platform"] = inferred
+                roles[role_name] = r
+        result["roles"] = roles
+    return result
+
+
 _WARNED_ROLES: set[str] = set()
 _WARNED_ROLES_LOCK: threading.Lock = threading.Lock()
 
@@ -234,7 +279,16 @@ def load_bench() -> dict[str, Any]:
             if isinstance(roles, dict):
                 for role in roles:
                     _warn_if_not_wired(role)
-            merged = _deep_merge(merged, overlay)
+            prepared = _infer_platforms_for_overlay(overlay)
+            merged = _deep_merge(merged, prepared)
+
+    # --specialist-model / ARGUS_SPECIALIST_MODEL is a CLI/env knob that
+    # overrides the system reviewer and specialist reviewers. When set,
+    # force bulk_reviewer to claude-sdk with claude-default so the override
+    # controls the bulk reviewer roles as documented.
+    if settings.ARGUS_SPECIALIST_MODEL:
+        merged["bulk_reviewer"]["platform"] = "claude-sdk"
+        merged["bulk_reviewer"]["model"] = "claude-default"
 
     _validate_raw_bench(merged)
     return merged
@@ -288,6 +342,16 @@ def _validate_prompt_name(name: Any, where: str) -> None:
         )
 
 
+def _validate_model_platform_compatibility(platform: str, model: str, where: str) -> None:
+    expected_platform = infer_platform_for_model(model)
+    if expected_platform is not None and platform != expected_platform:
+        raise ValueError(
+            f"{where}: model {model!r} is not compatible with platform {platform!r} "
+            f"(expected platform={expected_platform!r}). "
+            f"Set platform = {expected_platform!r} or select a model compatible with {platform!r}."
+        )
+
+
 def _validate_raw_bench(raw: dict[str, Any]) -> None:
     """Validate the fully-merged bench config, raising loudly on any problem.
 
@@ -319,6 +383,7 @@ def _validate_raw_bench(raw: dict[str, Any]) -> None:
     _validate_platform(bulk["platform"], "[bulk_reviewer]")
     _validate_model(bulk["model"], "[bulk_reviewer]")
     _validate_caching(bulk.get("caching", "auto"), "[bulk_reviewer]")
+    _validate_model_platform_compatibility(bulk["platform"], bulk["model"], "[bulk_reviewer]")
 
     roles = raw.get("roles", {})
     if not isinstance(roles, dict):
@@ -340,6 +405,7 @@ def _validate_raw_bench(raw: dict[str, Any]) -> None:
         _validate_model(role_table["model"], where)
         _validate_caching(role_table.get("caching", "auto"), where)
         _validate_prompt_name(role_table["prompt_name"], where)
+        _validate_model_platform_compatibility(role_table["platform"], role_table["model"], where)
 
     # The bulk bucket's own known prompt names are hardcoded (not
     # TOML-supplied), but validate them too: a packaged/override prompt

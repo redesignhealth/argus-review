@@ -6,9 +6,9 @@ semantics, ``ARGUS_NO_BENCH_OVERRIDES`` disables the whole chain, loud
 validation errors for unknown top-level/table keys, unknown platform/
 caching values, and a dangling ``prompt_name``, unknown-role resolution
 errors, the ``claude-sdk``/``gemini``/``openai-responses`` platform
-runner registrations, and -- the key regression guard -- that the
-packaged default resolves to EXACTLY today's pre-bench models/platform,
-proving the bench is a behavior-preserving no-op for a default install.
+runner registrations, platform inference for sparse model-only overrides,
+and verification of packaged default resolutions (Gemini for bulk reviewers,
+Claude for individual roles).
 """
 
 from __future__ import annotations
@@ -141,8 +141,72 @@ class TestOverrideChain:
 
         entry = bench.resolve("system-generalist")
         assert entry.model == "claude-mini"
-        assert entry.platform == "gemini"  # untouched key still falls through
+        assert entry.platform == "claude-sdk"  # platform inferred from model family
         assert entry.caching == "auto"  # untouched key still falls through
+
+    def test_user_global_sparse_model_override_infers_platform_openai(self, tmp_path: Path) -> None:
+        user_global = Path(os.environ["XDG_CONFIG_HOME"]) / "argus" / "bench.toml"
+        _write_toml(user_global, '[bulk_reviewer]\nmodel = "gpt-mini"\n')
+        bench.clear_cache()
+
+        entry = bench.resolve("system-generalist")
+        assert entry.model == "gpt-mini"
+        assert entry.platform == "openai-responses"
+        assert entry.caching == "auto"
+
+    def test_role_sparse_model_override_infers_platform(self, tmp_path: Path) -> None:
+        repo_local = Path.cwd() / ".argus" / "bench.toml"
+        _write_toml(repo_local, '[roles.cross-cutting]\nmodel = "gemini-frontier"\n')
+        bench.clear_cache()
+
+        entry = bench.resolve("cross-cutting")
+        assert entry.model == "gemini-frontier"
+        assert entry.platform == "gemini"
+
+    def test_explicit_platform_model_mismatch_raises(self, tmp_path: Path) -> None:
+        repo_local = Path.cwd() / ".argus" / "bench.toml"
+        _write_toml(
+            repo_local,
+            '[bulk_reviewer]\nplatform = "gemini"\nmodel = "claude-mini"\n',
+        )
+        bench.clear_cache()
+        with pytest.raises(
+            ValueError, match="model 'claude-mini' is not compatible with platform 'gemini'"
+        ):
+            bench.load_bench()
+
+    def test_specialist_model_forces_claude_sdk_for_bulk_reviewer(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib
+        from argus.llm import models as models_module
+
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-haiku-4-5")
+        importlib.reload(models_module)
+        clear_settings_cache()
+        bench.clear_cache()
+
+        try:
+            entry = bench.resolve("system-generalist")
+            assert entry.platform == "claude-sdk"
+            assert entry.model == "claude-default"
+            assert models_module.resolve(entry.model) == "claude-haiku-4-5"
+        finally:
+            monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+            importlib.reload(models_module)
+            clear_settings_cache()
+            bench.clear_cache()
+
+    def test_specialist_model_cleared_with_empty_string_preserves_gemini(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "")
+        clear_settings_cache()
+        bench.clear_cache()
+
+        entry = bench.resolve("system-generalist")
+        assert entry.platform == "gemini"
+        assert entry.model == "gemini-mini"
 
     def test_repo_local_overlay_wins_over_user_global(self) -> None:
         user_global = Path(os.environ["XDG_CONFIG_HOME"]) / "argus" / "bench.toml"
@@ -824,6 +888,208 @@ class TestRunSystemReviewerBenchWiring:
 
         mock_isolated.assert_called_once()
         assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
+
+    @pytest.mark.asyncio
+    async def test_sparse_model_only_override_executes_on_inferred_claude_platform(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end regression: a sparse override specifying only `model = 'claude-mini'`
+        must infer platform='claude-sdk' and execute via _run_session_isolated, NOT crash
+        by routing to Gemini."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import SystemGroup
+
+        explicit = tmp_path / "explicit-bench.toml"
+        _write_toml(explicit, '[bulk_reviewer]\nmodel = "claude-mini"\n')
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        clear_settings_cache()
+        bench.clear_cache()
+
+        group = SystemGroup(
+            name="backend",
+            files=["src/app.py"],
+            conventions="",
+            review_focus="",
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock()
+        fake_session.result_text = ""
+        fake_session.failure_reason = None
+        fake_session.timed_out = False
+        fake_session.cost_usd = 0.0
+        fake_session.tool_call_count = 0
+        fake_session.tool_names = []
+        fake_session.context7_call_count = 0
+        fake_session.model = "claude-haiku-4-5"
+        fake_session.result_text_length = 0
+        fake_session.duration_seconds = 1.0
+        fake_session.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        fake_session.finished_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("run_session_gemini must not be called for claude model")
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_isolated,
+            patch("argus.gemini_runner.run_session_gemini", side_effect=_boom),
+        ):
+            await runners_module.run_system_reviewer(
+                group=group,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_isolated.assert_called_once()
+        assert mock_isolated.call_args.kwargs["model"] == "claude-haiku-4-5"
+
+    @pytest.mark.asyncio
+    async def test_sparse_model_only_override_executes_on_inferred_openai_platform(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """End-to-end regression: a sparse override specifying only `model = 'gpt-mini'`
+        must infer platform='openai-responses' and execute via run_session_openai."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import SystemGroup
+
+        explicit = tmp_path / "explicit-bench.toml"
+        _write_toml(explicit, '[bulk_reviewer]\nmodel = "gpt-mini"\n')
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        clear_settings_cache()
+        bench.clear_cache()
+
+        group = SystemGroup(
+            name="backend",
+            files=["src/app.py"],
+            conventions="",
+            review_focus="",
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock()
+        fake_session.result_text = ""
+        fake_session.failure_reason = None
+        fake_session.timed_out = False
+        fake_session.cost_usd = 0.0
+        fake_session.tool_call_count = 0
+        fake_session.tool_names = []
+        fake_session.context7_call_count = 0
+        fake_session.model = "gpt-5.6-luna"
+        fake_session.result_text_length = 0
+        fake_session.duration_seconds = 1.0
+        fake_session.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        fake_session.finished_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("run_session_gemini must not be called for gpt model")
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.openai_runner.run_session_openai",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_openai,
+            patch("argus.gemini_runner.run_session_gemini", side_effect=_boom),
+        ):
+            await runners_module.run_system_reviewer(
+                group=group,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_openai.assert_called_once()
+        assert mock_openai.call_args.kwargs["entry"].platform == "openai-responses"
+        assert mock_openai.call_args.kwargs["entry"].model == "gpt-mini"
+
+    @pytest.mark.asyncio
+    async def test_specialist_model_flag_executes_on_claude(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Setting ARGUS_SPECIALIST_MODEL forces bulk reviewers to claude-sdk with claude-default."""
+        import importlib
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.llm import models as models_module
+        from argus.pipeline_models import SystemGroup
+
+        monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-haiku-4-5")
+        importlib.reload(models_module)
+        clear_settings_cache()
+        bench.clear_cache()
+
+        group = SystemGroup(
+            name="backend",
+            files=["src/app.py"],
+            conventions="",
+            review_focus="",
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock()
+        fake_session.result_text = ""
+        fake_session.failure_reason = None
+        fake_session.timed_out = False
+        fake_session.cost_usd = 0.0
+        fake_session.tool_call_count = 0
+        fake_session.tool_names = []
+        fake_session.context7_call_count = 0
+        fake_session.model = "claude-haiku-4-5"
+        fake_session.result_text_length = 0
+        fake_session.duration_seconds = 1.0
+        fake_session.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        fake_session.finished_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError(
+                "run_session_gemini must not be called when specialist_model is set"
+            )
+
+        try:
+            with (
+                patch(
+                    "argus.runners.fetch_prompt",
+                    new_callable=AsyncMock,
+                    return_value="base prompt",
+                ),
+                patch(
+                    "argus.runners._run_session_isolated",
+                    new_callable=AsyncMock,
+                    return_value=fake_session,
+                ) as mock_isolated,
+                patch("argus.gemini_runner.run_session_gemini", side_effect=_boom),
+            ):
+                await runners_module.run_system_reviewer(
+                    group=group,
+                    diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                    settings=mock_settings,
+                )
+
+            mock_isolated.assert_called_once()
+            assert mock_isolated.call_args.kwargs["model"] == "claude-haiku-4-5"
+        finally:
+            monkeypatch.delenv("ARGUS_SPECIALIST_MODEL", raising=False)
+            importlib.reload(models_module)
+            clear_settings_cache()
+            bench.clear_cache()
 
     @pytest.mark.asyncio
     async def test_run_specialist_reviewer_routes_through_bench_to_same_model(self) -> None:
