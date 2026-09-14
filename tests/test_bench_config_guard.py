@@ -210,7 +210,17 @@ class TestMultiRoundBenchConfigGuardRegressions:
 
         mock_gh = MagicMock()
         # Full-PR compare includes the bench config file added in round 1
-        mock_gh.get_compare_files.return_value = [".argus/bench.toml", "src/app.py"]
+        mock_gh.get_compare_files.return_value = (
+            [
+                {
+                    "filename": ".argus/bench.toml",
+                    "status": "added",
+                    "patch": "+model = 'gemini'\n",
+                },
+                {"filename": "src/app.py", "status": "modified", "patch": "+new\n"},
+            ],
+            False,
+        )
 
         state = {"request": req.model_dump()}
         config: dict[str, Any] = {"configurable": {}}
@@ -276,7 +286,10 @@ class TestMultiRoundBenchConfigGuardRegressions:
 
         mock_gh = MagicMock()
         # Full-PR compare from main..head has NO .argus/bench.toml
-        mock_gh.get_compare_files.return_value = ["src/app.py"]
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": "src/app.py", "status": "modified", "patch": "+new\n"}],
+            False,
+        )
 
         state = {"request": req.model_dump()}
         config: dict[str, Any] = {"configurable": {}}
@@ -481,6 +494,118 @@ class TestMultiRoundBenchConfigGuardRegressions:
         assert "Unable to verify" in response.findings[0].description
         assert "fails closed" in response.findings[0].description
         assert "Verdict forced to BLOCKING" in response.review_comment
+
+    @pytest.mark.asyncio
+    async def test_modified_file_with_none_patch_fails_closed(self) -> None:
+        """A modified, non-removed file with patch=None in the API response must fail closed."""
+        req = ReviewRequest(repo="org/repo", pr_number=42)
+        diff = "diff --git a/src/app.py b/src/app.py\n"
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": "src/app.py", "status": "modified", "patch": None}],
+            False,
+        )
+
+        state = {"request": req.model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "desc", "head12345678", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            node_result = await _node_fetch_diff(state, config)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+        assert any("Unable to verify" in f.description for f in response.findings)
+
+    @pytest.mark.asyncio
+    async def test_modified_file_with_empty_patch_fails_closed(self) -> None:
+        """A modified, non-removed file with patch='' in the API response must fail closed."""
+        req = ReviewRequest(repo="org/repo", pr_number=42)
+        diff = "diff --git a/src/app.py b/src/app.py\n"
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": "src/app.py", "status": "modified", "patch": ""}],
+            False,
+        )
+
+        state = {"request": req.model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "desc", "head12345678", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            node_result = await _node_fetch_diff(state, config)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
+    async def test_removed_file_with_no_patch_does_not_fail_closed(self) -> None:
+        """A file with status='removed' legitimately has no patch; must NOT fail closed."""
+        req = ReviewRequest(repo="org/repo", pr_number=42)
+        diff = "diff --git a/.argus/bench.toml b/.argus/bench.toml\ndeleted file\n"
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": ".argus/bench.toml", "status": "removed", "patch": None}],
+            False,
+        )
+
+        state = {"request": req.model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "desc", "head12345678", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            node_result = await _node_fetch_diff(state, config)
+
+        assert node_result["bench_config_unconfirmed"] is None
+        assert node_result["bench_config_changes"] == []
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
 
 
 class TestRunReviewBenchGuardIntegration:

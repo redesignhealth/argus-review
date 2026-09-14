@@ -2286,12 +2286,18 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         ):
             bench_config_changes.append(filename)
 
-        patch_content = f.get("patch", "")
+        patch_content = f.get("patch")
         if patch_content:
             for line in _detect_bench_config_routing_lines(patch_content):
                 bench_config_changes.append(
                     f"added line modifying bench routing in {filename}: {line}"
                 )
+        elif not unconfirmed_reason and filename not in bench_config_changes:
+            unconfirmed_reason = (
+                f"Diff patch content missing or empty for '{filename}' in GitHub API "
+                "response; complete changes could not be verified for bench routing"
+            )
+            logger.warning(unconfirmed_reason)
 
     # Also scan current round diff for any routing lines
     for line in _detect_bench_config_routing_lines(diff):
