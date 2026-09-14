@@ -235,17 +235,21 @@ class TestFetchFullPrChangedFiles:
     """Tests for _fetch_full_pr_changed_files full-PR path resolution and fallback."""
 
     @pytest.mark.asyncio
-    async def test_round1_uses_diff_directly_without_compare_api(self) -> None:
-        """On round 1 (prior_sha is None), uses extract_changed_files(round_diff) with zero API calls."""
+    async def test_round1_calls_compare_files_api(self) -> None:
+        """On round 1, queries GitHub API to get the full file list across the PR (avoiding diff truncation)."""
         from argus.graph import _fetch_full_pr_changed_files
 
         mock_gh = MagicMock()
-        diff = (
-            "diff --git a/src/main.py b/src/main.py\n+code\n"
-            "diff --git a/.argus/bench.toml b/.argus/bench.toml\n+bench\n"
+        mock_gh.get_compare_files.return_value = (
+            [
+                {"filename": ".argus/bench.toml", "status": "added"},
+                {"filename": "src/main.py", "status": "added"},
+            ],
+            False,
         )
+        diff = "diff --git a/src/main.py b/src/main.py\n+code\n"
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
-            files = await _fetch_full_pr_changed_files(
+            files, unconfirmed = await _fetch_full_pr_changed_files(
                 _make_request(pr_number=42),
                 base_branch="main",
                 head_sha="head1234",
@@ -253,8 +257,9 @@ class TestFetchFullPrChangedFiles:
                 prior_sha=None,
             )
 
-        assert files == [".argus/bench.toml", "src/main.py"]
-        mock_gh.get_compare_files.assert_not_called()
+        assert [f["filename"] for f in files] == [".argus/bench.toml", "src/main.py"]
+        assert unconfirmed is None
+        mock_gh.get_compare_files.assert_called_once_with("org/repo", "main", "head1234")
 
     @pytest.mark.asyncio
     async def test_round2_calls_compare_files_api(self) -> None:
@@ -262,11 +267,17 @@ class TestFetchFullPrChangedFiles:
         from argus.graph import _fetch_full_pr_changed_files
 
         mock_gh = MagicMock()
-        mock_gh.get_compare_files.return_value = [".argus/bench.toml", "src/lib.py"]
+        mock_gh.get_compare_files.return_value = (
+            [
+                {"filename": ".argus/bench.toml", "status": "modified"},
+                {"filename": "src/lib.py", "status": "modified"},
+            ],
+            False,
+        )
 
         round_diff = "diff --git a/src/lib.py b/src/lib.py\n+lib\n"
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
-            files = await _fetch_full_pr_changed_files(
+            files, unconfirmed = await _fetch_full_pr_changed_files(
                 _make_request(pr_number=42),
                 base_branch="main",
                 head_sha="head1234",
@@ -274,12 +285,13 @@ class TestFetchFullPrChangedFiles:
                 prior_sha="prior1234",
             )
 
-        assert files == [".argus/bench.toml", "src/lib.py"]
+        assert [f["filename"] for f in files] == [".argus/bench.toml", "src/lib.py"]
+        assert unconfirmed is None
         mock_gh.get_compare_files.assert_called_once_with("org/repo", "main", "head1234")
 
     @pytest.mark.asyncio
-    async def test_round2_fallback_on_api_error(self, caplog: pytest.LogCaptureFixture) -> None:
-        """On API failure, logs a WARNING and falls back to extract_changed_files(round_diff)."""
+    async def test_round2_fails_closed_on_api_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """On API failure, fails CLOSED: logs a WARNING and returns an unconfirmed reason string."""
         import logging
         from argus.graph import _fetch_full_pr_changed_files
 
@@ -288,7 +300,7 @@ class TestFetchFullPrChangedFiles:
 
         round_diff = "diff --git a/src/fallback.py b/src/fallback.py\n+fallback\n"
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh), caplog.at_level(logging.WARNING):
-            files = await _fetch_full_pr_changed_files(
+            files, unconfirmed = await _fetch_full_pr_changed_files(
                 _make_request(pr_number=42),
                 base_branch="main",
                 head_sha="head1234",
@@ -296,10 +308,42 @@ class TestFetchFullPrChangedFiles:
                 prior_sha="prior1234",
             )
 
-        assert files == ["src/fallback.py"]
+        assert [f["filename"] for f in files] == ["src/fallback.py"]
+        assert unconfirmed is not None
+        assert "GitHub API comparison failed" in unconfirmed
         assert any(
-            "Failed to fetch full-PR changed files" in record.message for record in caplog.records
+            "failing closed to prevent unverified bench configuration changes" in record.message
+            for record in caplog.records
         )
+
+    @pytest.mark.asyncio
+    async def test_truncated_compare_list_fails_closed(self) -> None:
+        """When compare API hits cap and cannot paginate, fails closed with unconfirmed reason."""
+        from argus.graph import _fetch_full_pr_changed_files
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": f"file_{i}.py", "status": "modified"} for i in range(300)],
+            True,  # is_truncated
+        )
+        # pr_files also truncated
+        mock_gh.get_pr_files.return_value = (
+            [{"filename": f"file_{i}.py", "status": "modified"} for i in range(3000)],
+            True,  # is_truncated
+        )
+
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            files, unconfirmed = await _fetch_full_pr_changed_files(
+                _make_request(pr_number=42),
+                base_branch="main",
+                head_sha="head1234",
+                round_diff="diff",
+                prior_sha=None,
+            )
+
+        assert len(files) == 3000
+        assert unconfirmed is not None
+        assert "exceeded maximum file limit" in unconfirmed
 
 
 class TestNodeFetchDiffBenchConfig:
@@ -314,6 +358,12 @@ class TestNodeFetchDiffBenchConfig:
         state = {"request": _make_request(pr_number=42).model_dump()}
         config: dict[str, Any] = {"configurable": {}}
 
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": ".argus/bench.toml", "status": "added", "patch": "+model = 'gemini'\n"}],
+            False,
+        )
+
         with (
             patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
             patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
@@ -322,10 +372,12 @@ class TestNodeFetchDiffBenchConfig:
                 new_callable=AsyncMock,
                 return_value=(diff, "", "head1234", "main"),
             ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
             result = await _node_fetch_diff(state, config)
 
         assert result["bench_config_changes"] == [".argus/bench.toml"]
+        assert result["bench_config_unconfirmed"] is None
 
     @pytest.mark.asyncio
     async def test_node_fetch_diff_clean_when_no_bench_config(self) -> None:
@@ -336,6 +388,12 @@ class TestNodeFetchDiffBenchConfig:
         state = {"request": _make_request(pr_number=42).model_dump()}
         config: dict[str, Any] = {"configurable": {}}
 
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": "src/app.py", "status": "modified", "patch": "+print('hello')\n"}],
+            False,
+        )
+
         with (
             patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
             patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
@@ -344,7 +402,40 @@ class TestNodeFetchDiffBenchConfig:
                 new_callable=AsyncMock,
                 return_value=(diff, "", "head1234", "main"),
             ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
             result = await _node_fetch_diff(state, config)
 
         assert result["bench_config_changes"] == []
+        assert result["bench_config_unconfirmed"] is None
+
+    @pytest.mark.asyncio
+    async def test_node_fetch_diff_excludes_deleted_bench_config(self) -> None:
+        """A PR that deletes an existing .argus/bench.toml does not block."""
+        from unittest.mock import AsyncMock, patch
+        from argus.graph import _node_fetch_diff
+
+        diff = "diff --git a/.argus/bench.toml b/.argus/bench.toml\ndeleted file mode 100644\n--- a/.argus/bench.toml\n+++ /dev/null\n"
+        state = {"request": _make_request(pr_number=42).model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": ".argus/bench.toml", "status": "removed"}],
+            False,
+        )
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "", "head1234", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            result = await _node_fetch_diff(state, config)
+
+        assert result["bench_config_changes"] == []
+        assert result["bench_config_unconfirmed"] is None

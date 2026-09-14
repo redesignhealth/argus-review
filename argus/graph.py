@@ -42,7 +42,6 @@ from argus.helpers import (
     apply_bench_config_change_gate,
     apply_precheck_gate_and_surface_degraded_coverage,
     compute_persisted_finding_counts,
-    extract_changed_files,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
@@ -257,6 +256,9 @@ class ReviewState(TypedDict, total=False):
     bench_config_changes: list[
         str
     ]  # bench config paths or routing lines modified this PR (TECH-6282)
+    bench_config_unconfirmed: (
+        str | None
+    )  # non-None when detection completeness could not be verified
 
 
 class ReviewerInput(TypedDict):
@@ -680,44 +682,146 @@ async def _fetch_pr_diff_and_description(
     return await asyncio.to_thread(_fetch)
 
 
+def _extract_diff_file_statuses(diff: str) -> dict[str, str]:
+    """Extract file paths and statuses ('added', 'modified', 'removed') from a unified diff."""
+    statuses: dict[str, str] = {}
+    if not diff:
+        return statuses
+    hunks = re.split(r"^diff --git ", diff, flags=re.MULTILINE)
+    for hunk in hunks:
+        if not hunk.strip():
+            continue
+        lines = hunk.splitlines()
+        first_line = lines[0]
+        match = re.match(r"^a/(\S+) b/(\S+)", first_line)
+        if not match:
+            continue
+        a_path, b_path = match.group(1), match.group(2)
+        is_deleted = any(
+            entry_line.startswith("deleted file mode") or entry_line.startswith("+++ /dev/null")
+            for entry_line in lines[:6]
+        )
+        is_added = any(
+            entry_line.startswith("new file mode") or entry_line.startswith("--- /dev/null")
+            for entry_line in lines[:6]
+        )
+        if is_deleted:
+            statuses[a_path] = "removed"
+        elif is_added:
+            statuses[b_path] = "added"
+        else:
+            statuses[b_path] = "modified"
+    return statuses
+
+
 async def _fetch_full_pr_changed_files(
     request: ReviewRequest,
     base_branch: str,
     head_sha: str,
     round_diff: str,
     prior_sha: str | None = None,
-) -> list[str]:
-    """Return the set of changed files across the full PR (base_branch...head_sha).
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return the set of changed files across the full PR (base_branch...head_sha)
+    along with statuses and patches, and an unconfirmed reason string if completeness
+    could not be guaranteed.
 
-    On round 1 (prior_sha is None), round_diff already represents base_branch...head_sha,
-    so extract_changed_files(round_diff) is used directly with zero extra API cost.
-
-    On round 2+ (prior_sha is not None), calls GitHub's compare JSON API
-    (/repos/{repo}/compare/{base_branch}...{head_sha}) to get the full-PR file list.
-    If the API call fails, logs a WARNING and falls back to extract_changed_files(round_diff).
+    Fails CLOSED:
+    - Calls GitHub API (compare or pulls files) on both round 1 and round 2+ to avoid
+      missing changes past diff truncation points (e.g. max_lines=5000).
+    - If compare list is truncated at 300 files and pr_number is available, paginates
+      using PR files endpoint up to 3000 files.
+    - If the list remains truncated or API calls fail after retry, returns an unconfirmed
+      reason so the bench guard forces a BLOCKING verdict rather than silently approving.
     """
-    if prior_sha is None:
-        return extract_changed_files(round_diff)
 
-    def _fetch() -> list[str]:
+    def _fetch() -> tuple[list[dict[str, Any]], str | None]:
         from argus.github_client import GitHubClient
 
         settings = get_settings()
         gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
         base = base_branch
         head = head_sha
-        try:
-            return gh.get_compare_files(request.repo, base, head)
-        except Exception as e:
-            logger.warning(
-                "Failed to fetch full-PR changed files for %s (%s...%s): %s; "
-                "falling back to round-scoped diff changed files",
-                request.repo,
-                base,
-                head,
-                e,
-            )
-            return extract_changed_files(round_diff)
+
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                res = gh.get_compare_files(request.repo, base, head)
+                if isinstance(res, tuple):
+                    files, is_truncated = res
+                else:
+                    files, is_truncated = res, False
+
+                parsed_files: list[dict[str, Any]] = []
+                for f in files:
+                    if isinstance(f, str):
+                        parsed_files.append({"filename": f, "status": "modified", "patch": ""})
+                    elif isinstance(f, dict):
+                        parsed_files.append(
+                            {
+                                "filename": f.get("filename", ""),
+                                "status": f.get("status", "modified"),
+                                "patch": f.get("patch", ""),
+                            }
+                        )
+
+                # If compare hit 300-file cap and we have a PR number, paginate with get_pr_files
+                if is_truncated and request.pr_number and hasattr(gh, "get_pr_files"):
+                    try:
+                        pr_res = gh.get_pr_files(request.repo, request.pr_number)
+                        if isinstance(pr_res, tuple):
+                            pr_files, pr_truncated = pr_res
+                        else:
+                            pr_files, pr_truncated = pr_res, False
+                        parsed_files = [
+                            {
+                                "filename": pf.get("filename", "") if isinstance(pf, dict) else pf,
+                                "status": pf.get("status", "modified")
+                                if isinstance(pf, dict)
+                                else "modified",
+                                "patch": pf.get("patch", "") if isinstance(pf, dict) else "",
+                            }
+                            for pf in pr_files
+                        ]
+                        is_truncated = pr_truncated
+                    except Exception as pr_exc:
+                        logger.warning(
+                            "Failed to paginate PR files for #%d: %s", request.pr_number, pr_exc
+                        )
+
+                unconfirmed_reason: str | None = None
+                if is_truncated:
+                    unconfirmed_reason = (
+                        f"GitHub file comparison for {request.repo} ({base}...{head}) exceeded maximum file limit "
+                        f"({len(parsed_files)} files returned); complete file list could not be verified"
+                    )
+                    logger.warning(unconfirmed_reason)
+
+                return parsed_files, unconfirmed_reason
+
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "GitHub file comparison attempt %d failed for %s (%s...%s): %s",
+                    attempt + 1,
+                    request.repo,
+                    base,
+                    head,
+                    e,
+                )
+
+        # Fail closed: completeness could not be verified
+        unconfirmed_reason = (
+            f"GitHub API comparison failed for {request.repo} ({base}...{head}): {last_error}"
+        )
+        logger.warning(
+            "%s; failing closed to prevent unverified bench configuration changes",
+            unconfirmed_reason,
+        )
+        diff_statuses = _extract_diff_file_statuses(round_diff)
+        fallback_files = [
+            {"filename": fn, "status": status, "patch": ""} for fn, status in diff_statuses.items()
+        ]
+        return fallback_files, unconfirmed_reason
 
     return await asyncio.to_thread(_fetch)
 
@@ -1886,12 +1990,18 @@ def _is_bench_config_path(
         try:
             bench_path = Path(bench_file_setting)
             if not bench_path.is_absolute():
-                norm = bench_path.as_posix().lstrip("./")
+                posix = bench_path.as_posix()
+                norm = posix[2:] if posix.startswith("./") else posix
+                if norm.startswith("/"):
+                    norm = norm[1:]
                 if path == norm or path.endswith("/" + norm):
                     return True
             elif worktree_path:
                 rel = bench_path.relative_to(Path(worktree_path)).as_posix()
-                if path == rel or path.endswith("/" + rel):
+                norm_rel = rel[2:] if rel.startswith("./") else rel
+                if norm_rel.startswith("/"):
+                    norm_rel = norm_rel[1:]
+                if path == norm_rel or path.endswith("/" + norm_rel):
                     return True
         except Exception:
             pass
@@ -1946,9 +2056,9 @@ def _edge_preflight_decision(state: ReviewState) -> str:
     2. Unresolved/regressed prior BLOCKINGs → always full.
     Both gates are deterministic dict/regex lookups — no LLM call.
     """
-    if state.get("bench_config_changes"):
+    if state.get("bench_config_changes") or state.get("bench_config_unconfirmed"):
         logger.info(
-            "Preflight override: bench configuration change detected — routing to full review"
+            "Preflight override: bench configuration change or unconfirmed detection — routing to full review"
         )
         return "plan"
 
@@ -2159,21 +2269,32 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
     settings = get_settings()
 
-    full_changed_files = await _fetch_full_pr_changed_files(
+    full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
         req, base_branch, head_sha, diff, prior_sha=prior_sha
     )
 
     bench_config_changes: list[str] = []
-    for path in full_changed_files:
+    for f in full_changed_files:
+        # Exclude files with status == 'removed' — pure deletion of a bench config is safe
+        if f.get("status") == "removed":
+            continue
+        filename = f.get("filename", "")
         if _is_bench_config_path(
-            path,
+            filename,
             bench_file_setting=settings.ARGUS_BENCH_FILE,
             worktree_path=worktree_path,
         ):
-            bench_config_changes.append(path)
+            bench_config_changes.append(filename)
 
-    routing_lines = _detect_bench_config_routing_lines(diff)
-    for line in routing_lines:
+        patch_content = f.get("patch", "")
+        if patch_content:
+            for line in _detect_bench_config_routing_lines(patch_content):
+                bench_config_changes.append(
+                    f"added line modifying bench routing in {filename}: {line}"
+                )
+
+    # Also scan current round diff for any routing lines
+    for line in _detect_bench_config_routing_lines(diff):
         bench_config_changes.append(f"added line modifying bench routing: {line}")
 
     bench_config_changes = sorted(set(bench_config_changes))
@@ -2183,6 +2304,7 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         "description": description,
         "head_sha": head_sha,
         "bench_config_changes": bench_config_changes,
+        "bench_config_unconfirmed": unconfirmed_reason,
     }
 
     if prior:
@@ -3368,13 +3490,24 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     # accounting is not suppressed, and BEFORE compute_persisted_finding_counts so the
     # forced BLOCKING finding is included in persistence counts.
     bench_config_changes = result.get("bench_config_changes", [])
-    if apply_bench_config_change_gate(response, bench_config_changes):
-        logger.warning(
-            "Bench config change guard: forced verdict to BLOCKING (risk_level=%s) "
-            "because PR touches bench configuration/routing: %s",
-            response.risk_level.value,
-            ", ".join(bench_config_changes),
-        )
+    bench_config_unconfirmed = result.get("bench_config_unconfirmed")
+    if apply_bench_config_change_gate(
+        response, bench_config_changes, unconfirmed_reason=bench_config_unconfirmed
+    ):
+        if bench_config_changes:
+            logger.warning(
+                "Bench config change guard: forced verdict to BLOCKING (risk_level=%s) "
+                "because PR touches bench configuration/routing: %s",
+                response.risk_level.value,
+                ", ".join(bench_config_changes),
+            )
+        elif bench_config_unconfirmed:
+            logger.warning(
+                "Bench config change guard: forced verdict to BLOCKING (risk_level=%s) "
+                "because bench configuration detection could not be verified: %s",
+                response.risk_level.value,
+                bench_config_unconfirmed,
+            )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
     reviewed_sha = result.get("head_sha") or request.sha

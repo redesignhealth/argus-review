@@ -6,8 +6,11 @@ These are security controls and parsing logic with no LLM dependency.
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -558,32 +561,100 @@ class TestApplyBenchConfigChangeGate:
             "no '**Verdict**:'-shaped line found" in record.message for record in caplog.records
         )
 
-    def test_ordering_invariant_with_precheck_gate(self) -> None:
-        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+    @pytest.mark.asyncio
+    async def test_ordering_invariant_in_run_review(self) -> None:
+        """Integration-level invariant: in run_review,
+        apply_precheck_gate_and_surface_degraded_coverage must be called
+        BEFORE apply_bench_config_change_gate.
 
-        # Correct ordering: precheck gate runs FIRST, bench gate runs SECOND
-        response = _response()
-        graph_result = {"precheck_scanner_failures": ["zizmor"]}
-        precheck_fired, _ = apply_precheck_gate_and_surface_degraded_coverage(
-            response, findings_models=[], graph_result=graph_result, block_on_failure=True
-        )
-        assert precheck_fired is True
-        bench_fired = apply_bench_config_change_gate(response, [".argus/bench.toml"])
-        assert bench_fired is True
-        assert len(response.findings) == 2
-        categories = [f.category for f in response.findings]
-        assert categories == ["deterministic-precheck", "argus-self-config"]
+        If bench gate were called first, it would force verdict to BLOCKING
+        before the precheck gate runs, which would cause the precheck gate to
+        early-return and create a spurious coverage-gap finding instead of
+        proper precheck finding accounting.
+        """
+        from argus.graph import run_review
+        from argus.models import ReviewRequest, TokenUsage
 
-        # Inverted ordering bug: if bench gate ran first, precheck gate would be suppressed
-        # and create an unintended coverage-gap finding instead of a deterministic-precheck finding
-        bad_response = _response()
-        apply_bench_config_change_gate(bad_response, [".argus/bench.toml"])
-        bad_precheck_fired, _ = apply_precheck_gate_and_surface_degraded_coverage(
-            bad_response, findings_models=[], graph_result=graph_result, block_on_failure=True
+        req = ReviewRequest(repo="org/repo", pr_number=42)
+        mock_response = ReviewResponse(
+            verdict=Verdict.APPROVE,
+            risk_level=RiskLevel.LOW,
+            findings=[],
+            coverage_map=[],
+            review_comment="## Code Review\n\n**Verdict**: ✅ APPROVE | **Risk**: LOW\n\nLooks good.",
+            usage=TokenUsage(input_tokens=10, output_tokens=10, cost_usd=0.001),
         )
-        assert bad_precheck_fired is False
-        bad_categories = [f.category for f in bad_response.findings]
-        assert "coverage-gap" in bad_categories
+
+        mock_graph = AsyncMock()
+        mock_graph.ainvoke.return_value = {
+            "response": mock_response.model_dump(),
+            "findings": [],
+            "precheck_scanner_failures": ["zizmor"],
+            "bench_config_changes": [".argus/bench.toml"],
+        }
+
+        call_order: list[str] = []
+
+        def spy_precheck_gate(*args: Any, **kwargs: Any) -> tuple[bool, list[tuple[str, str]]]:
+            call_order.append("precheck_gate")
+            from argus.helpers import (
+                apply_precheck_gate_and_surface_degraded_coverage as real_precheck,
+            )
+
+            return real_precheck(*args, **kwargs)
+
+        def spy_bench_gate(*args: Any, **kwargs: Any) -> bool:
+            call_order.append("bench_gate")
+            from argus.helpers import apply_bench_config_change_gate as real_bench
+
+            return real_bench(*args, **kwargs)
+
+        mock_session = AsyncMock()
+        mock_execute_result = MagicMock()
+        mock_execute_result.scalar_one_or_none.return_value = "code-review-1"
+        mock_session.execute = AsyncMock(return_value=mock_execute_result)
+        mock_session_ctx = MagicMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=None)
+        mock_session_factory = MagicMock(return_value=mock_session_ctx)
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = {"head_sha": "abc123def456"}
+
+        mock_worktree_ctx = MagicMock()
+        mock_worktree_ctx.__aenter__ = AsyncMock(return_value="/tmp/worktree")
+        mock_worktree_ctx.__aexit__ = AsyncMock(return_value=None)
+
+        with (
+            patch("argus.graph.build_pipeline") as mock_build,
+            patch("argus.graph.validate_history_backend_connectivity", new_callable=AsyncMock),
+            patch(
+                "argus.storage.resolver.get_async_session_factory",
+                return_value=mock_session_factory,
+            ),
+            patch("argus.github_client.GitHubClient", return_value=mock_gh),
+            patch("argus.graph.provisioned_worktree", return_value=mock_worktree_ctx),
+            patch(
+                "argus.graph.apply_precheck_gate_and_surface_degraded_coverage",
+                side_effect=spy_precheck_gate,
+            ),
+            patch("argus.graph.apply_bench_config_change_gate", side_effect=spy_bench_gate),
+            patch.dict(os.environ, {"ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE": "1"}),
+        ):
+            mock_build.return_value.__aenter__ = AsyncMock(return_value=mock_graph)
+            mock_build.return_value.__aexit__ = AsyncMock(return_value=None)
+
+            result = await run_review(req, flow_run_id="flow-order-test")
+
+        # 1. Assert call order in run_review
+        assert call_order == ["precheck_gate", "bench_gate"]
+
+        # 2. Assert real end-to-end outcome: both gates fired and no spurious coverage-gap
+        assert result.verdict == Verdict.BLOCKING
+        categories = [f.category for f in result.findings]
+        assert "deterministic-precheck" in categories
+        assert "argus-self-config" in categories
+        assert "coverage-gap" not in categories
 
 
 class TestApplyPrecheckGateAndSurfaceDegradedCoverage:
