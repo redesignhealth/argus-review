@@ -491,6 +491,92 @@ class GitHubClient:
             behind_by=data.get("behind_by", 0),
         )
 
+    def get_compare_files(
+        self,
+        repo: str,
+        base: str,
+        head: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Return list of files changed between base and head with status and patch.
+
+        Calls ``/repos/{repo}/compare/{base}...{head}`` JSON endpoint and
+        extracts file objects with ``filename``, ``status``, and ``patch``.
+        Note: GitHub caps this list at 300 files without pagination.
+
+        Args:
+            repo: Repository in "owner/repo" format.
+            base: Base ref (branch name or SHA).
+            head: Head ref (branch name or SHA).
+
+        Returns:
+            Tuple of (files list, is_truncated bool).
+        """
+        data = self._request("GET", f"/repos/{repo}/compare/{base}...{head}")
+        files_data = data.get("files") or []
+        is_truncated = len(files_data) >= 300
+        if is_truncated:
+            logger.warning(
+                "get_compare_files: GitHub compare API 300-file cap reached "
+                "(%d files returned) for %s %s...%s; changes beyond 300 files are not listed",
+                len(files_data),
+                repo,
+                base,
+                head,
+            )
+        results: list[dict[str, Any]] = []
+        for f in files_data:
+            if isinstance(f, dict):
+                results.append(
+                    {
+                        "filename": f.get("filename", ""),
+                        "status": f.get("status", "modified"),
+                        "patch": f.get("patch", ""),
+                        "previous_filename": f.get("previous_filename", ""),
+                    }
+                )
+        return results, is_truncated
+
+    def get_pr_files(
+        self,
+        repo: str,
+        pr_number: int,
+        max_files: int = 3000,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Get all files changed in a PR with status and patch, paginated.
+
+        Calls ``/repos/{repo}/pulls/{pr_number}/files`` paginating up to max_files.
+
+        Args:
+            repo: Repository in "owner/repo" format.
+            pr_number: Pull request number.
+            max_files: Maximum files to fetch (default 3000, GitHub's max).
+
+        Returns:
+            Tuple of (files list, is_truncated bool).
+        """
+        raw_files = self._paginate(f"/repos/{repo}/pulls/{pr_number}/files", max_items=max_files)
+        is_truncated = len(raw_files) >= max_files
+        if is_truncated:
+            logger.warning(
+                "get_pr_files: PR #%d in %s reached maximum file limit (%d files); "
+                "changes beyond this cap are not listed",
+                pr_number,
+                repo,
+                max_files,
+            )
+        results: list[dict[str, Any]] = []
+        for f in raw_files:
+            if isinstance(f, dict):
+                results.append(
+                    {
+                        "filename": f.get("filename", ""),
+                        "status": f.get("status", "modified"),
+                        "patch": f.get("patch", ""),
+                        "previous_filename": f.get("previous_filename", ""),
+                    }
+                )
+        return results, is_truncated
+
     def get_compare_commits(
         self,
         repo: str,

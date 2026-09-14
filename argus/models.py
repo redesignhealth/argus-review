@@ -94,7 +94,8 @@ class Finding(BaseModel):
             "cross-cutting, deterministic-precheck (a candidate-rule hit from a "
             "deterministic scanner such as semgrep/zizmor), coverage-gap (a reviewer "
             "session or scanner that timed out or crashed, synthesized by "
-            "helpers.build_degraded_coverage_findings -- not a real code-quality finding)"
+            "helpers.build_degraded_coverage_findings -- not a real code-quality finding), "
+            "argus-self-config (a modification to Argus's own reviewer bench configuration)"
         ),
     )
     file: Optional[str] = Field(None, description="File path, if applicable")

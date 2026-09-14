@@ -185,10 +185,11 @@ class TestScopedDiff:
             from argus.models import ReviewRequest
 
             req = ReviewRequest(repo="org/repo", pr_number=42)
-            diff, desc, head_sha = await fn(req, prior_sha="aabb00112233")
+            diff, _desc, head_sha, base_branch = await fn(req, prior_sha="aabb00112233")
 
         assert diff == "diff --git a/fix.py b/fix.py\n+fixed"
         assert head_sha == "aabbccdd1234"
+        assert base_branch == "main"
         # Should use prior_sha as base, not "main"
         mock_gh.get_compare_diff.assert_called_once_with(
             "org/repo", "aabb00112233", "aabbccdd1234", max_lines=5000
@@ -231,10 +232,11 @@ class TestScopedDiff:
             from argus.models import ReviewRequest
 
             req = ReviewRequest(repo="org/repo", pr_number=42)
-            diff, _, head_sha = await fn(req, prior_sha="aabb00112233")
+            diff, _, head_sha, base_branch = await fn(req, prior_sha="aabb00112233")
 
         assert diff == "diff --git a/fix.py b/fix.py\n+fixed"
         assert head_sha == "aabbccdd1234"
+        assert base_branch == "main"
         # Diff should use the merge-base SHA as the base, not the orphaned prior_sha
         mock_gh.get_compare_diff.assert_called_once_with(
             "org/repo", "ccccdddd5678", "aabbccdd1234", max_lines=5000

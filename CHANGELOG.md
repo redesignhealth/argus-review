@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reviewer bench configuration change guard (TECH-6282): PRs touching bench
+  configuration files (`.argus/bench.toml`, `argus/bench_default.toml`) or adding
+  lines modifying bench routing environment variables (`ARGUS_BENCH_FILE`,
+  `ARGUS_NO_BENCH_OVERRIDES`) are deterministically force-BLOCKED with a finding
+  in category `argus-self-config` requiring explicit human sign-off. The guard
+  evaluates against the full-PR diff scope across multi-round reviews to prevent
+  bypasses on subsequent commits.
+
 ## [0.2.3] - 2026-09-14
 
 ### Changed

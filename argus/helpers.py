@@ -497,6 +497,116 @@ def apply_precheck_scanner_failure_gate(
     return True
 
 
+def apply_bench_config_change_gate(
+    response: ReviewResponse,
+    bench_changes: list[str],
+    unconfirmed_reason: str | None = None,
+) -> bool:
+    """Force ``response``'s verdict to BLOCKING if a bench configuration
+    file or routing environment variable was modified, or if bench configuration
+    detection completeness could not be verified (TECH-6282).
+
+    No-op if ``bench_changes`` is empty and ``unconfirmed_reason`` is None.
+    When either is present:
+    - Unconditionally forces ``response.verdict = Verdict.BLOCKING``
+    - Raises ``risk_level`` monotonically to at least ``HIGH`` (never downgrading an existing ``CRITICAL``)
+    - Appends a structured ``Finding(severity=BLOCKING, category="argus-self-config", ...)``:
+        - If ``bench_changes`` is present: names the matched files/lines, explaining that
+          bench configuration changes require explicit human sign-off.
+        - If ``unconfirmed_reason`` is present (and no direct changes detected): states that
+          verification could not be completed and Argus fails closed.
+    - Rewrites the ``**Verdict**:`` header line only when the verdict actually changed.
+    - Appends a visible ``### 🚫 Verdict forced to BLOCKING`` markdown section to ``response.review_comment``.
+
+    Mutates ``response`` in place; returns whether it did anything.
+    """
+    if not bench_changes and not unconfirmed_reason:
+        return False
+
+    verdict_changed = response.verdict != Verdict.BLOCKING
+    response.verdict = Verdict.BLOCKING
+    if _RISK_LEVEL_ORDER[response.risk_level] < _RISK_LEVEL_ORDER[RiskLevel.HIGH]:
+        response.risk_level = RiskLevel.HIGH
+
+    if bench_changes:
+        paths_str = ", ".join(sorted(bench_changes))
+        description = (
+            f"PR touches Argus bench configuration or routing ({paths_str}). "
+            "This file selects the LLM platform and model for every future reviewer "
+            "run in this repo. Modifying review configuration requires explicit human sign-off."
+        )
+        suggestion = (
+            "If this file was not intentionally part of this PR, remove it and re-run. "
+            "If intentional, this cannot be resolved by editing code — it requires "
+            "explicit human sign-off; escalate rather than dismiss."
+        )
+
+        file_target: str | None = None
+        if len(bench_changes) == 1 and not bench_changes[0].startswith("added line"):
+            file_target = bench_changes[0]
+
+        response.findings.append(
+            Finding(
+                severity=Severity.BLOCKING,
+                category="argus-self-config",
+                file=file_target,
+                line=None,
+                description=description,
+                suggestion=suggestion,
+            )
+        )
+
+        note = (
+            f"PR modifies Argus reviewer bench configuration or routing ({paths_str}). "
+            "This file selects the LLM platform and model for every future reviewer run in this repo. "
+            "Modifying review configuration requires explicit human sign-off.\n\n"
+            f"**Suggestion**: {suggestion}"
+        )
+    else:
+        # Completeness unconfirmed (API failure or file cap exceeded) — fail closed
+        description = (
+            f"Unable to verify whether this PR modifies Argus reviewer bench configuration ({unconfirmed_reason}). "
+            "Because bench configuration controls LLM platform and model selection for every future reviewer "
+            "run in this repo, Argus fails closed and requires confirmation before this PR can be approved."
+        )
+        suggestion = (
+            "Re-run the review once GitHub API connectivity is restored or file limits are resolved, "
+            "or obtain explicit human review and sign-off."
+        )
+        response.findings.append(
+            Finding(
+                severity=Severity.BLOCKING,
+                category="argus-self-config",
+                file=None,
+                line=None,
+                description=description,
+                suggestion=suggestion,
+            )
+        )
+        note = (
+            f"Verification of Argus bench configuration could not be confirmed ({unconfirmed_reason}).\n\n"
+            "Argus fails closed to ensure unverified bench configuration changes are not silently approved.\n\n"
+            f"**Suggestion**: {suggestion}"
+        )
+
+    if verdict_changed:
+        response.review_comment, match_count = re.subn(
+            r"\*\*Verdict\*\*:.*?(?=\n|$)",
+            f"**Verdict**: 🚫 BLOCKING | **Risk**: {response.risk_level.value}",
+            response.review_comment,
+            count=1,
+        )
+        if match_count == 0:
+            logger.warning(
+                "apply_bench_config_change_gate: no '**Verdict**:'-shaped line found in "
+                "review_comment to rewrite -- the rendered comment's header may still read the "
+                "old verdict despite response.verdict now being BLOCKING"
+            )
+
+    response.review_comment += f"\n\n---\n\n### 🚫 Verdict forced to BLOCKING\n\n{note}\n"
+    return True
+
+
 def append_degraded_coverage_section(
     review_comment: str, failed_labels: list[tuple[str, str]]
 ) -> str:
