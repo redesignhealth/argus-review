@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-14
+
 ### Added
 
 - Reviewer bench configuration change guard (TECH-6282): PRs touching bench
@@ -16,14 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in category `argus-self-config` requiring explicit human sign-off. The guard
   evaluates against the full-PR diff scope across multi-round reviews to prevent
   bypasses on subsequent commits.
-
-### Fixed
-
-- Regenerated `tests/golden/review_response.schema.json` to match the
-  `argus-self-config` category description added in TECH-6282 — the
-  golden-snapshot test was left failing after that PR merged.
-
-## [0.2.3] - 2026-09-14
 
 ### Changed
 
@@ -50,6 +44,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fixed `bench.load_bench()`/`_check_settings()` requiring full credential validation (`GITHUB_TOKEN_RO`, `OPENAI_API_KEY`) just to resolve bench/platform routing config, which broke settings dependency-injection in tests and CI (regression from TECH-6281).
+- Regenerated `tests/golden/review_response.schema.json` to match the
+  `argus-self-config` category description added in TECH-6282 — the
+  golden-snapshot test was left failing after that PR merged.
 
 ## [0.2.2] - 2026-09-11
 
