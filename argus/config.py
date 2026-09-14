@@ -98,9 +98,9 @@ class Settings(BaseSettings):
         ARGUS_FRONTIER_MODEL: Override the model used by the planner,
             coverage check, and cross-cutting reviewer
             (``argus.llm.models.CLAUDE_FRONTIER`` / ``CLAUDE_OPUS``). Set via
-            ``--frontier-model``; same read pattern (and same
-            documentation-only Settings field) as ``ARGUS_SPECIALIST_MODEL``
-            above.
+            ``--frontier-model``; read directly from ``os.environ`` by
+            ``argus.llm.models`` at import time (module-level constant
+            resolution, not a per-request Settings lookup).
         LANGSMITH_API_KEY / LANGSMITH_PROJECT: Optional tracing.
         OPENAI_BASE_URL: Optional override for OpenAI API endpoint (e.g. for proxying).
             Note that OPENAI_API_KEY will be forwarded as a Bearer token to whatever
