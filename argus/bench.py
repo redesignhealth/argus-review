@@ -82,7 +82,6 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Final, Literal, get_args
 
-from argus.config import get_settings
 from argus.llm import models as model_aliases
 from argus.pipeline_models import SpecialistName
 from argus.prompts_runtime import known_packaged_prompts
@@ -199,7 +198,7 @@ def _load_toml_file(path: Path) -> dict[str, Any]:
     return _load_toml_bytes(path.read_bytes())
 
 
-def _overlay_layers(settings: Any) -> list[Path]:
+def _overlay_layers(settings_or_bench_file: Any = None) -> list[Path]:
     """Ordered overlay file paths, lowest to highest priority.
 
     Only existing files are included for the two standard locations
@@ -219,13 +218,19 @@ def _overlay_layers(settings: Any) -> list[Path]:
     if repo_local.is_file():
         layers.append(repo_local)
 
-    if settings.ARGUS_BENCH_FILE:
-        bench_file = Path(settings.ARGUS_BENCH_FILE)
-        if not bench_file.is_file():
-            raise ValueError(
-                f"ARGUS_BENCH_FILE={settings.ARGUS_BENCH_FILE!r} does not exist or is not a file"
-            )
-        layers.append(bench_file)
+    bench_file: str | None = None
+    if isinstance(settings_or_bench_file, (str, Path)):
+        bench_file = str(settings_or_bench_file)
+    elif settings_or_bench_file is not None and hasattr(settings_or_bench_file, "ARGUS_BENCH_FILE"):
+        val = getattr(settings_or_bench_file, "ARGUS_BENCH_FILE", None)
+        if isinstance(val, (str, Path)) and str(val):
+            bench_file = str(val)
+
+    if bench_file:
+        bench_path = Path(bench_file)
+        if not bench_path.is_file():
+            raise ValueError(f"ARGUS_BENCH_FILE={bench_file!r} does not exist or is not a file")
+        layers.append(bench_path)
 
     return layers
 
@@ -262,18 +267,74 @@ _WARNED_ROLES: set[str] = set()
 _WARNED_ROLES_LOCK: threading.Lock = threading.Lock()
 
 
-@lru_cache(maxsize=1)
-def load_bench() -> dict[str, Any]:
-    """Load, merge, and validate the effective bench config.
+def _extract_bench_settings(settings: Any) -> tuple[bool, str | None, str | None]:
+    """Extract (no_bench_overrides, bench_file, specialist_model) from a settings-like object."""
+    no_overrides_raw = getattr(settings, "ARGUS_NO_BENCH_OVERRIDES", False)
+    if isinstance(no_overrides_raw, bool):
+        no_overrides = no_overrides_raw
+    elif isinstance(no_overrides_raw, (int, float)):
+        no_overrides = bool(no_overrides_raw)
+    elif isinstance(no_overrides_raw, str):
+        no_overrides = no_overrides_raw.lower() in ("1", "true", "yes", "t", "on")
+    else:
+        no_overrides = False
 
-    Cached for the life of the process; call :func:`clear_cache` to force
-    a reload (e.g. in tests, or after mutating ``os.environ``).
-    """
-    settings = get_settings()
+    bench_file_raw = getattr(settings, "ARGUS_BENCH_FILE", None)
+    if isinstance(bench_file_raw, (str, Path)) and str(bench_file_raw):
+        bench_file: str | None = str(bench_file_raw)
+    else:
+        bench_file = None
+
+    specialist_model_raw = getattr(settings, "ARGUS_SPECIALIST_MODEL", None)
+    if isinstance(specialist_model_raw, str) and specialist_model_raw:
+        specialist_model: str | None = specialist_model_raw
+    else:
+        specialist_model = None
+
+    return (no_overrides, bench_file, specialist_model)
+
+
+def _resolve_bench_settings(settings: Any = None) -> tuple[bool, str | None, str | None]:
+    """Resolve bench-routing settings from an injected object, get_settings(), or environment."""
+    if settings is not None:
+        return _extract_bench_settings(settings)
+    try:
+        from argus.config import get_settings
+
+        return _extract_bench_settings(get_settings())
+    except Exception:
+        # If get_settings() fails (e.g. missing GITHUB_TOKEN_RO or OPENAI_API_KEY
+        # in the environment), fall back to reading directly from the environment
+        # and .env so bench loading never requires unrelated credentials to succeed.
+        try:
+            from argus.dotenv_utils import load_dotenv_early
+
+            load_dotenv_early(override=False)
+        except Exception:
+            pass
+
+        no_overrides = os.environ.get("ARGUS_NO_BENCH_OVERRIDES", "").lower() in (
+            "1",
+            "true",
+            "yes",
+            "t",
+            "on",
+        )
+        bench_file = os.environ.get("ARGUS_BENCH_FILE") or None
+        specialist_model = os.environ.get("ARGUS_SPECIALIST_MODEL") or None
+        return (no_overrides, bench_file, specialist_model)
+
+
+@lru_cache(maxsize=16)
+def _load_bench_cached(
+    no_bench_overrides: bool,
+    bench_file: str | None,
+    specialist_model: str | None,
+) -> dict[str, Any]:
     merged = _load_packaged_default()
 
-    if not settings.ARGUS_NO_BENCH_OVERRIDES:
-        for layer_path in _overlay_layers(settings):
+    if not no_bench_overrides:
+        for layer_path in _overlay_layers(bench_file):
             overlay = _load_toml_file(layer_path)
             roles = overlay.get("roles", {})
             if isinstance(roles, dict):
@@ -286,7 +347,7 @@ def load_bench() -> dict[str, Any]:
     # overrides the system reviewer and specialist reviewers. When set,
     # force bulk_reviewer to claude-sdk with claude-default so the override
     # controls the bulk reviewer roles as documented.
-    if settings.ARGUS_SPECIALIST_MODEL:
+    if specialist_model:
         merged["bulk_reviewer"]["platform"] = "claude-sdk"
         merged["bulk_reviewer"]["model"] = "claude-default"
 
@@ -294,11 +355,25 @@ def load_bench() -> dict[str, Any]:
     return merged
 
 
+def load_bench(settings: Any = None) -> dict[str, Any]:
+    """Load, merge, and validate the effective bench config.
+
+    Cached for the life of the process; call :func:`clear_cache` to force
+    a reload (e.g. in tests, or after mutating ``os.environ``).
+    """
+    no_overrides, bench_file, specialist_model = _resolve_bench_settings(settings)
+    return _load_bench_cached(no_overrides, bench_file, specialist_model)
+
+
 def clear_cache() -> None:
     """Clear the cached bench config, forcing the next call to reload."""
     with _WARNED_ROLES_LOCK:
-        load_bench.cache_clear()
+        _load_bench_cached.cache_clear()
         _WARNED_ROLES.clear()
+
+
+load_bench.cache_clear = _load_bench_cached.cache_clear  # type: ignore[attr-defined]
+load_bench.cache_info = _load_bench_cached.cache_info  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +522,7 @@ def _warn_if_not_wired(role: str) -> None:
         )
 
 
-def resolve(role: str) -> BenchEntry:
+def resolve(role: str, settings: Any = None) -> BenchEntry:
     """Resolve ``role`` to its effective :class:`BenchEntry`.
 
     Bulk-bucket roles (see ``BULK_ROLE_PROMPTS``) route through
@@ -461,7 +536,7 @@ def resolve(role: str) -> BenchEntry:
     docstring section for why most roles currently have no runner
     consulting them.
     """
-    raw = load_bench()
+    raw = load_bench(settings=settings)
 
     if role in BULK_ROLE_PROMPTS:
         bulk = raw["bulk_reviewer"]

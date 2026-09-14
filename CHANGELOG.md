@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made CLI preflight credential validation conditional on effective bench requirements:
   `GOOGLE_API_KEY` is now required when the resolved bench config includes `gemini`.
 
+### Fixed
+
+- Fixed `bench.load_bench()`/`_check_settings()` requiring full credential validation (`GITHUB_TOKEN_RO`, `OPENAI_API_KEY`) just to resolve bench/platform routing config, which broke settings dependency-injection in tests and CI (regression from TECH-6281).
+
 ## [0.2.2] - 2026-09-11
 
 ### Added

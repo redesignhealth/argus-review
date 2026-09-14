@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from collections.abc import Generator
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1473,3 +1473,48 @@ class TestClaudeRolesNeverTouchGeminiRunner:
                 diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
                 settings=mock_settings,
             )
+
+
+class TestBenchCredentialIndependenceAndDependencyInjection:
+    def test_load_bench_succeeds_without_credentials_in_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Bench configuration loading never requires GITHUB_TOKEN_RO, OPENAI_API_KEY, etc."""
+        monkeypatch.chdir(tmp_path)
+        for var in ("GITHUB_TOKEN_RO", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        clear_settings_cache()
+        bench.clear_cache()
+
+        raw = bench.load_bench()
+        assert "bulk_reviewer" in raw
+        assert raw["bulk_reviewer"]["platform"] == "gemini"
+
+    def test_load_bench_respects_injected_settings_overrides(self, tmp_path: Path) -> None:
+        """An injected settings mock with overrides is respected by load_bench."""
+        bench.clear_cache()
+        mock_settings = MagicMock()
+        mock_settings.ARGUS_NO_BENCH_OVERRIDES = True
+        mock_settings.ARGUS_SPECIALIST_MODEL = "claude-haiku-4-5"
+        mock_settings.ARGUS_BENCH_FILE = None
+
+        raw = bench.load_bench(settings=mock_settings)
+        assert raw["bulk_reviewer"]["platform"] == "claude-sdk"
+        assert raw["bulk_reviewer"]["model"] == "claude-default"
+
+    def test_load_bench_ignores_mock_attributes_on_empty_mock(self) -> None:
+        """A plain MagicMock with no bench attributes defaults cleanly to packaged defaults."""
+        bench.clear_cache()
+        mock_settings = MagicMock()
+        raw = bench.load_bench(settings=mock_settings)
+        assert raw["bulk_reviewer"]["platform"] == "gemini"
+        assert raw["bulk_reviewer"]["model"] == "gemini-mini"
+
+    def test_resolve_accepts_and_respects_injected_settings(self) -> None:
+        """bench.resolve(role, settings=...) forwards injected settings to load_bench."""
+        bench.clear_cache()
+        mock_settings = MagicMock()
+        mock_settings.ARGUS_SPECIALIST_MODEL = "claude-haiku-4-5"
+        entry = bench.resolve("system-generalist", settings=mock_settings)
+        assert entry.platform == "claude-sdk"
+        assert entry.model == "claude-default"
