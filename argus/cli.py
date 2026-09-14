@@ -47,8 +47,9 @@ Environment variables (HTTP-mode opt-in):
 
 No storage env vars are required: with neither ``ARGUS_DB_URL`` nor the
 HTTP-shim URLs set, round history and checkpoints default to local SQLite.
-Required secrets are only one of ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
-GITHUB_TOKEN_RO, and OPENAI_API_KEY. ANTHROPIC_AUTH_TOKEN is the standard
+Required secrets are one of ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
+GITHUB_TOKEN_RO, OPENAI_API_KEY, and (by default, since bulk reviewers default
+to Gemini) GOOGLE_API_KEY. ANTHROPIC_AUTH_TOKEN is the standard
 mechanism for routing through a corporate LLM gateway/proxy instead of a
 real Anthropic API key (sent as ``Authorization: Bearer`` rather than
 ``x-api-key``) — the same convention the Anthropic SDK and Claude Code
@@ -201,8 +202,9 @@ def _check_settings(settings: "Settings") -> None:
     bench.clear_cache()
     try:
         raw_bench = bench.load_bench()
-    except Exception:
-        raw_bench = {}
+    except Exception as exc:
+        logger.error("Invalid bench configuration: %s", exc)
+        sys.exit(1)
 
     platforms_needed: set[str] = set()
     bulk = raw_bench.get("bulk_reviewer")

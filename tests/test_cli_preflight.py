@@ -2,9 +2,10 @@
 
 ``argus review`` must fail fast — before any network call — when ``git`` or
 the ``claude`` CLI are missing from PATH, or when required settings are
-absent. This file covers the PATH checks for git/claude and the
-required-secrets contract of ``_check_settings`` (three API keys only —
-no storage env vars required, given the local SQLite default).
+absent. This file covers the PATH checks for git/claude, the
+required-secrets contract of ``_check_settings`` (four API keys by default —
+Anthropic, GitHub, OpenAI, and Google; no storage env vars required, given
+the local SQLite default), and bench configuration validation.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ _STORAGE_ENV_VARS = (
 def _settings_from_env(monkeypatch: pytest.MonkeyPatch, **extra: str) -> Settings:
     """Build a real Settings object from a controlled environment.
 
-    The conftest autouse fixture sets the three required API keys; this
+    The conftest autouse fixture sets the required API keys; this
     scrubs every storage-related var, applies ``extra``, and reloads.
     """
     for var in _STORAGE_ENV_VARS:
@@ -120,6 +121,30 @@ class TestCheckSettingsRequiredSecrets:
         monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
         settings = _settings_from_env(monkeypatch, GOOGLE_API_KEY="")
         argus_cli._check_settings(settings)  # must not raise
+
+    def test_invalid_bench_config_fails_preflight(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An invalid bench config (e.g. mismatched platform/model) must fail
+        fast in preflight with exit 1 and a clear error message, rather than
+        failing later mid-review."""
+        explicit = tmp_path / "invalid-bench.toml"
+        explicit.write_text('[bulk_reviewer]\nplatform = "gemini"\nmodel = "claude-mini"\n')
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+        settings = _settings_from_env(monkeypatch)
+        with caplog.at_level(logging.ERROR, logger="argus_review_local"):
+            with pytest.raises(SystemExit) as exc:
+                argus_cli._check_settings(settings)
+        assert exc.value.code == 1
+        assert any("Invalid bench configuration" in rec.message for rec in caplog.records)
+        assert any(
+            "model 'claude-mini' is not compatible with platform 'gemini'" in rec.message
+            for rec in caplog.records
+        )
 
 
 class TestCheckPrerequisites:
