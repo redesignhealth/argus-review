@@ -56,30 +56,30 @@ def _write_toml(path: Path, content: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Packaged default: behavior-preservation regression guard
+# Packaged default resolutions
 # ---------------------------------------------------------------------------
 
 
-class TestPackagedDefaultIsBehaviorPreserving:
-    """The whole point of the bench: shipping it must change nothing.
-
-    Every entry in argus/bench_default.toml must resolve to platform
-    "claude-sdk" and the exact concrete model the pre-bench code path used
-    (imported directly here as `_SYSTEM_REVIEWER_MODEL`/
-    `_CROSS_CUTTING_MODEL` from argus.runners -- the same constants the
-    runner functions this task didn't touch still reference directly).
+class TestPackagedDefaultResolutions:
+    """The packaged default bench (argus/bench_default.toml):
+    - [bulk_reviewer] defaults to gemini (gemini-mini, auto caching)
+    - [roles.*] (cross-cutting, blocking-validator, feedback-verifier) default to claude-sdk
     """
 
-    def test_system_generalist_matches_pre_bench_model(self) -> None:
+    def test_system_generalist_matches_packaged_default(self) -> None:
         entry = bench.resolve("system-generalist")
-        assert entry.platform == "claude-sdk"
-        assert resolve_alias(entry.model) == runners_module._SYSTEM_REVIEWER_MODEL
+        assert entry.platform == "gemini"
+        assert entry.model == "gemini-mini"
+        assert entry.caching == "auto"
+        assert resolve_alias(entry.model) == "gemini-3.8-flash"
         assert entry.prompt_name == "pr-review-subagent"
 
-    def test_tests_and_docs_matches_pre_bench_model(self) -> None:
+    def test_tests_and_docs_matches_packaged_default(self) -> None:
         entry = bench.resolve("tests-and-docs")
-        assert entry.platform == "claude-sdk"
-        assert resolve_alias(entry.model) == runners_module._SYSTEM_REVIEWER_MODEL
+        assert entry.platform == "gemini"
+        assert entry.model == "gemini-mini"
+        assert entry.caching == "auto"
+        assert resolve_alias(entry.model) == "gemini-3.8-flash"
         assert entry.prompt_name == "pr-review-tests-and-docs"
 
     @pytest.mark.parametrize(
@@ -96,25 +96,27 @@ class TestPackagedDefaultIsBehaviorPreserving:
             "observability",
         ],
     )
-    def test_every_specialist_matches_pre_bench_model(self, specialist: str) -> None:
+    def test_every_specialist_matches_packaged_default(self, specialist: str) -> None:
         entry = bench.resolve(f"specialist-{specialist}")
-        assert entry.platform == "claude-sdk"
-        assert resolve_alias(entry.model) == runners_module._SYSTEM_REVIEWER_MODEL
+        assert entry.platform == "gemini"
+        assert entry.model == "gemini-mini"
+        assert entry.caching == "auto"
+        assert resolve_alias(entry.model) == "gemini-3.8-flash"
         assert entry.prompt_name == f"pr-review-specialist-{specialist}"
 
-    def test_cross_cutting_matches_pre_bench_model(self) -> None:
+    def test_cross_cutting_matches_packaged_default(self) -> None:
         entry = bench.resolve("cross-cutting")
         assert entry.platform == "claude-sdk"
         assert resolve_alias(entry.model) == runners_module._CROSS_CUTTING_MODEL
         assert entry.prompt_name == "pr-review-cross-cutting"
 
-    def test_blocking_validator_matches_pre_bench_model(self) -> None:
+    def test_blocking_validator_matches_packaged_default(self) -> None:
         entry = bench.resolve("blocking-validator")
         assert entry.platform == "claude-sdk"
         assert resolve_alias(entry.model) == runners_module._SYSTEM_REVIEWER_MODEL
         assert entry.prompt_name == "pr-review-blocking-validator"
 
-    def test_feedback_verifier_matches_pre_bench_model(self) -> None:
+    def test_feedback_verifier_matches_packaged_default(self) -> None:
         entry = bench.resolve("feedback-verifier")
         assert entry.platform == "claude-sdk"
         assert resolve_alias(entry.model) == runners_module._SYSTEM_REVIEWER_MODEL
@@ -129,7 +131,8 @@ class TestPackagedDefaultIsBehaviorPreserving:
 class TestOverrideChain:
     def test_no_overrides_uses_packaged_default(self) -> None:
         entry = bench.resolve("system-generalist")
-        assert entry.model == "claude-default"
+        assert entry.model == "gemini-mini"
+        assert entry.platform == "gemini"
 
     def test_user_global_sparse_overlay_overrides_only_specified_key(self, tmp_path: Path) -> None:
         user_global = Path(os.environ["XDG_CONFIG_HOME"]) / "argus" / "bench.toml"
@@ -138,7 +141,7 @@ class TestOverrideChain:
 
         entry = bench.resolve("system-generalist")
         assert entry.model == "claude-mini"
-        assert entry.platform == "claude-sdk"  # untouched key still falls through
+        assert entry.platform == "gemini"  # untouched key still falls through
         assert entry.caching == "auto"  # untouched key still falls through
 
     def test_repo_local_overlay_wins_over_user_global(self) -> None:
@@ -189,7 +192,8 @@ class TestOverrideChain:
         # packaged default -- proves this is a sparse merge, not a full
         # document replacement.
         system_generalist = bench.resolve("system-generalist")
-        assert system_generalist.model == "claude-default"
+        assert system_generalist.model == "gemini-mini"
+        assert system_generalist.platform == "gemini"
 
     def test_argus_bench_file_missing_path_raises(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -218,7 +222,8 @@ class TestOverrideChain:
         bench.clear_cache()
 
         entry = bench.resolve("system-generalist")
-        assert entry.model == "claude-default"  # packaged default, untouched
+        assert entry.model == "gemini-mini"  # packaged default, untouched
+        assert entry.platform == "gemini"
 
     def test_load_bench_is_cached_until_clear_cache(self, monkeypatch: pytest.MonkeyPatch) -> None:
         first = bench.load_bench()
@@ -696,19 +701,86 @@ class TestPlatformRunners:
 
 
 # ---------------------------------------------------------------------------
-# run_system_reviewer: end-to-end wiring through bench (zero behavior change)
+# run_system_reviewer: end-to-end wiring through bench
 # ---------------------------------------------------------------------------
 
 
 class TestRunSystemReviewerBenchWiring:
     @pytest.mark.asyncio
-    async def test_run_system_reviewer_routes_through_bench_to_same_model(self) -> None:
-        """With the packaged default bench, run_system_reviewer must still
-        call _run_session_isolated with exactly _SYSTEM_REVIEWER_MODEL --
-        proving the bench branch point is a behavior-preserving no-op.
+    async def test_run_system_reviewer_routes_through_bench_to_gemini(self) -> None:
+        """With the packaged default bench, run_system_reviewer routes through
+        bench to run_session_gemini with platform="gemini" and model="gemini-mini".
         """
-        from argus.pipeline_models import SystemGroup
+        from datetime import datetime, timezone
         from unittest.mock import MagicMock
+
+        from argus.pipeline_models import SystemGroup
+
+        group = SystemGroup(
+            name="backend",
+            files=["src/app.py"],
+            conventions="",
+            review_focus="",
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock(
+            result_text='{"system_group": "backend", "findings": [], "files_explored": []}',
+            failure_reason=None,
+            timed_out=False,
+            cost_usd=0.0,
+            tool_call_count=0,
+            tool_names=[],
+            context7_call_count=0,
+            model="gemini-3.8-flash",
+            result_text_length=0,
+            duration_seconds=1.0,
+            started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            finished_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.gemini_runner.run_session_gemini",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ) as mock_gemini,
+        ):
+            await runners_module.run_system_reviewer(
+                group=group,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+        mock_gemini.assert_called_once()
+        assert mock_gemini.call_args.kwargs["entry"].platform == "gemini"
+        assert mock_gemini.call_args.kwargs["entry"].model == "gemini-mini"
+
+    @pytest.mark.asyncio
+    async def test_run_system_reviewer_with_claude_override_routes_to_claude(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When bench is overridden to claude-sdk, run_system_reviewer routes
+        to _run_session_isolated.
+        """
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import SystemGroup
+
+        explicit = tmp_path / "explicit-bench.toml"
+        _write_toml(
+            explicit,
+            '[bulk_reviewer]\nplatform = "claude-sdk"\nmodel = "claude-default"\n',
+        )
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        clear_settings_cache()
+        bench.clear_cache()
 
         group = SystemGroup(
             name="backend",
@@ -729,8 +801,6 @@ class TestRunSystemReviewerBenchWiring:
         fake_session.model = runners_module._SYSTEM_REVIEWER_MODEL
         fake_session.result_text_length = 0
         fake_session.duration_seconds = 1.0
-        from datetime import datetime, timezone
-
         fake_session.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
         fake_session.finished_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -771,14 +841,14 @@ class TestRunSystemReviewerBenchWiring:
         mock_settings = MagicMock(CONTEXT7_API_KEY=None)
 
         fake_session = MagicMock(
-            result_text="",
+            result_text='{"system_group": "backend::security", "findings": [], "files_explored": []}',
             failure_reason=None,
             timed_out=False,
             cost_usd=0.0,
             tool_call_count=0,
             tool_names=[],
             context7_call_count=0,
-            model=runners_module._SYSTEM_REVIEWER_MODEL,
+            model="gemini-3.8-flash",
             result_text_length=0,
             duration_seconds=1.0,
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -792,10 +862,10 @@ class TestRunSystemReviewerBenchWiring:
                 return_value="base prompt",
             ),
             patch(
-                "argus.runners._run_session_isolated",
+                "argus.gemini_runner.run_session_gemini",
                 new_callable=AsyncMock,
                 return_value=fake_session,
-            ) as mock_isolated,
+            ) as mock_gemini,
         ):
             await runners_module.run_specialist_reviewer(
                 specialist="security",
@@ -804,9 +874,9 @@ class TestRunSystemReviewerBenchWiring:
                 settings=mock_settings,
             )
 
-        mock_isolated.assert_called_once()
-        assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
-        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
+        mock_gemini.assert_called_once()
+        assert mock_gemini.call_args.kwargs["entry"].platform == "gemini"
+        assert mock_gemini.call_args.kwargs["entry"].model == "gemini-mini"
 
     @pytest.mark.asyncio
     async def test_run_cross_cutting_reviewer_routes_through_bench_to_same_model(self) -> None:
@@ -876,14 +946,14 @@ class TestRunSystemReviewerBenchWiring:
         mock_settings = MagicMock(CONTEXT7_API_KEY=None)
 
         fake_session = MagicMock(
-            result_text="",
+            result_text='{"system_group": "tests-and-docs", "findings": [], "files_explored": []}',
             failure_reason=None,
             timed_out=False,
             cost_usd=0.0,
             tool_call_count=0,
             tool_names=[],
             context7_call_count=0,
-            model=runners_module._SYSTEM_REVIEWER_MODEL,
+            model="gemini-3.8-flash",
             result_text_length=0,
             duration_seconds=1.0,
             started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
@@ -897,10 +967,10 @@ class TestRunSystemReviewerBenchWiring:
                 return_value="base prompt",
             ),
             patch(
-                "argus.runners._run_session_isolated",
+                "argus.gemini_runner.run_session_gemini",
                 new_callable=AsyncMock,
                 return_value=fake_session,
-            ) as mock_isolated,
+            ) as mock_gemini,
         ):
             await runners_module.run_tests_and_docs_reviewer(
                 plan=plan,
@@ -908,9 +978,9 @@ class TestRunSystemReviewerBenchWiring:
                 settings=mock_settings,
             )
 
-        mock_isolated.assert_called_once()
-        assert mock_isolated.call_args.kwargs["model"] == runners_module._SYSTEM_REVIEWER_MODEL
-        assert mock_isolated.call_args.kwargs["is_system_reviewer_role"] is True
+        mock_gemini.assert_called_once()
+        assert mock_gemini.call_args.kwargs["entry"].platform == "gemini"
+        assert mock_gemini.call_args.kwargs["entry"].model == "gemini-mini"
 
     @pytest.mark.asyncio
     async def test_run_blocking_validator_routes_through_bench(self) -> None:
@@ -1009,28 +1079,88 @@ class TestRunSystemReviewerBenchWiring:
 
 
 # ---------------------------------------------------------------------------
-# Gemini is opt-in only: the packaged default must never reach it
+# Claude-configured roles: must never reach Gemini runner
 # ---------------------------------------------------------------------------
 
 
-class TestPackagedDefaultNeverTouchesGeminiRunner:
-    """The whole point of shipping a real Gemini runner as an ADDITIONAL
-    platform, not a new default: a caller who never opts a role into
-    ``platform = "gemini"`` must never have ``argus.gemini_runner`` invoked,
-    even indirectly. Proven here by making ``run_session_gemini`` itself
-    explode if reached, then running the packaged-default bench path and
-    confirming it completes normally anyway.
+class TestClaudeRolesNeverTouchGeminiRunner:
+    """Roles configured with platform = "claude-sdk" (such as the default
+    cross-cutting, blocking-validator, and feedback-verifier roles, or a bulk
+    reviewer overridden to claude-sdk) must never invoke argus.gemini_runner.
+    Proven here by making run_session_gemini itself explode if reached, then
+    running the bench path and confirming it completes normally anyway.
     """
 
     @pytest.mark.asyncio
-    async def test_default_bench_run_never_invokes_gemini_runner(self) -> None:
+    async def test_cross_cutting_default_bench_never_invokes_gemini_runner(self) -> None:
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock
+
+        from argus.pipeline_models import FileEntry, ReviewPlan
+
+        # Sanity precondition: cross-cutting really defaults to claude-sdk.
+        assert bench.resolve("cross-cutting").platform == "claude-sdk"
+
+        plan = ReviewPlan(
+            system_groups=[],
+            file_manifest=[FileEntry(path="src/app.py", change_type="modified")],
+            cross_cutting_concerns=[],
+        )
+        mock_settings = MagicMock(CONTEXT7_API_KEY=None)
+
+        fake_session = MagicMock()
+        fake_session.result_text = ""
+        fake_session.failure_reason = None
+        fake_session.timed_out = False
+        fake_session.cost_usd = 0.0
+        fake_session.tool_call_count = 0
+        fake_session.tool_names = []
+        fake_session.context7_call_count = 0
+        fake_session.model = runners_module._CROSS_CUTTING_MODEL
+        fake_session.duration_seconds = 1.0
+        fake_session.started_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        fake_session.finished_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("run_session_gemini must never be invoked for cross-cutting")
+
+        with (
+            patch(
+                "argus.runners.fetch_prompt",
+                new_callable=AsyncMock,
+                return_value="base prompt",
+            ),
+            patch(
+                "argus.runners._run_session_isolated",
+                new_callable=AsyncMock,
+                return_value=fake_session,
+            ),
+            patch("argus.gemini_runner.run_session_gemini", side_effect=_boom),
+        ):
+            await runners_module.run_cross_cutting_reviewer(
+                plan=plan,
+                diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",
+                settings=mock_settings,
+            )
+
+    @pytest.mark.asyncio
+    async def test_claude_override_never_invokes_gemini_runner(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from datetime import datetime, timezone
         from unittest.mock import MagicMock
 
         from argus.pipeline_models import SystemGroup
 
-        # Sanity precondition: the packaged default really is claude-sdk,
-        # not gemini -- otherwise this test would prove nothing.
+        explicit = tmp_path / "explicit-bench.toml"
+        _write_toml(
+            explicit,
+            '[bulk_reviewer]\nplatform = "claude-sdk"\nmodel = "claude-default"\n',
+        )
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        clear_settings_cache()
+        bench.clear_cache()
+
         assert bench.resolve("system-generalist").platform == "claude-sdk"
 
         group = SystemGroup(
@@ -1056,7 +1186,7 @@ class TestPackagedDefaultNeverTouchesGeminiRunner:
 
         def _boom(*_args: object, **_kwargs: object) -> None:
             raise AssertionError(
-                "run_session_gemini must never be invoked by the packaged default bench"
+                "run_session_gemini must never be invoked when bulk_reviewer is overridden to claude-sdk"
             )
 
         with (
@@ -1072,8 +1202,6 @@ class TestPackagedDefaultNeverTouchesGeminiRunner:
             ),
             patch("argus.gemini_runner.run_session_gemini", side_effect=_boom),
         ):
-            # No AssertionError from _boom means the gemini runner was
-            # never reached.
             await runners_module.run_system_reviewer(
                 group=group,
                 diff_text="diff --git a/src/app.py b/src/app.py\n@@ -1 +1 @@\n-a\n+b\n",

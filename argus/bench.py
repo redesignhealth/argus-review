@@ -1,11 +1,10 @@
 """Bench configuration: which platform/model a leaf reviewer runs on.
 
 A "bench" is a lightweight, human-edited TOML config that decides which
-LLM *platform* (Claude Agent SDK is the packaged default; Gemini has a
-real runner too, see ``argus.gemini_runner``; OpenAI Responses has a
-real runner too, see ``argus.openai_runner``; both are opt-in only) and
-*model* each leaf reviewer in the review pipeline runs on. This is
-deliberately NOT a dynamic/adaptive routing system -- it is a static,
+LLM *platform* (Claude Agent SDK and Gemini have packaged defaults;
+OpenAI Responses has a real runner too, see ``argus.openai_runner``;
+opt-in) and *model* each leaf reviewer in the review pipeline runs on.
+This is deliberately NOT a dynamic/adaptive routing system -- it is a static,
 PR-reviewed config with a human-editable override chain, in the same
 spirit as ``argus.prompts_runtime``'s prompt override chain.
 
@@ -25,9 +24,10 @@ Two kinds of config unit, not a per-role table:
 Override chain (mirrors ``argus.prompts_runtime`` exactly, including its
 opt-out convention), lowest to highest priority:
 
-1. Packaged ``argus/bench_default.toml`` -- the base. Every entry resolves
-   to ``platform="claude-sdk"`` with today's actual models, so shipping
-   this file is a behavior-preserving no-op for a default install.
+1. Packaged ``argus/bench_default.toml`` -- the base. ``[bulk_reviewer]``
+   defaults to ``platform="gemini"`` (``model="gemini-mini"``,
+   ``caching="auto"``), while individual roles (``cross-cutting``,
+   ``blocking-validator``, ``feedback-verifier``) default to ``claude-sdk``.
 2. ``~/.config/argus/bench.toml`` (respecting ``XDG_CONFIG_HOME``) -- a
    user-global sparse overlay: only the keys it specifies are overridden;
    everything else falls through to the layer below.
@@ -529,9 +529,9 @@ async def _gemini_runner(
 
     Imports ``argus.config`` and ``argus.gemini_runner`` lazily (function
     body, not module level) for the same reason ``_claude_sdk_runner``
-    imports lazily: avoids a needless import of the (optional,
-    ``google-genai``-dependent) Gemini runner module for every caller of
-    this module, even ones that never touch the ``gemini`` platform.
+    imports lazily: avoids a needless import of the Gemini runner module
+    for every caller of this module, even ones that never touch the
+    ``gemini`` platform.
     """
     from argus.config import get_settings
     from argus.gemini_runner import run_session_gemini

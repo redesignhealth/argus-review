@@ -2,9 +2,11 @@
 #
 # See argus/bench.py's module docstring for the full override chain and
 # the bulk_reviewer vs. roles.<name> distinction. This file is the base
-# of that chain -- every entry below resolves to platform="claude-sdk"
-# with the exact models the pipeline used before the bench existed, so
-# shipping this file is a behavior-preserving no-op for a default install.
+# of that chain: [bulk_reviewer] defaults to platform="gemini"
+# (model="gemini-mini", caching="auto") for cost reasons across
+# generalist, specialist, and tests-and-docs reviewers, while individual
+# roles ([roles.cross-cutting], [roles.blocking-validator], and
+# [roles.feedback-verifier]) remain on platform="claude-sdk".
 #
 # To customize: create ./.argus/bench.toml or ~/.config/argus/bench.toml
 # with ONLY the keys you want to change (sparse overlay -- you never need
@@ -22,8 +24,8 @@
 # Applies as one unit to run_system_reviewer (per system group, including
 # gap-fill reviewers), every named specialist, and the tests-and-docs
 # reviewer. Each of those still resolves its own existing prompt file.
-platform = "claude-sdk"
-model    = "claude-default"
+platform = "gemini"
+model    = "gemini-mini"
 caching  = "auto"
 
 # The three [roles.*] tables below configure independent roles:

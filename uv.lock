@@ -161,6 +161,7 @@ source = { editable = "." }
 dependencies = [
     { name = "asyncpg" },
     { name = "claude-agent-sdk" },
+    { name = "google-genai" },
     { name = "httpx" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
@@ -189,9 +190,6 @@ dev = [
     { name = "types-pyyaml" },
     { name = "types-regex" },
 ]
-gemini = [
-    { name = "google-genai" },
-]
 prechecks = [
     { name = "checkov" },
     { name = "pyyaml" },
@@ -204,7 +202,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "checkov", marker = "extra == 'prechecks'", specifier = ">=3.3.0,<4.0.0" },
     { name = "claude-agent-sdk", specifier = "==0.1.81" },
-    { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=1.55,<2" },
+    { name = "google-genai", specifier = ">=1.55,<2" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langchain", specifier = ">=1.2.10,<2" },
     { name = "langchain-anthropic", specifier = ">=1.2.0" },
@@ -232,7 +230,7 @@ requires-dist = [
     { name = "types-regex", marker = "extra == 'dev'", specifier = ">=2024.4.16" },
     { name = "zizmor", marker = "extra == 'prechecks'", specifier = ">=1.29.0,<2.0.0" },
 ]
-provides-extras = ["dev", "gemini", "prechecks"]
+provides-extras = ["dev", "prechecks"]
 
 [[package]]
 name = "ast-serialize"

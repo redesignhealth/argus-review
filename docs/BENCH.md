@@ -8,9 +8,10 @@ graph or prompt files.
 
 The bench is **not** dynamic or adaptive routing. Configuration is human-edited
 and should be committed and reviewed like any other operational configuration.
-The packaged default preserves the pre-bench Claude behavior. The bench applies
-to the leaf reviewers; planner, writer, coverage, and lite-review paths remain
-bench-independent.
+The packaged default routes `[bulk_reviewer]` to Gemini (`gemini-mini`) for
+cost optimization while keeping individual roles on Claude (`claude-sdk`).
+The bench applies to the leaf reviewers; planner, writer, coverage, and
+lite-review paths remain bench-independent.
 
 ## Configuration units
 
@@ -89,28 +90,31 @@ fail loudly with `ValueError`. There is no minimum-tier safety floor: the
 bench's defaults are expected to be PR-reviewed, and runtime overrides are
 treated as an intentional operator choice.
 
-## Example: use Gemini for generalists and specialists
+## Example: override bulk reviewers
 
 Because `[bulk_reviewer]` is the shared unit for the system-generalist,
-specialist, and tests-and-docs reviewers, one sparse overlay can move both the
-generalist and specialist reviewers to Gemini:
+specialist, and tests-and-docs reviewers (defaulting to Gemini with
+`model = "gemini-mini"`), one sparse overlay can customize them—for example,
+routing back to Claude:
 
 ```toml
 [bulk_reviewer]
-platform = "gemini"
-model    = "gemini-mini"
-caching  = "auto"
+platform = "claude-sdk"
+model    = "claude-default"
 ```
 
-At the time of writing, `gemini-mini` resolves through
-`argus/llm/models.py`'s `ALIAS_MAP` to `gemini-3.8-flash`. The alias is
-preferable to hard-coding the provider model ID: the alias can be updated by a
-reviewed Argus change while this configuration remains stable.
+Or switching to OpenAI:
+
+```toml
+[bulk_reviewer]
+platform = "openai-responses"
+model    = "gpt-mini"
+```
 
 Place this snippet in `.argus/bench.toml` for the current process working
 directory, in the XDG user config for a user-wide setting, or in an explicit
-file selected with `ARGUS_BENCH_FILE`. Ensure `GOOGLE_API_KEY` is available to
-the process before running the review.
+file selected with `ARGUS_BENCH_FILE`. Ensure the relevant platform credentials
+are available to the process before running the review.
 
 For an individual role, use a sparse `[roles.<name>]` overlay instead. Because
 the overlay layers are merged recursively onto `argus/bench_default.toml`, an
