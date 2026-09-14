@@ -201,7 +201,7 @@ def _check_settings(settings: "Settings") -> None:
 
     bench.clear_cache()
     try:
-        raw_bench = bench.load_bench()
+        raw_bench = bench.load_bench(settings=settings)
     except Exception as exc:
         logger.error("Invalid bench configuration: %s", exc)
         sys.exit(1)

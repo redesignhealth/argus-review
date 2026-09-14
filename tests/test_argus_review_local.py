@@ -8,6 +8,7 @@ helpers directly.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -110,6 +111,28 @@ def test_check_settings_does_not_require_db_url() -> None:
     settings.db_url = None
 
     # Should not raise.
+    argus_review_local._check_settings(settings)
+
+
+def test_check_settings_uses_injected_bench_settings_when_env_credentials_scrubbed(
+    tmp_path: Path,
+) -> None:
+    """_check_settings passes injected settings to load_bench, respecting bench overrides."""
+    bench_file = tmp_path / "custom-bench.toml"
+    bench_file.write_text('[bulk_reviewer]\nplatform = "claude-sdk"\nmodel = "claude-default"\n')
+
+    settings = MagicMock()
+    settings.ANTHROPIC_API_KEY = "key"
+    settings.ANTHROPIC_AUTH_TOKEN = None
+    settings.GITHUB_TOKEN_RO = "gh"
+    settings.OPENAI_API_KEY = "oa"
+    settings.GOOGLE_API_KEY = None  # Not set, but claude-sdk doesn't need Gemini
+    settings.ARGUS_BENCH_FILE = str(bench_file)
+    settings.ARGUS_NO_BENCH_OVERRIDES = False
+    settings.ARGUS_SPECIALIST_MODEL = None
+    settings.db_url = None
+
+    # Should not raise even though GOOGLE_API_KEY is None because bench overrides to claude-sdk
     argus_review_local._check_settings(settings)
 
 
