@@ -14,16 +14,17 @@ import pytest
 from argus.helpers import (
     _RISK_LEVEL_ORDER,
     append_degraded_coverage_section,
+    apply_bench_config_change_gate,
     apply_precheck_scanner_failure_gate,
     build_degraded_coverage_labels,
     collect_reviewed_files,
     extract_changed_files,
+    failed_reviewer_labels,
     filter_diff_for_files,
     parse_review_result,
     sanitize_file_paths,
-    failed_reviewer_labels,
 )
-from argus.models import ReviewResponse, RiskLevel, Verdict
+from argus.models import ReviewResponse, RiskLevel, Severity, Verdict
 from argus.pipeline_models import RawFinding, SystemReviewResult
 
 
@@ -466,6 +467,123 @@ class TestApplyPrecheckScannerFailureGate:
         assert any(
             "no '**Verdict**:'-shaped line found" in record.message for record in caplog.records
         )
+
+
+class TestApplyBenchConfigChangeGate:
+    """Unit tests for apply_bench_config_change_gate (TECH-6282)."""
+
+    def test_noop_when_empty_changes(self) -> None:
+        response = _response()
+        original_comment = response.review_comment
+        fired = apply_bench_config_change_gate(response, [])
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+        assert response.findings == []
+        assert response.review_comment == original_comment
+
+    def test_forces_blocking_on_bench_changes(self) -> None:
+        response = _response()
+        fired = apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+        assert response.risk_level == RiskLevel.HIGH
+        assert len(response.findings) == 1
+        finding = response.findings[0]
+        assert finding.severity == Severity.BLOCKING
+        assert finding.category == "argus-self-config"
+        assert finding.file == ".argus/bench.toml"
+        assert ".argus/bench.toml" in finding.description
+        assert "human sign-off" in finding.description
+        assert "escalate rather than dismiss" in (finding.suggestion or "")
+        assert "Verdict forced to BLOCKING" in response.review_comment
+        assert ".argus/bench.toml" in response.review_comment
+
+    def test_risk_level_monotonic_raised_from_low(self) -> None:
+        response = _response(risk_level=RiskLevel.LOW)
+        apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert response.risk_level == RiskLevel.HIGH
+
+    def test_risk_level_monotonic_raised_from_medium(self) -> None:
+        response = _response(risk_level=RiskLevel.MEDIUM)
+        apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert response.risk_level == RiskLevel.HIGH
+
+    def test_risk_level_already_high_stays_high(self) -> None:
+        response = _response(risk_level=RiskLevel.HIGH)
+        apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert response.risk_level == RiskLevel.HIGH
+
+    def test_risk_level_critical_never_downgraded(self) -> None:
+        response = _response(risk_level=RiskLevel.CRITICAL)
+        apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert response.risk_level == RiskLevel.CRITICAL
+
+    def test_rewrites_rendered_comment_verdict_line_when_verdict_changed(self) -> None:
+        response = _response(
+            review_comment="## Code Review\n\n**Verdict**: ✅ APPROVE | **Risk**: LOW\n\nLooks good."
+        )
+        apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert "**Verdict**: 🚫 BLOCKING | **Risk**: HIGH" in response.review_comment
+        assert "✅ APPROVE" not in response.review_comment
+        assert "Verdict forced to BLOCKING" in response.review_comment
+        assert "Looks good." in response.review_comment
+
+    def test_header_rewrite_skipped_when_already_blocking(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        response = _response(
+            verdict=Verdict.BLOCKING,
+            risk_level=RiskLevel.HIGH,
+            review_comment="## Code Review\n\nNo header here at all.",
+        )
+        with caplog.at_level(logging.WARNING):
+            apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert not any(
+            "no '**Verdict**:'-shaped line found" in record.message for record in caplog.records
+        )
+        assert "Verdict forced to BLOCKING" in response.review_comment
+
+    def test_warns_and_still_appends_note_when_comment_has_no_verdict_header_and_verdict_changed(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        response = _response(
+            verdict=Verdict.APPROVE,
+            review_comment="## Code Review\n\nNo header here at all.",
+        )
+        with caplog.at_level(logging.WARNING):
+            apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert "No header here at all." in response.review_comment
+        assert "Verdict forced to BLOCKING" in response.review_comment
+        assert any(
+            "no '**Verdict**:'-shaped line found" in record.message for record in caplog.records
+        )
+
+    def test_ordering_invariant_with_precheck_gate(self) -> None:
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        # Correct ordering: precheck gate runs FIRST, bench gate runs SECOND
+        response = _response()
+        graph_result = {"precheck_scanner_failures": ["zizmor"]}
+        precheck_fired, _ = apply_precheck_gate_and_surface_degraded_coverage(
+            response, findings_models=[], graph_result=graph_result, block_on_failure=True
+        )
+        assert precheck_fired is True
+        bench_fired = apply_bench_config_change_gate(response, [".argus/bench.toml"])
+        assert bench_fired is True
+        assert len(response.findings) == 2
+        categories = [f.category for f in response.findings]
+        assert categories == ["deterministic-precheck", "argus-self-config"]
+
+        # Inverted ordering bug: if bench gate ran first, precheck gate would be suppressed
+        # and create an unintended coverage-gap finding instead of a deterministic-precheck finding
+        bad_response = _response()
+        apply_bench_config_change_gate(bad_response, [".argus/bench.toml"])
+        bad_precheck_fired, _ = apply_precheck_gate_and_surface_degraded_coverage(
+            bad_response, findings_models=[], graph_result=graph_result, block_on_failure=True
+        )
+        assert bad_precheck_fired is False
+        bad_categories = [f.category for f in bad_response.findings]
+        assert "coverage-gap" in bad_categories
 
 
 class TestApplyPrecheckGateAndSurfaceDegradedCoverage:

@@ -35,11 +35,14 @@ import re
 import sqlite3
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict, cast, get_args
 
 from argus.helpers import (
+    apply_bench_config_change_gate,
     apply_precheck_gate_and_surface_degraded_coverage,
     compute_persisted_finding_counts,
+    extract_changed_files,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.pricing import get_token_cost
@@ -160,17 +163,20 @@ _SHA_RE = re.compile(r"[0-9a-fA-F]{7,40}")
 _HIGH_BLAST_RADIUS_PREFIXES = (
     "shared/lib/",
     "infrastructure/",
+    ".argus/bench.toml",
 )
 _HIGH_BLAST_RADIUS_SUBSTRINGS = (
     "/migrations/",
     "/alembic/",
     "/.github/workflows/",
+    "/.argus/bench.toml",
 )
 _HIGH_BLAST_RADIUS_SUFFIXES = (
     ".tf",
     ".tf.json",
     "/serverless.yml",
     "/Dockerfile",
+    "argus/bench_default.toml",
 )
 
 # Maximum number of parallel reviewer Sends dispatched by _edge_fan_out_reviewers
@@ -248,6 +254,9 @@ class ReviewState(TypedDict, total=False):
     precheck_scanner_failures: list[
         str
     ]  # scanner names that returned None this round (crashed/timed out) -- observability only
+    bench_config_changes: list[
+        str
+    ]  # bench config paths or routing lines modified this PR (TECH-6282)
 
 
 class ReviewerInput(TypedDict):
@@ -547,10 +556,10 @@ async def _fetch_pr_diff_and_description(
     request: ReviewRequest,
     prior_sha: str | None = None,
     pre_resolved_head_sha: str | None = None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str, str, str]:
     """Fetch PR diff and description from GitHub.
 
-    Returns (diff, description, head_sha). When ``prior_sha`` is provided
+    Returns (diff, description, head_sha, base_branch). When ``prior_sha`` is provided
     (round 2+), the diff is scoped to ``prior_sha..head_sha`` instead of the
     full PR diff.
     """
@@ -563,7 +572,7 @@ async def _fetch_pr_diff_and_description(
     settings = get_settings()
     gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
 
-    def _fetch() -> tuple[str, str, str]:
+    def _fetch() -> tuple[str, str, str, str]:
         if request.pr_number:
             pr_data = gh.get_pull_request(request.repo, request.pr_number)
             base_branch = pr_data["base_branch"]
@@ -657,16 +666,58 @@ async def _fetch_pr_diff_and_description(
             else:
                 # Round 1: full PR diff (base_branch...head_sha)
                 diff = gh.get_compare_diff(request.repo, base_branch, head_sha, max_lines=5000)
-            return diff, description, head_sha
+            return diff, description, head_sha, base_branch
         elif request.sha and request.base_ref:
             if not _SHA_RE.fullmatch(request.sha):
                 raise ValueError(f"Invalid sha (must be 7-40 hex chars): {request.sha!r}")
             if not re.fullmatch(r"[A-Za-z0-9._/\-]+", request.base_ref) or ".." in request.base_ref:
                 raise ValueError(f"Invalid base_ref: {request.base_ref!r}")
             diff = gh.get_compare_diff(request.repo, request.base_ref, request.sha, max_lines=5000)
-            return diff, "", request.sha
+            return diff, "", request.sha, request.base_ref
         else:
             raise ValueError("ReviewRequest must have pr_number or both sha and base_ref")
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def _fetch_full_pr_changed_files(
+    request: ReviewRequest,
+    base_branch: str,
+    head_sha: str,
+    round_diff: str,
+    prior_sha: str | None = None,
+) -> list[str]:
+    """Return the set of changed files across the full PR (base_branch...head_sha).
+
+    On round 1 (prior_sha is None), round_diff already represents base_branch...head_sha,
+    so extract_changed_files(round_diff) is used directly with zero extra API cost.
+
+    On round 2+ (prior_sha is not None), calls GitHub's compare JSON API
+    (/repos/{repo}/compare/{base_branch}...{head_sha}) to get the full-PR file list.
+    If the API call fails, logs a WARNING and falls back to extract_changed_files(round_diff).
+    """
+    if prior_sha is None:
+        return extract_changed_files(round_diff)
+
+    def _fetch() -> list[str]:
+        from argus.github_client import GitHubClient
+
+        settings = get_settings()
+        gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
+        base = base_branch
+        head = head_sha
+        try:
+            return gh.get_compare_files(request.repo, base, head)
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch full-PR changed files for %s (%s...%s): %s; "
+                "falling back to round-scoped diff changed files",
+                request.repo,
+                base,
+                head,
+                e,
+            )
+            return extract_changed_files(round_diff)
 
     return await asyncio.to_thread(_fetch)
 
@@ -1807,6 +1858,60 @@ def _is_image_tag_bump_only(diff: str) -> bool:
     return all(_IMAGE_TAG_BUMP_LINE_RE.match(line[1:]) for line in content_lines)
 
 
+_BENCH_CONFIG_BASENAMES = ("bench.toml",)  # under a .argus/ dir
+_BENCH_CONFIG_EXACT = ("argus/bench_default.toml",)
+_ROUTING_LINE_RE = re.compile(r"\b(?:ARGUS_BENCH_FILE|ARGUS_NO_BENCH_OVERRIDES)\b")
+
+
+def _is_bench_config_path(
+    path: str,
+    bench_file_setting: str | None = None,
+    worktree_path: str | None = None,
+) -> bool:
+    """Return True if path matches an Argus bench configuration file (TECH-6282).
+
+    Matches:
+    - Root or nested ``.argus/bench.toml`` (monorepo case)
+    - Packaged default ``argus/bench_default.toml`` (self-referential repo case)
+    - Any path matching an active ``ARGUS_BENCH_FILE`` setting (if set and pointing inside the repo)
+
+    Note: ~/.config/argus/bench.toml is intentionally out of scope because
+    it lives outside any repository working tree and cannot appear in a git diff.
+    """
+    if path == ".argus/bench.toml" or path.endswith("/.argus/bench.toml"):
+        return True
+    if path in _BENCH_CONFIG_EXACT or any(path.endswith("/" + p) for p in _BENCH_CONFIG_EXACT):
+        return True
+    if bench_file_setting:
+        try:
+            bench_path = Path(bench_file_setting)
+            if not bench_path.is_absolute():
+                norm = bench_path.as_posix().lstrip("./")
+                if path == norm or path.endswith("/" + norm):
+                    return True
+            elif worktree_path:
+                rel = bench_path.relative_to(Path(worktree_path)).as_posix()
+                if path == rel or path.endswith("/" + rel):
+                    return True
+        except Exception:
+            pass
+    return False
+
+
+def _detect_bench_config_routing_lines(diff: str) -> list[str]:
+    """Detect added diff lines that modify bench configuration routing env vars.
+
+    Scans for added lines (starting with '+', excluding diff file header '+++')
+    matching \\bARGUS_BENCH_FILE\\b or \\bARGUS_NO_BENCH_OVERRIDES\\b.
+    """
+    matches: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("+") and not line.startswith("+++"):
+            if _ROUTING_LINE_RE.search(line):
+                matches.append(line[1:].strip())
+    return matches
+
+
 def _is_high_blast_radius(diff: str) -> str | None:
     r"""Return the first changed path that matches a high-blast-radius pattern, or None.
 
@@ -1819,6 +1924,8 @@ def _is_high_blast_radius(diff: str) -> str | None:
     )
     for a_path, b_path in path_pairs:
         for path in (a_path, b_path):
+            if _is_bench_config_path(path):
+                return path
             if path.startswith(_HIGH_BLAST_RADIUS_PREFIXES):
                 return path
             if any(sub in path for sub in _HIGH_BLAST_RADIUS_SUBSTRINGS):
@@ -1839,6 +1946,12 @@ def _edge_preflight_decision(state: ReviewState) -> str:
     2. Unresolved/regressed prior BLOCKINGs → always full.
     Both gates are deterministic dict/regex lookups — no LLM call.
     """
+    if state.get("bench_config_changes"):
+        logger.info(
+            "Preflight override: bench configuration change detected — routing to full review"
+        )
+        return "plan"
+
     # Gate 1: deterministic blast-radius floor
     # Exceptions (blast-radius gate is skipped when any hold):
     # A. CI-generated image-tag bumps touch prod tfvars but are safe —
@@ -2023,7 +2136,7 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
 
     pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
 
-    diff, description, head_sha = await _fetch_pr_diff_and_description(
+    diff, description, head_sha, base_branch = await _fetch_pr_diff_and_description(
         req, prior_sha=prior_sha, pre_resolved_head_sha=pre_resolved_head_sha
     )
 
@@ -2040,10 +2153,36 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         diff_lines,
     )
 
+    # Bench config changes detection (TECH-6282)
+    # Evaluate against the full-PR diff scope so round-2+ rescoped diffs cannot
+    # bypass the guard by pushing another commit.
+    worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
+    settings = get_settings()
+
+    full_changed_files = await _fetch_full_pr_changed_files(
+        req, base_branch, head_sha, diff, prior_sha=prior_sha
+    )
+
+    bench_config_changes: list[str] = []
+    for path in full_changed_files:
+        if _is_bench_config_path(
+            path,
+            bench_file_setting=settings.ARGUS_BENCH_FILE,
+            worktree_path=worktree_path,
+        ):
+            bench_config_changes.append(path)
+
+    routing_lines = _detect_bench_config_routing_lines(diff)
+    for line in routing_lines:
+        bench_config_changes.append(f"added line modifying bench routing: {line}")
+
+    bench_config_changes = sorted(set(bench_config_changes))
+
     result: dict[str, Any] = {
         "diff": diff,
         "description": description,
         "head_sha": head_sha,
+        "bench_config_changes": bench_config_changes,
     }
 
     if prior:
@@ -3222,6 +3361,19 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
             "reported 0 findings: %s",
             len(failed_labels),
             ", ".join(f"{label} ({reason})" for label, reason in failed_labels),
+        )
+
+    # Bench config change gate (TECH-6282): forced BLOCKING if bench config was touched.
+    # Must run AFTER apply_precheck_gate_and_surface_degraded_coverage so precheck failure
+    # accounting is not suppressed, and BEFORE compute_persisted_finding_counts so the
+    # forced BLOCKING finding is included in persistence counts.
+    bench_config_changes = result.get("bench_config_changes", [])
+    if apply_bench_config_change_gate(response, bench_config_changes):
+        logger.warning(
+            "Bench config change guard: forced verdict to BLOCKING (risk_level=%s) "
+            "because PR touches bench configuration/routing: %s",
+            response.risk_level.value,
+            ", ".join(bench_config_changes),
         )
 
     # Use head_sha from graph state (populated for both PR and SHA mode)

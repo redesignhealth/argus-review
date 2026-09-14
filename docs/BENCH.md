@@ -53,6 +53,21 @@ Set `ARGUS_NO_BENCH_OVERRIDES` to a truthy value to skip layers 2–4 and force
 the packaged default only. This is useful for CI or official runs that must
 not accidentally inherit a developer's local configuration.
 
+### PR review guardrail
+
+Any PR that touches a bench configuration file (such as `.argus/bench.toml`
+or `argus/bench_default.toml`) or adds lines modifying bench routing environment
+variables (`ARGUS_BENCH_FILE` or `ARGUS_NO_BENCH_OVERRIDES`) is automatically
+and deterministically force-BLOCKED by Argus.
+
+Because the bench configuration selects the LLM platform and model that leaf
+reviewers execute on for the entire repository, modifying it requires explicit
+human sign-off. This guard is deliberately not opt-out-able via configuration
+or environment variables. Autonomous review loops cannot dismiss this finding;
+if a bench configuration change was unintentional, removing the file clears the
+block on the next review round. If intentional, the PR must be escalated for
+human review.
+
 ## Values and credentials
 
 Valid `platform` values are exactly:

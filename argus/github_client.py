@@ -491,6 +491,47 @@ class GitHubClient:
             behind_by=data.get("behind_by", 0),
         )
 
+    def get_compare_files(
+        self,
+        repo: str,
+        base: str,
+        head: str,
+    ) -> list[str]:
+        """Return list of file paths changed between base and head.
+
+        Calls ``/repos/{repo}/compare/{base}...{head}`` JSON endpoint and
+        extracts filenames from the ``files`` array (including previous_filename
+        on renames).
+        Note: GitHub caps this list at 300 files without pagination.
+
+        Args:
+            repo: Repository in "owner/repo" format.
+            base: Base ref (branch name or SHA).
+            head: Head ref (branch name or SHA).
+
+        Returns:
+            Sorted, deduplicated list of file paths changed.
+        """
+        data = self._request("GET", f"/repos/{repo}/compare/{base}...{head}")
+        files_data = data.get("files") or []
+        file_paths: set[str] = set()
+        for f in files_data:
+            if isinstance(f, dict):
+                if "filename" in f and f["filename"]:
+                    file_paths.add(f["filename"])
+                if "previous_filename" in f and f["previous_filename"]:
+                    file_paths.add(f["previous_filename"])
+        if len(files_data) >= 300:
+            logger.warning(
+                "get_compare_files: GitHub compare API 300-file cap reached "
+                "(%d files returned) for %s %s...%s; changes beyond 300 files are not listed",
+                len(files_data),
+                repo,
+                base,
+                head,
+            )
+        return sorted(file_paths)
+
     def get_compare_commits(
         self,
         repo: str,

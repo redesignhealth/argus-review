@@ -25,6 +25,11 @@ slows a review) but different in how "optional" applies to each:
    no repo's own generic CI could ever know to check for. This is what the
    rest of this doc covers.
 
+Note: Argus's reviewer bench configuration guard (which force-blocks PRs
+modifying `.argus/bench.toml` or `argus/bench_default.toml`) deliberately lives
+outside the precheck engine as a hard graph-level gate so that it cannot fail
+open or be silenced when precheck rules are unconfigured or disabled.
+
 ## Enabling it
 
 ```bash

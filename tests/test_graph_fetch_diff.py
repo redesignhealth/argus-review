@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,11 +51,12 @@ class TestFetchPrDiffPRMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            diff, description, head_sha = await fn(_make_request(pr_number=42))
+            diff, description, head_sha, base_branch = await fn(_make_request(pr_number=42))
 
         assert diff == "diff --git a/f.py b/f.py\n+new"
         assert description == "My PR description"
         assert head_sha == "abc123def456"
+        assert base_branch == "main"
         mock_gh.get_compare_diff.assert_called_once_with(
             "org/repo", "main", "abc123def456", max_lines=5000
         )
@@ -72,7 +74,7 @@ class TestFetchPrDiffPRMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            _, description, _ = await fn(_make_request(pr_number=42))
+            _, description, _, _ = await fn(_make_request(pr_number=42))
 
         assert description == "## Summary\nThis fixes a bug."
 
@@ -89,7 +91,7 @@ class TestFetchPrDiffPRMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            _, description, _ = await fn(_make_request(pr_number=42))
+            _, description, _, _ = await fn(_make_request(pr_number=42))
 
         assert description == ""
 
@@ -135,13 +137,14 @@ class TestFetchPrDiffSHAMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            diff, description, head_sha = await fn(
+            diff, description, head_sha, base_branch = await fn(
                 _make_request(sha="abc123def456", base_ref="main")
             )
 
         assert diff == "diff --git a/f.py b/f.py\n+sha mode"
         assert description == ""
         assert head_sha == "abc123def456"
+        assert base_branch == "main"
         mock_gh.get_compare_diff.assert_called_once_with(
             "org/repo", "main", "abc123def456", max_lines=5000
         )
@@ -218,7 +221,7 @@ class TestNodeFetchDiffPreResolvedSha:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=("diff content", "description", pre_resolved_sha),
+                return_value=("diff content", "description", pre_resolved_sha, "main"),
             ) as mock_fetch,
         ):
             await _node_fetch_diff(state, config)
@@ -226,3 +229,122 @@ class TestNodeFetchDiffPreResolvedSha:
         mock_fetch.assert_awaited_once()
         _, kwargs = mock_fetch.call_args
         assert kwargs.get("pre_resolved_head_sha") == pre_resolved_sha
+
+
+class TestFetchFullPrChangedFiles:
+    """Tests for _fetch_full_pr_changed_files full-PR path resolution and fallback."""
+
+    @pytest.mark.asyncio
+    async def test_round1_uses_diff_directly_without_compare_api(self) -> None:
+        """On round 1 (prior_sha is None), uses extract_changed_files(round_diff) with zero API calls."""
+        from argus.graph import _fetch_full_pr_changed_files
+
+        mock_gh = MagicMock()
+        diff = (
+            "diff --git a/src/main.py b/src/main.py\n+code\n"
+            "diff --git a/.argus/bench.toml b/.argus/bench.toml\n+bench\n"
+        )
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            files = await _fetch_full_pr_changed_files(
+                _make_request(pr_number=42),
+                base_branch="main",
+                head_sha="head1234",
+                round_diff=diff,
+                prior_sha=None,
+            )
+
+        assert files == [".argus/bench.toml", "src/main.py"]
+        mock_gh.get_compare_files.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_round2_calls_compare_files_api(self) -> None:
+        """On round 2+ (prior_sha is set), calls gh.get_compare_files with base_branch and head_sha."""
+        from argus.graph import _fetch_full_pr_changed_files
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = [".argus/bench.toml", "src/lib.py"]
+
+        round_diff = "diff --git a/src/lib.py b/src/lib.py\n+lib\n"
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            files = await _fetch_full_pr_changed_files(
+                _make_request(pr_number=42),
+                base_branch="main",
+                head_sha="head1234",
+                round_diff=round_diff,
+                prior_sha="prior1234",
+            )
+
+        assert files == [".argus/bench.toml", "src/lib.py"]
+        mock_gh.get_compare_files.assert_called_once_with("org/repo", "main", "head1234")
+
+    @pytest.mark.asyncio
+    async def test_round2_fallback_on_api_error(self, caplog: pytest.LogCaptureFixture) -> None:
+        """On API failure, logs a WARNING and falls back to extract_changed_files(round_diff)."""
+        import logging
+        from argus.graph import _fetch_full_pr_changed_files
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.side_effect = RuntimeError("GitHub compare rate-limited")
+
+        round_diff = "diff --git a/src/fallback.py b/src/fallback.py\n+fallback\n"
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh), caplog.at_level(logging.WARNING):
+            files = await _fetch_full_pr_changed_files(
+                _make_request(pr_number=42),
+                base_branch="main",
+                head_sha="head1234",
+                round_diff=round_diff,
+                prior_sha="prior1234",
+            )
+
+        assert files == ["src/fallback.py"]
+        assert any(
+            "Failed to fetch full-PR changed files" in record.message for record in caplog.records
+        )
+
+
+class TestNodeFetchDiffBenchConfig:
+    """Tests for _node_fetch_diff bench_config_changes state population."""
+
+    @pytest.mark.asyncio
+    async def test_node_fetch_diff_detects_bench_file_in_round1(self) -> None:
+        from unittest.mock import AsyncMock, patch
+        from argus.graph import _node_fetch_diff
+
+        diff = "diff --git a/.argus/bench.toml b/.argus/bench.toml\n+model = 'gemini'\n"
+        state = {"request": _make_request(pr_number=42).model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "", "head1234", "main"),
+            ),
+        ):
+            result = await _node_fetch_diff(state, config)
+
+        assert result["bench_config_changes"] == [".argus/bench.toml"]
+
+    @pytest.mark.asyncio
+    async def test_node_fetch_diff_clean_when_no_bench_config(self) -> None:
+        from unittest.mock import AsyncMock, patch
+        from argus.graph import _node_fetch_diff
+
+        diff = "diff --git a/src/app.py b/src/app.py\n+print('hello')\n"
+        state = {"request": _make_request(pr_number=42).model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "", "head1234", "main"),
+            ),
+        ):
+            result = await _node_fetch_diff(state, config)
+
+        assert result["bench_config_changes"] == []

@@ -14,7 +14,7 @@ Covers _is_image_tag_bump_only() and the _edge_preflight_decision gate:
 
 from __future__ import annotations
 
-from argus.graph import _is_image_tag_bump_only, _edge_preflight_decision
+from argus.graph import _edge_preflight_decision, _is_high_blast_radius, _is_image_tag_bump_only
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -270,3 +270,33 @@ def test_non_catchup_high_blast_radius_still_forces_full() -> None:
     }
     result = _edge_preflight_decision(state)
     assert result == "plan"
+
+
+def test_is_high_blast_radius_matches_bench_paths() -> None:
+    diff_root = (
+        "diff --git a/.argus/bench.toml b/.argus/bench.toml\n"
+        "--- a/.argus/bench.toml\n"
+        "+++ b/.argus/bench.toml\n"
+    )
+    assert _is_high_blast_radius(diff_root) == ".argus/bench.toml"
+
+    diff_nested = (
+        "diff --git a/services/api/.argus/bench.toml b/services/api/.argus/bench.toml\n"
+        "--- a/services/api/.argus/bench.toml\n"
+        "+++ b/services/api/.argus/bench.toml\n"
+    )
+    assert _is_high_blast_radius(diff_nested) == "services/api/.argus/bench.toml"
+
+    diff_default = (
+        "diff --git a/argus/bench_default.toml b/argus/bench_default.toml\n"
+        "--- a/argus/bench_default.toml\n"
+        "+++ b/argus/bench_default.toml\n"
+    )
+    assert _is_high_blast_radius(diff_default) == "argus/bench_default.toml"
+
+    diff_near_miss = (
+        "diff --git a/.argus/README.md b/.argus/README.md\n"
+        "--- a/.argus/README.md\n"
+        "+++ b/.argus/README.md\n"
+    )
+    assert _is_high_blast_radius(diff_near_miss) is None
