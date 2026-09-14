@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   evaluates against the full-PR diff scope across multi-round reviews to prevent
   bypasses on subsequent commits.
 
+### Fixed
+
+- Regenerated `tests/golden/review_response.schema.json` to match the
+  `argus-self-config` category description added in TECH-6282 — the
+  golden-snapshot test was left failing after that PR merged.
+
 ## [0.2.3] - 2026-09-14
 
 ### Changed
