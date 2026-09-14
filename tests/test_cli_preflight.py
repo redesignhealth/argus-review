@@ -2,14 +2,16 @@
 
 ``argus review`` must fail fast — before any network call — when ``git`` or
 the ``claude`` CLI are missing from PATH, or when required settings are
-absent. This file covers the PATH checks for git/claude and the
-required-secrets contract of ``_check_settings`` (three API keys only —
-no storage env vars required, given the local SQLite default).
+absent. This file covers the PATH checks for git/claude, the
+required-secrets contract of ``_check_settings`` (four API keys by default —
+Anthropic, GitHub, OpenAI, and Google; no storage env vars required, given
+the local SQLite default), and bench configuration validation.
 """
 
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -37,7 +39,7 @@ _STORAGE_ENV_VARS = (
 def _settings_from_env(monkeypatch: pytest.MonkeyPatch, **extra: str) -> Settings:
     """Build a real Settings object from a controlled environment.
 
-    The conftest autouse fixture sets the three required API keys; this
+    The conftest autouse fixture sets the required API keys; this
     scrubs every storage-related var, applies ``extra``, and reloads.
     """
     for var in _STORAGE_ENV_VARS:
@@ -49,11 +51,12 @@ def _settings_from_env(monkeypatch: pytest.MonkeyPatch, **extra: str) -> Setting
 
 
 class TestCheckSettingsRequiredSecrets:
-    """Regression tests for the SQLite-default contract: exactly
-    three required secrets (ANTHROPIC_API_KEY, GITHUB_TOKEN_RO,
-    OPENAI_API_KEY) and NO storage env vars."""
+    """Regression tests for required secrets: baseline API keys (ANTHROPIC_API_KEY,
+    GITHUB_TOKEN_RO, OPENAI_API_KEY), conditional provider credentials based on
+    the effective bench (GOOGLE_API_KEY for default Gemini bulk reviewers), and
+    NO storage env vars."""
 
-    def test_passes_with_only_three_api_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_passes_with_required_api_keys(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The live-E2E regression: no DB URL, no HTTP URLs → must pass
         (history + checkpoints default to local SQLite)."""
         settings = _settings_from_env(monkeypatch)
@@ -77,7 +80,7 @@ class TestCheckSettingsRequiredSecrets:
 
     @pytest.mark.parametrize(
         "empty_key",
-        ["ANTHROPIC_API_KEY", "GITHUB_TOKEN_RO", "OPENAI_API_KEY"],
+        ["ANTHROPIC_API_KEY", "GITHUB_TOKEN_RO", "OPENAI_API_KEY", "GOOGLE_API_KEY"],
     )
     def test_each_api_key_is_required(
         self,
@@ -85,13 +88,63 @@ class TestCheckSettingsRequiredSecrets:
         caplog: pytest.LogCaptureFixture,
         empty_key: str,
     ) -> None:
-        """An empty value for any of the three keys → exit 1 naming it."""
+        """An empty value for any required key → exit 1 naming it."""
         settings = _settings_from_env(monkeypatch, **{empty_key: ""})
         with caplog.at_level(logging.ERROR, logger="argus_review_local"):
             with pytest.raises(SystemExit) as exc:
                 argus_cli._check_settings(settings)
         assert exc.value.code == 1
         assert any(empty_key in rec.message for rec in caplog.records)
+
+    def test_missing_google_key_with_default_config_exits(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Default bench resolves bulk_reviewer to Gemini, so GOOGLE_API_KEY is required."""
+        settings = _settings_from_env(monkeypatch, GOOGLE_API_KEY="")
+        with caplog.at_level(logging.ERROR, logger="argus_review_local"):
+            with pytest.raises(SystemExit) as exc:
+                argus_cli._check_settings(settings)
+        assert exc.value.code == 1
+        assert any("GOOGLE_API_KEY" in rec.message for rec in caplog.records)
+
+    def test_missing_google_key_allowed_when_bench_overridden_to_claude(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When bench overrides bulk_reviewer to claude-sdk, GOOGLE_API_KEY is not required."""
+        explicit = tmp_path / "bench.toml"
+        explicit.write_text('[bulk_reviewer]\nplatform = "claude-sdk"\nmodel = "claude-default"\n')
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+        settings = _settings_from_env(monkeypatch, GOOGLE_API_KEY="")
+        argus_cli._check_settings(settings)  # must not raise
+
+    def test_invalid_bench_config_fails_preflight(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """An invalid bench config (e.g. mismatched platform/model) must fail
+        fast in preflight with exit 1 and a clear error message, rather than
+        failing later mid-review."""
+        explicit = tmp_path / "invalid-bench.toml"
+        explicit.write_text('[bulk_reviewer]\nplatform = "gemini"\nmodel = "claude-mini"\n')
+        monkeypatch.setenv("ARGUS_BENCH_FILE", str(explicit))
+        monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+        settings = _settings_from_env(monkeypatch)
+        with caplog.at_level(logging.ERROR, logger="argus_review_local"):
+            with pytest.raises(SystemExit) as exc:
+                argus_cli._check_settings(settings)
+        assert exc.value.code == 1
+        assert any("Invalid bench configuration" in rec.message for rec in caplog.records)
+        assert any(
+            "model 'claude-mini' is not compatible with platform 'gemini'" in rec.message
+            for rec in caplog.records
+        )
 
 
 class TestCheckPrerequisites:

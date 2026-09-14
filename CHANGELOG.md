@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-14
+
+### Changed
+
+- Defaulted `[bulk_reviewer]` in `argus/bench_default.toml` to `platform = "gemini"`,
+  `model = "gemini-mini"`, and `caching = "auto"` (TECH-6281). System-generalist,
+  specialist, and tests-and-docs reviewers now route to Gemini (`gemini-3.8-flash`)
+  out of the box for cost optimization across PR review fan-outs, while individual
+  roles (`cross-cutting`, `blocking-validator`, `feedback-verifier`) remain on
+  `claude-sdk`.
+- Moved `google-genai` from the optional `[gemini]` extra into core `dependencies`
+  in `pyproject.toml`, ensuring the default Gemini bulk reviewer works out of
+  the box without requiring an extra install.
+- In `argus/bench.py`, sparse model-only bench overrides (e.g. `model = "claude-mini"`)
+  now automatically infer their compatible platform (`claude-sdk`, `gemini`, or
+  `openai-responses`) so model overrides do not inherit an incompatible platform
+  from lower bench layers. Explicit platform/model mismatches fail validation early
+  with clear migration guidance.
+- Made `--specialist-model` / `ARGUS_SPECIALIST_MODEL` apply as a highest-priority
+  override forcing `[bulk_reviewer]` to `claude-sdk` with `claude-default` so
+  the CLI flag continues to control system and specialist reviewers as documented.
+- Made CLI preflight credential validation conditional on effective bench requirements:
+  `GOOGLE_API_KEY` is now required when the resolved bench config includes `gemini`.
+
 ## [0.2.2] - 2026-09-11
 
 ### Added
@@ -203,7 +227,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/redesignhealth/argus-review/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/redesignhealth/argus-review/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/redesignhealth/argus-review/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/redesignhealth/argus-review/compare/v0.1.5...v0.2.0

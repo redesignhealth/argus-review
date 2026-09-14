@@ -23,12 +23,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-# `google-genai` is an OPTIONAL dependency (`[project.optional-dependencies]
-# gemini`), not a hard one -- see test_argus_importable_without_gemini_extra
-# in tests/test_packaging.py. Skip this whole module cleanly (rather than
-# erroring out at collection time) when it isn't installed. This must run
-# before any other import that transitively pulls in `google.genai`,
-# including `argus.gemini_runner` itself.
+# `google-genai` is a core dependency (as of TECH-6281 with Gemini bulk
+# reviewer defaults). Skip this whole module cleanly if the dependency
+# is missing in an unusual stripped environment. This must run before any
+# other import that transitively pulls in `google.genai`, including
+# `argus.gemini_runner` itself.
 pytest.importorskip("google.genai")
 from google.genai import errors as genai_errors  # noqa: E402
 from google.genai import types  # noqa: E402

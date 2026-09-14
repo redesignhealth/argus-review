@@ -67,6 +67,8 @@ dependencies = [
     # as argus.gemini_runner's tool dispatch does), where SIGALRM is
     # unreachable (Python signal handlers are main-thread-only).
     "regex>=2024.4.16",
+    # Google GenAI SDK for the Gemini platform runner (default for [bulk_reviewer])
+    "google-genai>=1.55,<2",
 ]
 
 [project.urls]
@@ -157,15 +159,6 @@ prechecks = [
 # installs -- it has no effect here, because 1.23.3 already satisfies both
 # constraints simultaneously; there's no genuine incompatibility for uv to
 # fork around, just a tighter shared pin.
-
-# Not a hard dependency: the "gemini" bench platform (argus.gemini_runner,
-# dispatched via argus.bench's Platform enum and PLATFORM_RUNNERS dict) is
-# opt-in only -- the packaged default bench always resolves to "claude-sdk"
-# and never imports google-genai. Install this extra only if you actually
-# point a role at platform = "gemini" via a bench.toml override.
-gemini = [
-    "google-genai>=1.55,<2",
-]
 
 [project.scripts]
 argus = "argus.cli:main"

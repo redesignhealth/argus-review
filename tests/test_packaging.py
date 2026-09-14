@@ -182,16 +182,11 @@ def test_argus_importable_without_gemini_extra() -> None:
     """`argus` must not unconditionally import the real `google.genai`
     package anywhere in its always-imported path.
 
-    The "gemini" bench platform (argus.bench.Platform, PLATFORM_RUNNERS) has
-    a real runner (argus.gemini_runner), but `google-genai` is only an
-    OPTIONAL dependency (`[project.optional-dependencies] gemini`), not a
-    hard one. If some future edit added an unconditional top-level
-    `import google.genai`, every user who installed plain `argus-code-review`
-    (no `[gemini]` extra) would fail on `import argus` at all, not just when
-    actually trying to use the Gemini platform.
+    Even with `google-genai` in core dependencies, top-level module imports
+    keep heavy SDK imports lazy so module loading stays fast and decoupled.
 
     Simulates "google-genai isn't installed" by blocking the import at the
-    interpreter level (rather than needing a second, extra-less venv) and
+    interpreter level (rather than needing a second venv) and
     then importing every module this repo ships, fresh, in a subprocess.
 
     Only blocks an ABSOLUTE top-level `google` import (`level == 0`) --
@@ -199,10 +194,9 @@ def test_argus_importable_without_gemini_extra() -> None:
     `google_genai` submodule (`from .google_genai import ...`, `level == 1`
     relative to `litellm` itself). That submodule ships as part of
     `litellm` (a hard, always-installed dependency here, imported by
-    `argus.llm.pricing`) and has nothing to do with the real, optional
+    `argus.llm.pricing`) and has nothing to do with the real
     `google-genai` PyPI package this test cares about -- blocking it too
-    would break `argus.graph`'s import even in an environment where the
-    `[gemini]` extra genuinely is absent, producing a false failure here.
+    would break `argus.graph`'s import, producing a false failure here.
     """
     modules_to_import = [
         "argus",

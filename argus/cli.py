@@ -47,8 +47,9 @@ Environment variables (HTTP-mode opt-in):
 
 No storage env vars are required: with neither ``ARGUS_DB_URL`` nor the
 HTTP-shim URLs set, round history and checkpoints default to local SQLite.
-Required secrets are only one of ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
-GITHUB_TOKEN_RO, and OPENAI_API_KEY. ANTHROPIC_AUTH_TOKEN is the standard
+Required secrets are one of ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN,
+GITHUB_TOKEN_RO, OPENAI_API_KEY, and (by default, since bulk reviewers default
+to Gemini) GOOGLE_API_KEY. ANTHROPIC_AUTH_TOKEN is the standard
 mechanism for routing through a corporate LLM gateway/proxy instead of a
 real Anthropic API key (sent as ``Authorization: Bearer`` rather than
 ``x-api-key``) — the same convention the Anthropic SDK and Claude Code
@@ -177,11 +178,13 @@ def _load_settings() -> "Settings":
 def _check_settings(settings: "Settings") -> None:
     """Validate that critical secrets were loaded, fail loudly otherwise.
 
-    Only the three API credentials are required: one of ``ANTHROPIC_API_KEY``
-    / ``ANTHROPIC_AUTH_TOKEN`` (Agent SDK + LangChain), ``GITHUB_TOKEN_RO``
-    (diff fetch + clone), and ``OPENAI_API_KEY`` (plan-extraction path). No
-    storage configuration is required — with neither ``ARGUS_DB_URL`` nor
-    the HTTP-shim URLs set, history and checkpoints default to local SQLite.
+    Always required:
+    - ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) for Agent SDK + LangChain
+    - GITHUB_TOKEN_RO for diff fetch + clone
+    - OPENAI_API_KEY for plan-extraction path
+
+    Additionally, if any leaf reviewer in the effective resolved bench config
+    requires the Gemini platform, GOOGLE_API_KEY is required.
 
     Args:
         settings: Resolved settings object.
@@ -193,6 +196,27 @@ def _check_settings(settings: "Settings") -> None:
         missing.append("GITHUB_TOKEN_RO")
     if not settings.OPENAI_API_KEY:
         missing.append("OPENAI_API_KEY")
+
+    from argus import bench
+
+    bench.clear_cache()
+    try:
+        raw_bench = bench.load_bench()
+    except Exception as exc:
+        logger.error("Invalid bench configuration: %s", exc)
+        sys.exit(1)
+
+    platforms_needed: set[str] = set()
+    bulk = raw_bench.get("bulk_reviewer")
+    if isinstance(bulk, dict) and "platform" in bulk:
+        platforms_needed.add(bulk["platform"])
+    for role_cfg in raw_bench.get("roles", {}).values():
+        if isinstance(role_cfg, dict) and "platform" in role_cfg:
+            platforms_needed.add(role_cfg["platform"])
+
+    if "gemini" in platforms_needed and not settings.GOOGLE_API_KEY:
+        missing.append("GOOGLE_API_KEY")
+
     if missing:
         logger.error(
             "Missing required secrets: %s. Add them to your shell or .env file.",
@@ -330,9 +354,10 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
         default=_MODEL_OVERRIDE_UNSET,
         help=(
             "Override the model used by the system reviewer, specialist "
-            "reviewers, the writer, and the lite-review path (default: "
-            "claude-sonnet-4-6, or ARGUS_SPECIALIST_MODEL if already set in "
-            "the environment). Same effect as setting ARGUS_SPECIALIST_MODEL. "
+            "reviewers, the writer, and the lite-review path (forcing "
+            "bulk reviewers to claude-sdk with the specified model; default "
+            "without this flag routes bulk reviewers to gemini-mini). "
+            "Same effect as setting ARGUS_SPECIALIST_MODEL. "
             "Pass an empty string to clear an already-set "
             "ARGUS_SPECIALIST_MODEL for this run."
         ),
@@ -572,7 +597,6 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
     except Exception as exc:  # pydantic ValidationError for missing required vars
         logger.error("Failed to load settings: %s", exc)
         sys.exit(1)
-    _check_settings(settings)
 
     # Applied AFTER _load_settings(), not before: _load_settings() calls
     # load_dotenv_early(..., override=False), which repopulates any env var
@@ -586,6 +610,12 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
     # function, is what makes them the actual final word on these two vars.
     _apply_model_override_flag("ARGUS_SPECIALIST_MODEL", args.specialist_model)
     _apply_model_override_flag("ARGUS_FRONTIER_MODEL", args.frontier_model)
+
+    from argus.config import clear_cache as clear_config_cache, get_settings
+
+    clear_config_cache()
+    settings = get_settings()
+    _check_settings(settings)
 
     from argus.models import ReviewRequest
 

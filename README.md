@@ -155,10 +155,11 @@ argus review owner/repo --pr 123 --dismiss "B2 -- pre-existing, not from this PR
 # --frontier-model controls both the planner/coverage tier AND the cross-cutting
 # reviewer -- claude-fable-5 here is already the planner/coverage default, but
 # it also moves cross-cutting OFF its cheaper claude-opus-5 default onto fable-5.
-# Cost note: --specialist-model here also moves the highest-volume path (system
-# reviewer, specialists, writer, lite-review) onto the pricier Opus tier -- both
-# flags in this example trade cost for reasoning headroom, don't use them together
-# as a low-cost default. Any non-empty --specialist-model value also withholds
+# Cost note: --specialist-model here overrides the bulk reviewer path (system
+# reviewer, specialists, tests-and-docs) from its low-cost Gemini default onto
+# claude-sdk with the specified model, and also updates the writer and lite-review
+# paths -- both flags in this example trade cost for reasoning headroom, don't use
+# them together as a low-cost default. Any non-empty --specialist-model value also withholds
 # the 1M-context beta from that same highest-volume path, since the beta is
 # only verified against the unoverridden default (autocompact may thrash on
 # long reviews under this override -- see argus/runners.py for the tradeoff).

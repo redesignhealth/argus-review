@@ -610,9 +610,9 @@ async def run_system_reviewer(
     # docstring). Gap-fill reviewers reuse this exact function (they dispatch
     # through the same reviewer_type="system" path in graph.py), so they
     # pick up the same resolved entry with no separate role needed. With the
-    # packaged default bench, bench_entry.platform == "claude-sdk" and
-    # bench_entry.model resolves to exactly _SYSTEM_REVIEWER_MODEL -- this
-    # branch is a behavior-preserving no-op for a default install.
+    # packaged default bench, bench_entry.platform == "gemini" and
+    # bench_entry.model resolves to "gemini-mini" (gemini-3.8-flash) for
+    # cost optimization.
     bench_entry = bench.resolve("system-generalist")
     runner = bench.runner_for(bench_entry)
     session = await runner(

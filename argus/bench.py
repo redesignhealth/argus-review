@@ -1,11 +1,10 @@
 """Bench configuration: which platform/model a leaf reviewer runs on.
 
 A "bench" is a lightweight, human-edited TOML config that decides which
-LLM *platform* (Claude Agent SDK is the packaged default; Gemini has a
-real runner too, see ``argus.gemini_runner``; OpenAI Responses has a
-real runner too, see ``argus.openai_runner``; both are opt-in only) and
-*model* each leaf reviewer in the review pipeline runs on. This is
-deliberately NOT a dynamic/adaptive routing system -- it is a static,
+LLM *platform* (Claude Agent SDK and Gemini have packaged defaults;
+OpenAI Responses has a real runner too, see ``argus.openai_runner``;
+opt-in) and *model* each leaf reviewer in the review pipeline runs on.
+This is deliberately NOT a dynamic/adaptive routing system -- it is a static,
 PR-reviewed config with a human-editable override chain, in the same
 spirit as ``argus.prompts_runtime``'s prompt override chain.
 
@@ -25,9 +24,10 @@ Two kinds of config unit, not a per-role table:
 Override chain (mirrors ``argus.prompts_runtime`` exactly, including its
 opt-out convention), lowest to highest priority:
 
-1. Packaged ``argus/bench_default.toml`` -- the base. Every entry resolves
-   to ``platform="claude-sdk"`` with today's actual models, so shipping
-   this file is a behavior-preserving no-op for a default install.
+1. Packaged ``argus/bench_default.toml`` -- the base. ``[bulk_reviewer]``
+   defaults to ``platform="gemini"`` (``model="gemini-mini"``,
+   ``caching="auto"``), while individual roles (``cross-cutting``,
+   ``blocking-validator``, ``feedback-verifier``) default to ``claude-sdk``.
 2. ``~/.config/argus/bench.toml`` (respecting ``XDG_CONFIG_HOME``) -- a
    user-global sparse overlay: only the keys it specifies are overridden;
    everything else falls through to the layer below.
@@ -103,6 +103,23 @@ _VALID_MODEL_ALIASES: Final[frozenset[str]] = frozenset(model_aliases.ALIAS_MAP)
 _TOP_LEVEL_KEYS: Final[frozenset[str]] = frozenset({"bulk_reviewer", "roles"})
 _BULK_KEYS: Final[frozenset[str]] = frozenset({"platform", "model", "caching"})
 _ROLE_KEYS: Final[frozenset[str]] = frozenset({"platform", "model", "prompt_name", "caching"})
+
+_MODEL_FAMILY_TO_PLATFORM: Final[dict[str, Platform]] = {
+    "claude": "claude-sdk",
+    "gemini": "gemini",
+    "gpt": "openai-responses",
+}
+
+
+def infer_platform_for_model(model: str) -> Platform | None:
+    """Infer the execution platform from a model alias or model name.
+
+    Returns the Platform matching the model family prefix ('claude-*' -> 'claude-sdk',
+    'gemini-*' -> 'gemini', 'gpt-*' -> 'openai-responses'), or None if unknown.
+    """
+    family = model.lower().split("-", 1)[0]
+    return _MODEL_FAMILY_TO_PLATFORM.get(family)
+
 
 # Roles a runner function actually resolves via bench.resolve(). Every bulk
 # role and every individual role is wired to its corresponding runner function.
@@ -213,6 +230,34 @@ def _overlay_layers(settings: Any) -> list[Path]:
     return layers
 
 
+def _infer_platforms_for_overlay(overlay: dict[str, Any]) -> dict[str, Any]:
+    """Infer the compatible platform for any table that specifies `model` but omits `platform`.
+
+    Prevents sparse model-only overrides (such as `model = "claude-mini"`) from inheriting
+    an incompatible platform (like the default `platform = "gemini"`) from a lower layer.
+    """
+    result = dict(overlay)
+    if "bulk_reviewer" in result and isinstance(result["bulk_reviewer"], dict):
+        bulk = dict(result["bulk_reviewer"])
+        if "model" in bulk and isinstance(bulk["model"], str) and "platform" not in bulk:
+            inferred = infer_platform_for_model(bulk["model"])
+            if inferred is not None:
+                bulk["platform"] = inferred
+        result["bulk_reviewer"] = bulk
+    if "roles" in result and isinstance(result["roles"], dict):
+        roles = dict(result["roles"])
+        for role_name, role_table in roles.items():
+            if isinstance(role_table, dict):
+                r = dict(role_table)
+                if "model" in r and isinstance(r["model"], str) and "platform" not in r:
+                    inferred = infer_platform_for_model(r["model"])
+                    if inferred is not None:
+                        r["platform"] = inferred
+                roles[role_name] = r
+        result["roles"] = roles
+    return result
+
+
 _WARNED_ROLES: set[str] = set()
 _WARNED_ROLES_LOCK: threading.Lock = threading.Lock()
 
@@ -234,7 +279,16 @@ def load_bench() -> dict[str, Any]:
             if isinstance(roles, dict):
                 for role in roles:
                     _warn_if_not_wired(role)
-            merged = _deep_merge(merged, overlay)
+            prepared = _infer_platforms_for_overlay(overlay)
+            merged = _deep_merge(merged, prepared)
+
+    # --specialist-model / ARGUS_SPECIALIST_MODEL is a CLI/env knob that
+    # overrides the system reviewer and specialist reviewers. When set,
+    # force bulk_reviewer to claude-sdk with claude-default so the override
+    # controls the bulk reviewer roles as documented.
+    if settings.ARGUS_SPECIALIST_MODEL:
+        merged["bulk_reviewer"]["platform"] = "claude-sdk"
+        merged["bulk_reviewer"]["model"] = "claude-default"
 
     _validate_raw_bench(merged)
     return merged
@@ -288,6 +342,16 @@ def _validate_prompt_name(name: Any, where: str) -> None:
         )
 
 
+def _validate_model_platform_compatibility(platform: str, model: str, where: str) -> None:
+    expected_platform = infer_platform_for_model(model)
+    if expected_platform is not None and platform != expected_platform:
+        raise ValueError(
+            f"{where}: model {model!r} is not compatible with platform {platform!r} "
+            f"(expected platform={expected_platform!r}). "
+            f"Set platform = {expected_platform!r} or select a model compatible with {platform!r}."
+        )
+
+
 def _validate_raw_bench(raw: dict[str, Any]) -> None:
     """Validate the fully-merged bench config, raising loudly on any problem.
 
@@ -319,6 +383,7 @@ def _validate_raw_bench(raw: dict[str, Any]) -> None:
     _validate_platform(bulk["platform"], "[bulk_reviewer]")
     _validate_model(bulk["model"], "[bulk_reviewer]")
     _validate_caching(bulk.get("caching", "auto"), "[bulk_reviewer]")
+    _validate_model_platform_compatibility(bulk["platform"], bulk["model"], "[bulk_reviewer]")
 
     roles = raw.get("roles", {})
     if not isinstance(roles, dict):
@@ -340,6 +405,7 @@ def _validate_raw_bench(raw: dict[str, Any]) -> None:
         _validate_model(role_table["model"], where)
         _validate_caching(role_table.get("caching", "auto"), where)
         _validate_prompt_name(role_table["prompt_name"], where)
+        _validate_model_platform_compatibility(role_table["platform"], role_table["model"], where)
 
     # The bulk bucket's own known prompt names are hardcoded (not
     # TOML-supplied), but validate them too: a packaged/override prompt
@@ -529,9 +595,9 @@ async def _gemini_runner(
 
     Imports ``argus.config`` and ``argus.gemini_runner`` lazily (function
     body, not module level) for the same reason ``_claude_sdk_runner``
-    imports lazily: avoids a needless import of the (optional,
-    ``google-genai``-dependent) Gemini runner module for every caller of
-    this module, even ones that never touch the ``gemini`` platform.
+    imports lazily: avoids a needless import of the Gemini runner module
+    for every caller of this module, even ones that never touch the
+    ``gemini`` platform.
     """
     from argus.config import get_settings
     from argus.gemini_runner import run_session_gemini

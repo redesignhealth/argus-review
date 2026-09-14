@@ -14,6 +14,7 @@ import logging
 import os
 import signal
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -36,6 +37,25 @@ from argus.pipeline_models import (
 # ---------------------------------------------------------------------------
 
 _RUNNERS_MODULE = "argus.runners"
+
+
+@pytest.fixture(autouse=True)
+def _force_claude_bench_for_claude_runner_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """This module exercises Claude-specific runner internals (_run_session_isolated,
+    _run_session_in_subprocess, and the 1M-context beta parameter forwarding).
+    Route [bulk_reviewer] to claude-sdk so these tests continue exercising those
+    Claude execution paths even when the packaged default bench points to Gemini."""
+    bench_file = tmp_path / "claude_bench.toml"
+    bench_file.write_text('[bulk_reviewer]\nplatform = "claude-sdk"\nmodel = "claude-default"\n')
+    monkeypatch.setenv("ARGUS_BENCH_FILE", str(bench_file))
+    monkeypatch.delenv("ARGUS_NO_BENCH_OVERRIDES", raising=False)
+    from argus import bench
+    from argus.config import clear_cache
+
+    clear_cache()
+    bench.clear_cache()
 
 
 def _make_session_result(result_text: str = "", cost_usd: float = 0.0) -> MagicMock:
