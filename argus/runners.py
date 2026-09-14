@@ -613,7 +613,7 @@ async def run_system_reviewer(
     # packaged default bench, bench_entry.platform == "gemini" and
     # bench_entry.model resolves to "gemini-mini" (gemini-3.8-flash) for
     # cost optimization.
-    bench_entry = bench.resolve("system-generalist")
+    bench_entry = bench.resolve("system-generalist", settings=settings)
     runner = bench.runner_for(bench_entry)
     session = await runner(
         entry=bench_entry,
@@ -688,7 +688,7 @@ async def run_specialist_reviewer(
             None,
         )
 
-    bench_entry = bench.resolve(f"specialist-{specialist}")
+    bench_entry = bench.resolve(f"specialist-{specialist}", settings=settings)
     base_prompt = await fetch_prompt(bench_entry.prompt_name)
 
     system_prompt = (
@@ -767,7 +767,7 @@ async def run_cross_cutting_reviewer(
 
     effective_root = _resolve_repo_root(repo_root, "run_cross_cutting_reviewer")
 
-    bench_entry = bench.resolve("cross-cutting")
+    bench_entry = bench.resolve("cross-cutting", settings=settings)
     base_prompt = await fetch_prompt(bench_entry.prompt_name)
     # The prior-art supplement is always appended to the cross-cutting review prompt
     # and is intentionally not configurable via bench.toml.
@@ -856,7 +856,7 @@ async def run_tests_and_docs_reviewer(
 
     effective_root = _resolve_repo_root(repo_root, "run_tests_and_docs_reviewer")
 
-    bench_entry = bench.resolve("tests-and-docs")
+    bench_entry = bench.resolve("tests-and-docs", settings=settings)
     base_prompt = await fetch_prompt(bench_entry.prompt_name)
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
 
@@ -935,7 +935,7 @@ async def run_feedback_verifier(
 
     findings_json = json.dumps([f.model_dump() for f in prior_context.findings], indent=2)
 
-    bench_entry = bench.resolve("feedback-verifier")
+    bench_entry = bench.resolve("feedback-verifier", settings=settings)
     base_prompt = await fetch_prompt(bench_entry.prompt_name)
 
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
@@ -1069,7 +1069,7 @@ async def run_blocking_validator(
 
     effective_root = _resolve_repo_root(repo_root, "run_blocking_validator")
 
-    bench_entry = bench.resolve("blocking-validator")
+    bench_entry = bench.resolve("blocking-validator", settings=settings)
     base_prompt = await fetch_prompt(bench_entry.prompt_name)
     system_prompt = f"{base_prompt}\n\n{_context7_system_directive(settings)}"
     findings_json = json.dumps(blocking_findings, indent=2)
