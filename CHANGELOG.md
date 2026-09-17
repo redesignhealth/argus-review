@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-09-17
+
+### Changed
+
+- Decoupled the Gemini reviewer's turn budget from the shared
+  `argus.runners._MAX_TURNS` constant (TECH-6453). `argus/gemini_runner.py`
+  now has its own `_MAX_TURNS_GEMINI = 45` (30 \* 1.5), independent of the
+  Claude Agent SDK and OpenAI runner paths, which remain at `_MAX_TURNS = 30`
+  unchanged. Gemini-backed bulk reviewer sessions were exhausting the
+  previously-shared 30-turn budget before calling `finish_review`,
+  truncating exploration; raising only Gemini's budget avoids widening the
+  cost/blast-radius ceiling on the more expensive Claude-Opus-tier
+  cross-cutting/blocking-validator/feedback-verifier roles, which showed no
+  evidence of needing more turns.
+
 ## [0.2.3] - 2026-09-14
 
 ### Added
@@ -244,7 +259,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/redesignhealth/argus-review/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/redesignhealth/argus-review/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/redesignhealth/argus-review/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/redesignhealth/argus-review/compare/v0.2.0...v0.2.1
