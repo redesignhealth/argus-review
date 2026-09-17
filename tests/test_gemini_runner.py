@@ -323,18 +323,19 @@ class TestMultipleSimultaneousFunctionCalls:
 
 class TestTurnBudgetExhaustion:
     async def test_exhausting_max_turns_still_returns_a_result(self) -> None:
-        from argus.runners import _MAX_TURNS
+        from argus.gemini_runner import _MAX_TURNS_GEMINI
 
         entry = _make_entry(caching="off")
         settings = _make_settings()
 
         # Every turn keeps requesting a function call, never finish_review --
-        # the loop must stop after _MAX_TURNS turns rather than looping forever.
+        # the loop must stop after _MAX_TURNS_GEMINI turns rather than looping
+        # forever.
         responses = [
             _make_response(
                 calls=[("report_finding", {"file": None, "line": None, "description": "x"})]
             )
-            for _ in range(_MAX_TURNS)
+            for _ in range(_MAX_TURNS_GEMINI)
         ]
         fake_client = _make_fake_client(responses)
 
@@ -348,9 +349,9 @@ class TestTurnBudgetExhaustion:
             )
 
         assert result.failure_reason is None
-        assert fake_client.aio.models.generate_content.await_count == _MAX_TURNS
+        assert fake_client.aio.models.generate_content.await_count == _MAX_TURNS_GEMINI
         payload = _parse_result_json(result.result_text)
-        assert len(payload["findings"]) == _MAX_TURNS
+        assert len(payload["findings"]) == _MAX_TURNS_GEMINI
 
 
 # ---------------------------------------------------------------------------

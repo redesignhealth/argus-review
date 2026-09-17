@@ -40,8 +40,9 @@ then loop ``client.aio.models.generate_content(...)`` -- executing every
 function call the model requests each turn (there can be more than
 one), feeding all of their results back as a single follow-up turn --
 until the model stops requesting function calls, calls
-``finish_review``, or the turn budget (``argus.runners._MAX_TURNS``, the
-same constant the Claude path uses) is exhausted. Findings arrive via
+``finish_review``, or the turn budget (``_MAX_TURNS_GEMINI``, this
+module's own budget, independent of the Claude/OpenAI paths' shared
+``argus.runners._MAX_TURNS``) is exhausted. Findings arrive via
 ``report_finding`` tool calls into ``review_tools``' per-session sink,
 not as a JSON blob embedded in the model's own text -- so, to keep this
 task's blast radius contained to this file plus ``argus.bench``'s
@@ -158,13 +159,14 @@ from argus.gemini_cache import GeminiCacheKeeper
 from argus.llm.models import estimate_cost_usd
 from argus.llm.models import resolve as resolve_model_alias
 from argus.runners import (
-    _MAX_TURNS,
     _SUBPROCESS_TIMEOUT_S,
     SessionResult,
     _resolve_repo_root,
 )
 
 logger = logging.getLogger(__name__)
+
+_MAX_TURNS_GEMINI = 45  # 30 * 1.5 — see TECH-6453
 
 # Both "auto" and "on" attempt explicit caching today -- there is no
 # separate heuristic distinguishing them yet (Track 1 defined the
@@ -687,7 +689,7 @@ async def _run_turns(
         usage_tool_use_prompt_total = 0
 
         with review_tools.review_session(repo_root) as findings_sink:
-            for _turn in range(_MAX_TURNS):
+            for _turn in range(_MAX_TURNS_GEMINI):
                 try:
                     response = await client.aio.models.generate_content(
                         model=model, contents=contents, config=config
@@ -817,13 +819,13 @@ async def _run_turns(
                 if finished:
                     break
             else:
-                # `for...else`: only reached if every one of _MAX_TURNS
+                # `for...else`: only reached if every one of _MAX_TURNS_GEMINI
                 # iterations executed a function call and none of them was
                 # finish_review -- i.e. the turn budget was exhausted.
                 logger.warning(
                     "Gemini session [%s] exhausted its %d-turn budget without a finish_review call",
                     label or "unlabeled",
-                    _MAX_TURNS,
+                    _MAX_TURNS_GEMINI,
                 )
 
             result_text = _build_result_text(findings_sink, files_explored)
