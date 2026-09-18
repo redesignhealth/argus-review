@@ -246,6 +246,55 @@ class TestDegradedCoverageFindings:
         assert "Reviewer session" not in findings[0].description
         assert "precheck:zizmor" in findings[0].description
 
+    def test_build_degraded_coverage_findings_words_missing_scanner_distinctly_from_crashed(
+        self,
+    ) -> None:
+        """A never-installed scanner ('scanner not installed') must read
+        differently from a crashed one ('scanner did not complete this
+        round') in both the description and the remediation suggestion --
+        the reader needs "install it" vs. "investigate a failure", not one
+        indistinguishable phrase for both."""
+        from argus.helpers import build_degraded_coverage_findings
+
+        crashed, missing = build_degraded_coverage_findings(
+            [
+                ("precheck:zizmor", "scanner did not complete this round"),
+                ("precheck:trivy", "scanner not installed"),
+            ]
+        )
+        assert "did not complete" in crashed.description
+        assert "is not installed" in missing.description
+        assert "is not installed" not in crashed.description
+        assert "did not complete" not in missing.description
+        assert missing.suggestion is not None
+        assert "install" in missing.suggestion.lower()
+        assert "trivy" in missing.suggestion.lower()
+
+    def test_build_degraded_coverage_findings_words_turn_budget_exhausted_distinctly(
+        self,
+    ) -> None:
+        """A reviewer that ran out of turns is neither a crash nor a
+        timeout -- it explored the change but never finished reporting, so
+        the wording (and remediation) must say that, not lump it into the
+        generic 'did not complete (<reason>)' fallback crashed/timed-out
+        entries don't hit either (they get their own dedicated phrasing)."""
+        from argus.helpers import build_degraded_coverage_findings
+
+        crashed, timed_out, exhausted = build_degraded_coverage_findings(
+            [
+                ("specialist/security", "worker_crashed"),
+                ("system/backend", "timeout"),
+                ("cross-cutting", "turn_budget_exhausted"),
+            ]
+        )
+        assert "ran out of turns" in exhausted.description
+        assert "timed out" not in exhausted.description
+        assert "worker_crashed" not in exhausted.description
+        assert "ran out of turns" not in crashed.description
+        assert "ran out of turns" not in timed_out.description
+        assert exhausted.suggestion is not None
+        assert "unreviewed" in exhausted.suggestion.lower()
+
     def test_compute_persisted_finding_counts_excludes_coverage_gap(self) -> None:
         """A synthetic coverage-gap SUGGESTION finding (from a crashed/
         timed-out reviewer session) must not inflate the persisted
@@ -524,6 +573,37 @@ class TestNodeCollectFindingsAllCrashedGuard:
                 timed_out.model_dump(),
                 another_crashed.model_dump(),
             ],
+        }
+
+        with pytest.raises(RuntimeError, match="All reviewers failed"):
+            await _node_collect_findings(state)
+
+    @pytest.mark.asyncio
+    async def test_all_reviewers_exhausted_raises_instead_of_proceeding(self) -> None:
+        """A reviewer that ran out of its turn budget must NOT count as
+        successful -- same guard as a crashed/timed-out reviewer, for the
+        new 'turn_budget_exhausted' failure_reason.
+        """
+        from argus.graph import _node_collect_findings
+
+        exhausted = SystemReviewResult(
+            system_group="backend",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="turn_budget_exhausted",
+        )
+        another_exhausted = SystemReviewResult(
+            system_group="cross-cutting",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="turn_budget_exhausted",
+        )
+
+        state = {
+            "plan": _make_plan_dict(),
+            "findings": [exhausted.model_dump(), another_exhausted.model_dump()],
         }
 
         with pytest.raises(RuntimeError, match="All reviewers failed"):

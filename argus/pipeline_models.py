@@ -18,7 +18,7 @@ from typing import Any, Literal, get_args
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 
 
-FailureReason = Literal["timeout", "worker_crashed"]
+FailureReason = Literal["timeout", "worker_crashed", "turn_budget_exhausted"]
 
 
 def _sync_timed_out_and_failure_reason(
@@ -154,13 +154,14 @@ class SystemReviewResult(BaseModel):
         default_factory=list, description="Files the reviewer actually read"
     )
     cost_usd: float = Field(default=0.0, description="Agent session cost in USD")
-    failure_reason: Literal["timeout", "worker_crashed"] | None = Field(
+    failure_reason: FailureReason | None = Field(
         default=None,
         description=(
-            "'timeout' or 'worker_crashed' when this reviewer's subprocess did not "
-            "complete normally; None for a run that completed (even with 0 findings). "
-            "Additive field: absent/None for all pre-existing rows means 'not known "
-            "to have failed', not 'confirmed completed'."
+            "'timeout', 'worker_crashed', or 'turn_budget_exhausted' when this "
+            "reviewer's session did not complete normally; None for a run that "
+            "completed (even with 0 findings). Additive field: absent/None for "
+            "all pre-existing rows means 'not known to have failed', not "
+            "'confirmed completed'."
         ),
     )
     timed_out: bool = Field(
@@ -329,15 +330,15 @@ class AgentRunData(BaseModel):
     files_explored: list[str] = Field(default_factory=list)
     finding_count: int = Field(default=0)
     result_text_length: int = Field(default=0)
-    failure_reason: Literal["timeout", "worker_crashed"] | None = Field(
+    failure_reason: FailureReason | None = Field(
         default=None,
         description=(
-            "'timeout' or 'worker_crashed' when this run produced no real result; "
-            "None for a run that completed normally. Additive field: absent/None "
-            "for all pre-existing rows means 'not known to have failed', not "
-            "'confirmed completed' -- relevant because this model is reconstructed "
-            "from persisted rows via model_validate(), so a pre-migration NULL "
-            "flows through here too."
+            "'timeout', 'worker_crashed', or 'turn_budget_exhausted' when this run "
+            "produced no real result; None for a run that completed normally. "
+            "Additive field: absent/None for all pre-existing rows means 'not known "
+            "to have failed', not 'confirmed completed' -- relevant because this "
+            "model is reconstructed from persisted rows via model_validate(), so a "
+            "pre-migration NULL flows through here too."
         ),
     )
     timed_out: bool = Field(

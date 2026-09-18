@@ -202,3 +202,11 @@ class ReviewResponse(BaseModel):
         default="",
         description="Preflight routing reason — stored in result_json for lite round history",
     )
+    stage_costs: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-stage USD cost for this round (planner, writer, reviewer:<label>, ...)",
+    )
+    stage_seconds: dict[str, float] = Field(
+        default_factory=dict,
+        description="Per-stage wall-clock seconds for this round, keyed like stage_costs",
+    )

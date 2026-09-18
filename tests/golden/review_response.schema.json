@@ -306,6 +306,22 @@
     "risk_level": {
       "$ref": "#/$defs/RiskLevel"
     },
+    "stage_costs": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "description": "Per-stage USD cost for this round (planner, writer, reviewer:<label>, ...)",
+      "title": "Stage Costs",
+      "type": "object"
+    },
+    "stage_seconds": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "description": "Per-stage wall-clock seconds for this round, keyed like stage_costs",
+      "title": "Stage Seconds",
+      "type": "object"
+    },
     "usage": {
       "$ref": "#/$defs/TokenUsage"
     },

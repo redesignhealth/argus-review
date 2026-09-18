@@ -44,7 +44,14 @@ from argus.helpers import (
     compute_persisted_finding_counts,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
-from argus.llm.pricing import get_token_cost
+from argus.llm.usage import (
+    StageCostCallbackHandler,
+    price_openai_usage,
+    record_stage_cost,
+    stage_costs,
+    stage_ledger,
+    stage_seconds,
+)
 
 from langchain.chat_models import init_chat_model
 from anthropic import APIConnectionError, APITimeoutError
@@ -71,7 +78,6 @@ from argus.models import (
     ReviewResponse,
     RiskLevel,
     Severity,
-    TokenUsage,
     Verdict,
 )
 from argus.pipeline_models import (
@@ -80,7 +86,6 @@ from argus.pipeline_models import (
     CoverageResult,
     DismissedFinding,
     FeedbackVerificationResult,
-    FindingValidationResult,
     PriorFinding,
     PriorReviewContext,
     RawFinding,
@@ -125,31 +130,7 @@ _checkpoint_tables_created = False
 _PLANNER_MODEL = f"anthropic:{CLAUDE_FRONTIER}"
 _WRITER_MODEL = f"anthropic:{CLAUDE_DEFAULT}"
 _COVERAGE_MODEL = f"anthropic:{CLAUDE_FRONTIER}"
-# run_lite_review() and _estimate_lite_review_cost() must agree on which
-# model actually ran -- a single constant instead of two independent
-# f"anthropic:{CLAUDE_DEFAULT}"/CLAUDE_DEFAULT references means a future
-# change to one call site can't silently leave the other mispriced.
 _LITE_REVIEW_MODEL = CLAUDE_DEFAULT
-
-
-def _estimate_lite_review_cost(usage: TokenUsage, model: str) -> float:
-    """Approximate USD cost for the lite-review path from raw token counts.
-
-    The lite path bypasses ``agent_runs`` cost tracking entirely, so this is
-    the only place its cost is ever computed. Pricing comes from
-    ``argus.llm.pricing`` (litellm-backed); if the model has no pricing
-    entry, cost for this call is silently omitted (logged, not raised) --
-    cost tracking is observability, not a correctness gate.
-    """
-    token_cost = get_token_cost(model)
-    if token_cost is None:
-        return 0.0
-    return (
-        usage.input_tokens * token_cost.input_cost_per_token
-        + usage.output_tokens * token_cost.output_cost_per_token
-        + usage.cache_read_tokens * token_cost.cache_read_cost_per_token
-        + usage.cache_creation_tokens * token_cost.cache_write_cost_per_token
-    )
 
 
 # Git SHA validation — accept short (7+) through full (40) hex digests. Used
@@ -182,6 +163,15 @@ _HIGH_BLAST_RADIUS_SUFFIXES = (
 # and _edge_fan_out_gap_fills. Guards against planner-produced plans with an
 # unbounded number of system groups (e.g. a very large monorepo PR).
 _MAX_REVIEWER_FANOUT = 50
+
+# Per-group file cap instructed to the planner (see _build_planner_messages).
+# Measured: groups over this size reliably exhausted the reviewer's turn budget.
+_MAX_GROUP_FILES = 8
+
+# ReviewResponse fields the writer/lite-review OpenAI extraction call must
+# never be asked to produce: free-form dicts (not expressible in OpenAI
+# strict-mode schemas) and flags/data the pipeline sets itself, never the LLM.
+_PIPELINE_ONLY_RESPONSE_FIELDS = frozenset({"stage_costs", "stage_seconds"})
 
 # LangGraph max_concurrency cap passed to graph.ainvoke. Limits how many
 # reviewer nodes run concurrently so the connection pool and Claude API
@@ -253,6 +243,9 @@ class ReviewState(TypedDict, total=False):
     precheck_scanner_failures: list[
         str
     ]  # scanner names that returned None this round (crashed/timed out) -- observability only
+    precheck_missing_scanners: list[
+        str
+    ]  # scanner names never installed this round (standing config gap, not transient)
     bench_config_changes: list[
         str
     ]  # bench config paths or routing lines modified this PR (TECH-6282)
@@ -520,7 +513,7 @@ async def _apply_dismissals(
     )
 
     llm = _get_llm(
-        f"anthropic:{CLAUDE_MINI}", max_tokens=1024, temperature=0
+        f"anthropic:{CLAUDE_MINI}", "dismiss_match", max_tokens=1024, temperature=0
     ).with_structured_output(DismissMatches)
     result = await llm.ainvoke([{"role": "user", "content": prompt}])
 
@@ -833,7 +826,9 @@ def _build_planner_messages(prompt: str, diff: str, description: str) -> list[di
         f"## PR Diff\n\n```diff\n{diff}\n```\n\n"
         "Analyze this PR and produce a ReviewPlan. Group the changed files into "
         "logical system groups for parallel review. Identify any cross-cutting concerns. "
-        "For each group, assign specialists_needed based on file patterns."
+        "For each group, assign specialists_needed based on file patterns. "
+        f"Keep each system group to at most {_MAX_GROUP_FILES} files -- split a group that "
+        "would exceed this into multiple narrower groups rather than emitting one oversized group."
     )
     return [
         {"role": "system", "content": prompt},
@@ -977,7 +972,7 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
             # fixed pins, on the theory that the empirical verification below
             # was never run against an arbitrary override value. That created
             # a real regression: `run_preflight_check` calls
-            # `_get_llm(f"anthropic:{CLAUDE_DEFAULT}", temperature=0)`, so
+            # `_get_llm(f"anthropic:{CLAUDE_DEFAULT}", "preflight", temperature=0)`, so
             # setting ARGUS_SPECIALIST_MODEL=claude-sonnet-5 (the *previous*
             # default, and a highly plausible rollback choice -- it's also
             # used as an override value in this suite's own tests) resolved
@@ -1030,7 +1025,7 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
     # claude-haiku-4-5`, used directly by this suite's own tests) would pull
     # that value into the union above via the CLAUDE_DEFAULT/CLAUDE_FRONTIER
     # terms, and then _apply_dismissals's `_get_llm(f"anthropic:{CLAUDE_MINI}",
-    # temperature=0)` call would have ITS temperature silently stripped too
+    # "dismiss_match", temperature=0)` call would have ITS temperature silently stripped too
     # -- a real, silent determinism regression in a call site that has
     # nothing to do with the override, caught in Argus round 3 review of
     # this PR. `- {CLAUDE_MINI}` guarantees CLAUDE_MINI's resolved value can
@@ -1040,7 +1035,9 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
 )
 
 
-def _get_llm(model_id: str, max_tokens: int = 16384, temperature: float | None = None) -> Any:
+def _get_llm(
+    model_id: str, stage: str, max_tokens: int = 16384, temperature: float | None = None
+) -> Any:
     """Create a LangChain chat model with explicit API key from settings.
 
     ``langchain_anthropic.ChatAnthropic`` has no ``auth_token``/bearer-style
@@ -1050,10 +1047,18 @@ def _get_llm(model_id: str, max_tokens: int = 16384, temperature: float | None =
     only ANTHROPIC_AUTH_TOKEN is configured, pass its value through as the
     api_key kwarg anyway: this is a real limitation for gateways that reject
     x-api-key, but works for any gateway that accepts either header.
+
+    ``stage`` attaches a :class:`~argus.llm.usage.StageCostCallbackHandler`
+    so every call this model instance makes prices itself into the active
+    :func:`~argus.llm.usage.stage_ledger` under that name.
     """
     settings = get_settings()
     _, anthropic_credential = settings.anthropic_credential
-    kwargs: dict[str, Any] = {"api_key": anthropic_credential, "max_tokens": max_tokens}
+    kwargs: dict[str, Any] = {
+        "api_key": anthropic_credential,
+        "max_tokens": max_tokens,
+        "callbacks": [StageCostCallbackHandler(stage)],
+    }
     resolved_model = model_id.rsplit(":", 1)[-1]
     if temperature is not None and resolved_model not in _TEMPERATURE_UNSUPPORTED_MODELS:
         kwargs["temperature"] = temperature
@@ -1089,7 +1094,7 @@ async def plan_review(diff: str, description: str) -> ReviewPlan:
     prompt = await fetch_prompt("pr-review-planner")
     messages = _build_planner_messages(prompt, diff, description)
     model = (
-        _get_llm(_PLANNER_MODEL)
+        _get_llm(_PLANNER_MODEL, "planner")
         .bind_tools([ReviewPlan], tool_choice="ReviewPlan")
         .with_config(
             run_name="planner-phase1-stream",
@@ -1312,8 +1317,11 @@ async def verify_prior_feedback(
     return await run_feedback_verifier_session(prior_context, diff, settings, repo_root=repo_root)
 
 
-async def check_coverage(plan: ReviewPlan, findings: list[SystemReviewResult]) -> CoverageResult:
-    """Coverage check: mechanical set-difference + LLM triage for ambiguous gaps."""
+async def check_coverage(
+    plan: ReviewPlan,
+    findings: list[SystemReviewResult],
+) -> CoverageResult:
+    """Coverage check: mechanical set-difference, then LLM triage for ambiguous gaps."""
     from argus.helpers import collect_reviewed_files as _collect_reviewed_files
 
     manifest_files = {fe.path for fe in plan.file_manifest}
@@ -1331,7 +1339,7 @@ async def check_coverage(plan: ReviewPlan, findings: list[SystemReviewResult]) -
     )
 
     prompt = await fetch_prompt("pr-review-coverage-check")
-    model = _get_llm(_COVERAGE_MODEL).with_structured_output(CoverageResult)
+    model = _get_llm(_COVERAGE_MODEL, "coverage").with_structured_output(CoverageResult)
     messages = [
         {"role": "system", "content": prompt},
         *_build_coverage_messages(plan, findings, sorted(uncovered)),
@@ -1360,7 +1368,7 @@ async def write_review(
 
     settings = get_settings()
     prompt = await fetch_prompt("pr-review-writer")
-    model = _get_llm(_WRITER_MODEL)
+    model = _get_llm(_WRITER_MODEL, "writer")
 
     messages = [
         {
@@ -1377,7 +1385,9 @@ async def write_review(
     # Phase 2: GPT-5.4-mini extracts structured ReviewResponse
     def _extract() -> ReviewResponse:
         oai = OpenAIClientSync(api_key=settings.OPENAI_API_KEY)
-        response_format = pydantic_to_response_format(ReviewResponse, "review_response")
+        response_format = pydantic_to_response_format(
+            ReviewResponse, "review_response", exclude=_PIPELINE_ONLY_RESPONSE_FIELDS
+        )
         extraction_prompt = (
             "Extract the structured review response from the following code review text. "
             "Parse out ALL fields: verdict, risk_level, findings, prior_feedback, "
@@ -1397,6 +1407,8 @@ async def write_review(
             instructions="You are a JSON extraction assistant. Parse the review text into the schema.",
             text_format=response_format,
         )
+        if resp.usage is not None:
+            record_stage_cost("writer_extract", price_openai_usage(GPT_MINI, resp.usage))
         return ReviewResponse.model_validate_json(resp.output_text)
 
     return await asyncio.to_thread(_extract)
@@ -1432,7 +1444,7 @@ async def run_preflight_check(
     """
     prompt = await fetch_prompt("pr-review-preflight-router")
     llm = _get_llm(
-        f"anthropic:{CLAUDE_DEFAULT}", max_tokens=256, temperature=0
+        f"anthropic:{CLAUDE_DEFAULT}", "preflight", max_tokens=256, temperature=0
     ).with_structured_output(PreflightResult)
     prior_context = (
         f"Prior round verdict: {prior_verdict}" if prior_verdict else "No prior review (round 1)"
@@ -1463,7 +1475,7 @@ async def run_lite_review(
 
     settings = get_settings()
     prompt = await fetch_prompt("pr-review-lite")
-    model = _get_llm(f"anthropic:{_LITE_REVIEW_MODEL}")
+    model = _get_llm(f"anthropic:{_LITE_REVIEW_MODEL}", "lite_review")
 
     messages = [
         {"role": "system", "content": prompt},
@@ -1482,7 +1494,9 @@ async def run_lite_review(
 
     def _extract() -> ReviewResponse:
         oai = OpenAIClientSync(api_key=settings.OPENAI_API_KEY)
-        response_format = pydantic_to_response_format(ReviewResponse, "review_response")
+        response_format = pydantic_to_response_format(
+            ReviewResponse, "review_response", exclude=_PIPELINE_ONLY_RESPONSE_FIELDS
+        )
         extraction_prompt = (
             "Extract the structured review response from the following lite code review text. "
             "Parse out: verdict, risk_level, review_comment (the full markdown text as-is), "
@@ -1497,6 +1511,8 @@ async def run_lite_review(
             instructions="You are a JSON extraction assistant. Parse the review text into the schema.",
             text_format=response_format,
         )
+        if resp.usage is not None:
+            record_stage_cost("lite_extract", price_openai_usage(GPT_MINI, resp.usage))
         return ReviewResponse.model_validate_json(resp.output_text)
 
     response = await asyncio.to_thread(_extract)
@@ -1641,6 +1657,10 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
         # same degraded-coverage pattern already used for killed/timed-out
         # LLM reviewer sessions.
         update["precheck_scanner_failures"] = result.failed_scanners
+    if result.missing_scanners:
+        # Own key rather than merged into precheck_scanner_failures so it
+        # reads as a standing config gap, not a crash.
+        update["precheck_missing_scanners"] = result.missing_scanners
 
     if result.candidate_findings:
         try:
@@ -1777,6 +1797,7 @@ async def _node_early_verifier(state: ReviewState, config: RunnableConfig) -> di
         sum(1 for i in result.items if i.status.value == "REGRESSED"),
     )
 
+    record_stage_cost("verify", result.cost_usd, agent_run.duration_seconds if agent_run else 0.0)
     state_update: dict[str, Any] = {"verification": result.model_dump()}
     if agent_run is not None:
         state_update["agent_runs"] = [agent_run.model_dump(mode="json")]
@@ -1845,7 +1866,11 @@ async def _node_preflight(state: ReviewState) -> dict[str, Any]:
         logger.warning("Preflight check failed — falling back to full review", exc_info=True)
         result = PreflightResult(route="full", reason="preflight failed, defaulting to full review")
         is_lite = False
-    return {"preflight_result": result.model_dump(), "is_lite": is_lite, "is_catchup_merge": False}
+    return {
+        "preflight_result": result.model_dump(),
+        "is_lite": is_lite,
+        "is_catchup_merge": False,
+    }
 
 
 def _is_catchup_merge_only(repo: str, prior_sha: str, head_sha: str) -> bool:
@@ -2337,6 +2362,14 @@ async def _node_plan(state: ReviewState) -> dict[str, Any]:
         len(plan.system_groups),
         len(plan.cross_cutting_concerns),
     )
+    oversized = [g.name for g in plan.system_groups if len(g.files) > _MAX_GROUP_FILES]
+    if oversized:
+        logger.warning(
+            "Planner emitted %d group(s) over the %d-file cap despite prompt instruction: %s",
+            len(oversized),
+            _MAX_GROUP_FILES,
+            ", ".join(oversized),
+        )
 
     return {"plan": plan.model_dump()}
 
@@ -2633,6 +2666,7 @@ async def _node_run_reviewer(inputs: ReviewerInput, config: RunnableConfig) -> d
         _files = result.files_explored[:5]
         _files_str = ", ".join(_files) + (" ..." if len(result.files_explored) > 5 else "")
         _dur = agent_run.duration_seconds if agent_run else 0.0
+        record_stage_cost(f"reviewer:{_label}", result.cost_usd, _dur)
         if result.failure_reason is not None:
             logger.warning(
                 "Reviewer [%s] FAILED (%s) after %.1fs — treated as 0 findings, "
@@ -2879,11 +2913,20 @@ async def _node_validate_blockings(state: ReviewState, config: RunnableConfig) -
 
     settings = get_settings()
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
+
     validation, validator_agent_run = await run_blocking_validator_session(
         [f.model_dump(mode="json") for f in blocking_findings],
         state["diff"],
         settings,
         repo_root=worktree_path,
+    )
+    record_stage_cost(
+        "validate",
+        validation.cost_usd,
+        validator_agent_run.duration_seconds if validator_agent_run else 0.0,
+    )
+    validator_runs = (
+        [validator_agent_run.model_dump(mode="json")] if validator_agent_run is not None else []
     )
 
     # Partition findings into confirmed and rejected
@@ -2891,10 +2934,6 @@ async def _node_validate_blockings(state: ReviewState, config: RunnableConfig) -
     for item in validation.items:
         if item.verdict == ValidationVerdict.REJECTED:
             rejected_indices.add(item.index)
-
-    validator_runs: list[dict[str, Any]] = (
-        [validator_agent_run.model_dump(mode="json")] if validator_agent_run is not None else []
-    )
 
     if not rejected_indices:
         logger.info("All %d BLOCKING findings confirmed", len(blocking_findings))
@@ -3414,44 +3453,38 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
                 ),
             )
 
-    if head_sha_for_worktree is not None:
-        # Fail-closed by design: if provisioning raises (e.g. SHA mismatch, or
-        # a transient clone/fetch failure), we let it propagate and abort the
-        # review rather than silently falling back to _invoke_graph(None).
-        # Reviewing the wrong tree (or quietly degrading to diff-only when a
-        # SHA was explicitly requested) is worse than failing the run, which
-        # an external orchestrator can retry. Do not soften this to a
-        # try/except fallback.
-        async with provisioned_worktree(
-            repo=request.repo,
-            head_sha=head_sha_for_worktree,
-            token=settings.GITHUB_TOKEN_RO,
-        ) as worktree_path:
-            result = await _invoke_graph(worktree_path, head_sha=head_sha_for_worktree)
-    else:
-        result = await _invoke_graph(None)
+    # Wraps the whole graph invocation, including fanned-out reviewer tasks,
+    # so every LLM call records into the same per-review ledger.
+    with stage_ledger():
+        if head_sha_for_worktree is not None:
+            # Fail-closed by design: if provisioning raises (e.g. SHA mismatch, or
+            # a transient clone/fetch failure), we let it propagate and abort the
+            # review rather than silently falling back to _invoke_graph(None).
+            # Reviewing the wrong tree (or quietly degrading to diff-only when a
+            # SHA was explicitly requested) is worse than failing the run, which
+            # an external orchestrator can retry. Do not soften this to a
+            # try/except fallback.
+            async with provisioned_worktree(
+                repo=request.repo,
+                head_sha=head_sha_for_worktree,
+                token=settings.GITHUB_TOKEN_RO,
+            ) as worktree_path:
+                result = await _invoke_graph(worktree_path, head_sha=head_sha_for_worktree)
+        else:
+            result = await _invoke_graph(None)
 
-    response = ReviewResponse.model_validate(result["response"])
+        response = ReviewResponse.model_validate(result["response"])
+        response.stage_costs = stage_costs()
+        response.stage_seconds = stage_seconds()
+
     elapsed = time.monotonic() - pipeline_start
     is_lite = result.get("is_lite", False)
     reviewer_version = "v3-lite" if is_lite else "v3"
 
-    # Aggregate cost from all subagent findings + verification + validation
+    # stage_costs is the single source of truth for cost -- do not also sum
+    # the per-component costs that fed it (that would double-count).
     findings_models = [SystemReviewResult.model_validate(f) for f in result.get("findings", [])]
-    total_cost_usd = sum(f.cost_usd for f in findings_models)
-    verification_data = result.get("verification", {})
-    if verification_data:
-        total_cost_usd += FeedbackVerificationResult.model_validate(verification_data).cost_usd
-    validation_data = result.get("validation", {})
-    if validation_data:
-        total_cost_usd += FindingValidationResult.model_validate(validation_data).cost_usd
-
-    if is_lite:
-        # Lite path bypasses agent_runs cost tracking; approximate from token counts
-        # captured in run_lite_review. Use += to preserve early_verifier cost
-        # (round 2+) already accumulated above.
-        total_cost_usd += _estimate_lite_review_cost(response.usage, _LITE_REVIEW_MODEL)
-
+    total_cost_usd = sum(response.stage_costs.values())
     response.usage.cost_usd = total_cost_usd
 
     # Opt-in, off by default -- see ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE's

@@ -267,6 +267,31 @@ async def test_precheck_rules_attaches_failed_scanner_names() -> None:
     mock_log.assert_not_awaited()
 
 
+async def test_precheck_rules_attaches_missing_scanner_names_separately() -> None:
+    """A never-installed scanner (see PrecheckResult.missing_scanners) must
+    surface into state as its own precheck_missing_scanners key, not
+    precheck_scanner_failures -- so a standing config gap stays
+    distinguishable from a crash all the way to the review comment.
+    """
+    from argus.precheck.engine import PrecheckResult
+
+    with (
+        patch(
+            "argus.precheck.engine.run_precheck",
+            new=AsyncMock(
+                return_value=PrecheckResult(failed_scanners=["zizmor"], missing_scanners=["trivy"])
+            ),
+        ),
+        patch("argus.storage.precheck.log_candidate_firings", new=AsyncMock()),
+    ):
+        result = await _node_precheck_rules(
+            _make_state(), {"configurable": {"worktree_path": "/tmp/wt"}}
+        )
+
+    assert result["precheck_scanner_failures"] == ["zizmor"]
+    assert result["precheck_missing_scanners"] == ["trivy"]
+
+
 async def test_precheck_rules_verified_findings_set_fast_fail() -> None:
     from argus.precheck.engine import PrecheckResult
     from argus.precheck.sarif import SarifResult

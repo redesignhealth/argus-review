@@ -351,6 +351,21 @@ class TestBuildDegradedCoverageLabels:
             ("precheck:zizmor", "scanner did not complete this round"),
         ]
 
+    def test_missing_scanners_get_a_distinct_reason_from_crashed_scanners(self) -> None:
+        """A never-installed scanner (precheck_missing_scanners) must not
+        collapse into the same reason text as a crashed one
+        (precheck_scanner_failures) -- the reader needs to tell "install
+        it" apart from "investigate a failure"."""
+        results: list[SystemReviewResult] = []
+        graph_result = {
+            "precheck_scanner_failures": ["zizmor"],
+            "precheck_missing_scanners": ["trivy"],
+        }
+        assert build_degraded_coverage_labels(results, graph_result) == [
+            ("precheck:zizmor", "scanner did not complete this round"),
+            ("precheck:trivy", "scanner not installed"),
+        ]
+
 
 class TestApplyPrecheckScannerFailureGate:
     """ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is opt-in and off by default
@@ -731,13 +746,61 @@ class TestApplyPrecheckGateAndSurfaceDegradedCoverage:
         assert response.findings == []
         assert response.review_comment == original_comment
 
+    def test_missing_scanner_default_config_surfaces_but_does_not_block(self) -> None:
+        """The bug this whole change fixes: a never-installed scanner must
+        become visible (a coverage-gap finding + the markdown section) even
+        though ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is unset (the
+        default) -- and the default-off gate must remain a true no-op, same
+        as for a crashed scanner."""
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        graph_result = {"precheck_missing_scanners": ["trivy"]}
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response, findings_models=[], graph_result=graph_result, block_on_failure=False
+            )
+        )
+        assert gate_added_precheck_finding is False
+        assert failed_labels == [("precheck:trivy", "scanner not installed")]
+        assert response.verdict == Verdict.APPROVE
+        assert len(response.findings) == 1
+        assert response.findings[0].category == "coverage-gap"
+        assert "is not installed" in response.findings[0].description
+        assert "⚠ Degraded coverage" in response.review_comment
+
+    def test_missing_scanner_feeds_the_gate_when_block_on_failure_is_set(self) -> None:
+        """When the opt-in flag IS set, a never-installed scanner must be
+        treated the same as a crashed one for gating purposes -- both mean
+        "no confirmed coverage from this scanner this round" -- forcing
+        BLOCKING exactly like TestApplyPrecheckGateAndSurfaceDegradedCoverage's
+        crashed-scanner equivalent above."""
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        graph_result = {"precheck_missing_scanners": ["trivy"]}
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response, findings_models=[], graph_result=graph_result, block_on_failure=True
+            )
+        )
+        assert gate_added_precheck_finding is True
+        assert failed_labels == [("precheck:trivy", "scanner not installed")]
+        assert response.verdict == Verdict.BLOCKING
+        assert len(response.findings) == 1
+        assert response.findings[0].category == "deterministic-precheck"
+
     def test_mixed_timed_out_reviewer_and_precheck_failure_same_round(self) -> None:
         """Production-realistic mixed shape: a timed-out LLM reviewer
         session AND a crashed precheck scanner in the same round, with the
         gate off (the default). Both failure classes must be surfaced --
         two coverage-gap findings plus the markdown section -- since
         reviewer-session failures and precheck-scanner failures are
-        different failure classes this flag was never scoped to unify."""
+        different failure classes this flag was never scoped to unify.
+
+        The reviewer failure also forces BLOCKING (see
+        TestApplyReviewerFailureGate) -- only the reviewer's own
+        coverage-gap finding is promoted, not the precheck scanner's."""
         from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
 
         response = _response()
@@ -764,7 +827,7 @@ class TestApplyPrecheckGateAndSurfaceDegradedCoverage:
             ("backend", "timeout"),
             ("precheck:zizmor", "scanner did not complete this round"),
         }
-        assert response.verdict == Verdict.APPROVE
+        assert response.verdict == Verdict.BLOCKING
         assert len(response.findings) == 2
         categories = {f.category for f in response.findings}
         assert categories == {"coverage-gap"}
@@ -772,6 +835,54 @@ class TestApplyPrecheckGateAndSurfaceDegradedCoverage:
         assert any("backend" in d for d in descriptions)
         assert any("precheck:zizmor" in d for d in descriptions)
         assert "⚠ Degraded coverage" in response.review_comment
+
+        reviewer_finding = next(f for f in response.findings if "'backend'" in f.description)
+        precheck_finding = next(
+            f for f in response.findings if "'precheck:zizmor'" in f.description
+        )
+        assert reviewer_finding.severity == Severity.BLOCKING
+        assert precheck_finding.severity == Severity.SUGGESTION
+
+
+class TestApplyReviewerFailureGate:
+    """Task: a review with a failed reviewer may not APPROVE -- covers both
+    directions so a future change can't quietly widen or drop the rule."""
+
+    def test_reviewer_failure_forces_blocking_even_with_no_other_findings(self) -> None:
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        crashed_reviewer = SystemReviewResult(
+            system_group="auth",
+            findings=[],
+            files_explored=[],
+            cost_usd=0.0,
+            failure_reason="worker_crashed",
+        )
+        apply_precheck_gate_and_surface_degraded_coverage(
+            response, findings_models=[crashed_reviewer], graph_result={}, block_on_failure=False
+        )
+        assert response.verdict == Verdict.BLOCKING
+        assert response.risk_level == RiskLevel.HIGH
+        assert any(
+            f.category == "coverage-gap" and f.severity == Severity.BLOCKING
+            for f in response.findings
+        )
+        assert "🚫 BLOCKING" in response.review_comment
+
+    def test_no_reviewer_failures_leaves_approve_unchanged(self) -> None:
+        from argus.helpers import apply_precheck_gate_and_surface_degraded_coverage
+
+        response = _response()
+        gate_added_precheck_finding, failed_labels = (
+            apply_precheck_gate_and_surface_degraded_coverage(
+                response, findings_models=[], graph_result={}, block_on_failure=False
+            )
+        )
+        assert failed_labels == []
+        assert response.verdict == Verdict.APPROVE
+        assert response.risk_level == RiskLevel.LOW
+        assert response.findings == []
 
 
 class TestRiskLevelOrderExhaustive:

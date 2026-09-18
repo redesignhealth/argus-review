@@ -169,11 +169,11 @@ class AgentRunIn(BaseModel):
     files_explored: list[str] = Field(default_factory=list)
     finding_count: int = 0
     result_text_length: int = 0
-    failure_reason: Literal["timeout", "worker_crashed"] | None = Field(
+    failure_reason: Literal["timeout", "worker_crashed", "turn_budget_exhausted"] | None = Field(
         default=None,
         description=(
-            "'timeout' or 'worker_crashed' when this run produced no real result; "
-            "None for a run that completed normally."
+            "'timeout', 'worker_crashed', or 'turn_budget_exhausted' when this run "
+            "produced no real result; None for a run that completed normally."
         ),
     )
 
