@@ -169,7 +169,7 @@ from argus.runners import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_TURNS_GEMINI = 45  # 30 * 1.5 — see TECH-6453
+_MAX_TURNS_GEMINI = 100  # raised from 45 -- see TECH-6558
 
 # Both "auto" and "on" attempt explicit caching today -- there is no
 # separate heuristic distinguishing them yet (Track 1 defined the
