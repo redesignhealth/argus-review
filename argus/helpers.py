@@ -16,6 +16,10 @@ from argus.pipeline_models import RawFinding, SystemReviewResult
 
 logger = logging.getLogger(__name__)
 
+# Shared between the producer (build_degraded_coverage_labels) and consumer
+# (build_degraded_coverage_findings) so the two can't drift apart.
+_SCANNER_NOT_INSTALLED_REASON = "scanner not installed"
+
 
 def sanitize_file_paths(files: list[str], repo_root: str) -> list[str]:
     """Sanitize file paths to prevent path traversal attacks."""
@@ -180,11 +184,18 @@ def build_degraded_coverage_labels(
     A typo in the producer's own literal is still only caught by
     ``tests/test_graph_precheck.py``'s existing assertion on that exact
     key -- this function closes the read side, not the write side.
+
+    ``precheck_missing_scanners`` (never-installed scanners) gets its own
+    reason string, distinct from a crashed scanner's.
     """
     failed_labels = failed_reviewer_labels(findings_models)
     failed_labels += [
         (f"precheck:{name}", "scanner did not complete this round")
         for name in graph_result.get("precheck_scanner_failures", [])
+    ]
+    failed_labels += [
+        (f"precheck:{name}", _SCANNER_NOT_INSTALLED_REASON)
+        for name in graph_result.get("precheck_missing_scanners", [])
     ]
     return failed_labels
 
@@ -263,7 +274,34 @@ def build_degraded_coverage_findings(
     for label, reason in failed_labels:
         is_precheck = label.startswith("precheck:")
         subject = "Precheck scanner" if is_precheck else "Reviewer session"
-        reason_desc = "timed out" if reason == "timeout" else f"did not complete ({reason})"
+        is_missing = reason == _SCANNER_NOT_INSTALLED_REASON
+        # Distinct wording from a crash/timeout: the reviewer was alive and
+        # exploring, it just never reached finish_review.
+        is_exhausted = reason == "turn_budget_exhausted"
+        if is_missing:
+            reason_desc = "is not installed"
+        elif reason == "timeout":
+            reason_desc = "timed out"
+        elif is_exhausted:
+            reason_desc = "ran out of turns before finishing"
+        else:
+            reason_desc = f"did not complete ({reason})"
+        # Missing scanner: remediation is "install it", not "re-run".
+        if is_missing:
+            suggestion = (
+                f"Install {label.removeprefix('precheck:')} to restore this scanner's coverage."
+            )
+        elif is_exhausted:
+            suggestion = (
+                f"Re-run the review or manually inspect '{label}' -- it explored this "
+                "area but ran out of turns before reporting, so its files may be "
+                "unreviewed."
+            )
+        else:
+            suggestion = (
+                f"Re-run the review or manually inspect the changes in '{label}' "
+                f"to ensure potential issues were not missed due to {reason}."
+            )
         findings.append(
             Finding(
                 severity=Severity.SUGGESTION,
@@ -274,10 +312,7 @@ def build_degraded_coverage_findings(
                     f"{subject} '{label}' {reason_desc} and produced no findings. "
                     "Coverage for this area is degraded."
                 ),
-                suggestion=(
-                    f"Re-run the review or manually inspect the changes in '{label}' "
-                    f"to ensure potential issues were not missed due to {reason}."
-                ),
+                suggestion=suggestion,
             )
         )
     return findings
@@ -322,7 +357,8 @@ def apply_precheck_gate_and_surface_degraded_coverage(
     degraded coverage (the markdown section and the structured
     coverage-gap findings) -- combined into one function specifically so
     this ordering can never be silently violated by a future refactor
-    that pulls the two apart again.
+    that pulls the two apart again. Also applies :func:`apply_reviewer_failure_gate`
+    once the coverage-gap findings exist, since it needs to promote one of them.
 
     This ordering IS the round-3 BLOCKING fix: :func:`coverage_gap_findings_for_round`
     needs to know whether :func:`apply_precheck_scanner_failure_gate`
@@ -344,20 +380,64 @@ def apply_precheck_gate_and_surface_degraded_coverage(
     ``apply_precheck_scanner_failure_gate``'s own return-value-for-logging
     convention (logging lives in ``graph.run_review``, which has the
     logger and the rest of this round's context).
+
+    Feeds the gate both crashed and never-installed scanner names combined --
+    both mean "no confirmed coverage" for gating purposes; they only need to
+    stay separate for wording (see :func:`build_degraded_coverage_labels`).
     """
     precheck_scanner_failures = graph_result.get("precheck_scanner_failures", [])
+    precheck_missing_scanners = graph_result.get("precheck_missing_scanners", [])
     gate_added_precheck_finding = apply_precheck_scanner_failure_gate(
-        response, precheck_scanner_failures, block_on_failure
+        response, precheck_scanner_failures + precheck_missing_scanners, block_on_failure
     )
     failed_labels = build_degraded_coverage_labels(findings_models, graph_result)
     if failed_labels:
         response.review_comment = append_degraded_coverage_section(
             response.review_comment, failed_labels
         )
-        response.findings.extend(
-            coverage_gap_findings_for_round(failed_labels, gate_added_precheck_finding)
-        )
+        new_findings = coverage_gap_findings_for_round(failed_labels, gate_added_precheck_finding)
+        response.findings.extend(new_findings)
+
+        # reviewer failures are always the leading entries of failed_labels
+        # (build_degraded_coverage_labels appends precheck entries after
+        # them), and coverage_gap_findings_for_round preserves that relative
+        # order -- so this slice is exactly the findings for failed reviewer
+        # sessions, never a precheck scanner's.
+        reviewer_failure_count = len(failed_reviewer_labels(findings_models))
+        if reviewer_failure_count and response.verdict == Verdict.APPROVE:
+            apply_reviewer_failure_gate(response, new_findings[:reviewer_failure_count])
     return gate_added_precheck_finding, failed_labels
+
+
+def apply_reviewer_failure_gate(
+    response: ReviewResponse, reviewer_coverage_gap_findings: list[Finding]
+) -> None:
+    """Force ``response.verdict`` to BLOCKING because a reviewer session
+    failed to complete -- a crashed/timed-out/exhausted reviewer contributes
+    zero findings, indistinguishable from a genuinely clean review.
+
+    Promotes the given coverage-gap SUGGESTION finding(s) (already in
+    ``response.findings``) to BLOCKING in place, and raises ``risk_level``
+    to at least HIGH. Unconditional, unlike
+    ``apply_precheck_scanner_failure_gate`` -- no opt-out flag.
+    """
+    for finding in reviewer_coverage_gap_findings:
+        finding.severity = Severity.BLOCKING
+    response.verdict = Verdict.BLOCKING
+    if _RISK_LEVEL_ORDER[response.risk_level] < _RISK_LEVEL_ORDER[RiskLevel.HIGH]:
+        response.risk_level = RiskLevel.HIGH
+    response.review_comment, match_count = re.subn(
+        r"\*\*Verdict\*\*:.*?(?=\n|$)",
+        f"**Verdict**: 🚫 BLOCKING | **Risk**: {response.risk_level.value}",
+        response.review_comment,
+        count=1,
+    )
+    if match_count == 0:
+        logger.warning(
+            "apply_reviewer_failure_gate: no '**Verdict**:'-shaped line found in "
+            "review_comment to rewrite -- the rendered comment's header may still read "
+            "the old verdict despite response.verdict now being BLOCKING"
+        )
 
 
 def compute_persisted_finding_counts(findings: list[Finding]) -> tuple[int, int]:
@@ -405,11 +485,13 @@ def apply_precheck_scanner_failure_gate(
     block_on_failure: bool,
 ) -> bool:
     """Force ``response``'s verdict to BLOCKING if a precheck scanner
-    failed this round and the opt-in ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE``
-    setting is on (see that setting's own docstring in ``argus/config.py``
-    for the fail-open-vs-fail-closed tradeoff this exists for). Mutates
-    ``response`` in place; returns whether it did anything, purely so the
-    caller can decide whether to log.
+    failed OR was never installed this round and the opt-in
+    ``ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE`` setting is on (see that
+    setting's own docstring in ``argus/config.py`` for the fail-open-vs-
+    fail-closed tradeoff this exists for). ``precheck_scanner_failures``
+    takes crashed and missing scanner names combined -- both count as "no
+    confirmed coverage" for gating. Mutates ``response`` in place; returns
+    whether it did anything, purely so the caller can decide whether to log.
 
     No-op in every other case: an empty ``precheck_scanner_failures``,
     ``block_on_failure`` false (the default), or a verdict that's already
@@ -452,7 +534,7 @@ def apply_precheck_scanner_failure_gate(
     note = (
         "Precheck scanner(s) "
         f"{', '.join(sorted(precheck_scanner_failures))} did not complete this "
-        "round (crashed, timed out, or hit an execution error). "
+        "round (crashed, timed out, hit an execution error, or is not installed). "
         "ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE is set, so this round cannot be "
         "APPROVE without confirmed coverage from every configured scanner."
     )

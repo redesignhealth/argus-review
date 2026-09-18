@@ -49,7 +49,7 @@ def test_get_llm_strips_temperature_for_claude_default() -> None:
         patch("argus.graph.get_settings", return_value=_patched_settings()),
         patch("argus.graph.init_chat_model") as mock_init_chat_model,
     ):
-        _get_llm(f"anthropic:{CLAUDE_DEFAULT}", temperature=0)
+        _get_llm(f"anthropic:{CLAUDE_DEFAULT}", "test", temperature=0)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args
@@ -61,7 +61,7 @@ def test_get_llm_strips_temperature_for_claude_frontier() -> None:
         patch("argus.graph.get_settings", return_value=_patched_settings()),
         patch("argus.graph.init_chat_model") as mock_init_chat_model,
     ):
-        _get_llm(f"anthropic:{CLAUDE_FRONTIER}", temperature=0.7)
+        _get_llm(f"anthropic:{CLAUDE_FRONTIER}", "test", temperature=0.7)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args
@@ -73,7 +73,7 @@ def test_get_llm_passes_temperature_for_claude_haiku_4_5() -> None:
         patch("argus.graph.get_settings", return_value=_patched_settings()),
         patch("argus.graph.init_chat_model") as mock_init_chat_model,
     ):
-        _get_llm("anthropic:claude-haiku-4-5", temperature=0)
+        _get_llm("anthropic:claude-haiku-4-5", "test", temperature=0)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args
@@ -85,7 +85,7 @@ def test_get_llm_omits_temperature_when_none_regardless_of_model() -> None:
         patch("argus.graph.get_settings", return_value=_patched_settings()),
         patch("argus.graph.init_chat_model") as mock_init_chat_model,
     ):
-        _get_llm("anthropic:claude-haiku-4-5", temperature=None)
+        _get_llm("anthropic:claude-haiku-4-5", "test", temperature=None)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args
@@ -143,7 +143,7 @@ def test_temperature_guard_still_applies_for_a_never_seen_override_value(
         m.setattr("argus.graph._TEMPERATURE_UNSUPPORTED_MODELS", overridden_set)
         from argus.graph import _get_llm as _get_llm_live
 
-        _get_llm_live("anthropic:claude-sonnet-9-9", temperature=0)
+        _get_llm_live("anthropic:claude-sonnet-9-9", "test", temperature=0)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args
@@ -173,7 +173,7 @@ def test_temperature_guard_still_applies_when_specialist_model_overridden(
         m.setattr("argus.graph._TEMPERATURE_UNSUPPORTED_MODELS", overridden_set)
         from argus.graph import _get_llm as _get_llm_live
 
-        _get_llm_live("anthropic:claude-sonnet-5", temperature=0)
+        _get_llm_live("anthropic:claude-sonnet-5", "test", temperature=0)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args
@@ -208,7 +208,7 @@ def test_temperature_guard_does_not_swallow_claude_mini_when_specialist_model_co
         m.setattr("argus.graph._TEMPERATURE_UNSUPPORTED_MODELS", overridden_set)
         from argus.graph import _get_llm as _get_llm_live
 
-        _get_llm_live(f"anthropic:{CLAUDE_MINI}", temperature=0)
+        _get_llm_live(f"anthropic:{CLAUDE_MINI}", "test", temperature=0)
 
     mock_init_chat_model.assert_called_once()
     _, kwargs = mock_init_chat_model.call_args

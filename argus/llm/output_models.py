@@ -231,6 +231,7 @@ def pydantic_to_response_format(
     model: type[BaseModel],
     name: str | None = None,
     strict: bool = True,
+    exclude: set[str] | None = None,
 ) -> dict[str, Any]:
     """Convert any Pydantic model to OpenAI Responses API JSON schema format.
 
@@ -241,12 +242,17 @@ def pydantic_to_response_format(
         model: The Pydantic model class.
         name: Schema name (defaults to class name in lowercase).
         strict: If True, makes schema OpenAI-strict-mode compliant.
+        exclude: Top-level fields to drop from the schema (e.g. free-form
+            dicts, which strict mode cannot express); they take their
+            model defaults on validation.
 
     Returns:
         Dict suitable for OpenAI Responses API's text.format parameter.
     """
     schema_name = name or model.__name__.lower()
     schema = model.model_json_schema()
+    for field in exclude or ():
+        schema["properties"].pop(field, None)
 
     if strict:
         schema = make_schema_strict(schema)

@@ -70,8 +70,9 @@ class Settings(BaseSettings):
             See ``docs/PRECHECKS.md``'s "stock rule sources" section.
         ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE: Set truthy to force the
             verdict to BLOCKING whenever a deterministic precheck scanner
-            crashed/timed out/errored this round (``PrecheckResult.
-            failed_scanners`` non-empty) instead of the default fail-open
+            crashed/timed out/errored, OR was never installed, this round
+            (``PrecheckResult.failed_scanners``/``missing_scanners``
+            non-empty) instead of the default fail-open
             behavior (surface it in the review comment's degraded-coverage
             section — see ``argus.helpers.build_degraded_coverage_labels``
             — but let the review's own verdict stand on its own merits).
