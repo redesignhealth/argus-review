@@ -82,11 +82,17 @@ class PrecheckResult:
     binary) are caught here. A malformed-but-successfully-exited run from
     any of those three is still silently indistinguishable from "ran clean"
     today.
+
+    ``missing_scanners`` is the standing-configuration counterpart to
+    ``failed_scanners``: a scanner whose ``*_available()`` check returned
+    ``False`` never got a coroutine to fail, so it can't land there. Kept
+    separate since the two need different remediations (install vs. investigate).
     """
 
     candidate_findings: list[SarifResult] = field(default_factory=list)
     verified_findings: list[SarifResult] = field(default_factory=list)
     failed_scanners: list[str] = field(default_factory=list)
+    missing_scanners: list[str] = field(default_factory=list)
 
 
 def resolve_rules_dir() -> Path | None:
@@ -615,15 +621,20 @@ async def run_precheck(
     named_scans: list[tuple[str, Coroutine[Any, Any, list[SarifResult] | None]]] = [
         ("_semgrep_precheck", _run_semgrep_precheck(worktree_path))
     ]
+    # Collected so a never-installed scanner is as visible downstream as a
+    # crashed one (see PrecheckResult.missing_scanners).
+    missing_scanners: list[str] = []
 
     if zizmor_available():
         named_scans.append(("zizmor", run_zizmor_sarif(worktree_path)))
     else:
+        missing_scanners.append("zizmor")
         logger.info("zizmor not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
     if trivy_available():
         named_scans.append(("trivy", run_trivy_secrets_sarif(worktree_path)))
     else:
+        missing_scanners.append("trivy")
         logger.info("trivy not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
     # squawk, checkov, actionlint, and eslint all require an explicit
@@ -633,11 +644,13 @@ async def run_precheck(
         if squawk_available():
             named_scans.append(("squawk", run_squawk_sarif(worktree_path, changed_files)))
         else:
+            missing_scanners.append("squawk")
             logger.info("squawk not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
         if checkov_available():
             named_scans.append(("checkov", run_checkov_sarif(worktree_path, changed_files)))
         else:
+            missing_scanners.append("checkov")
             logger.info(
                 "checkov not on PATH (argus[prechecks] extra not installed) — skipping scan"
             )
@@ -645,6 +658,7 @@ async def run_precheck(
         if actionlint_available():
             named_scans.append(("actionlint", run_actionlint_sarif(worktree_path, changed_files)))
         else:
+            missing_scanners.append("actionlint")
             logger.info(
                 "actionlint not on PATH (argus[prechecks] extra not installed) — skipping scan"
             )
@@ -652,10 +666,21 @@ async def run_precheck(
         if eslint_available():
             named_scans.append(("eslint", run_eslint_sarif(worktree_path, changed_files)))
         else:
+            missing_scanners.append("eslint")
             logger.info(
                 "eslint security bundle not installed (see argus/precheck/eslint_bundle/"
                 "README.md) — skipping scan"
             )
+
+    missing_scanners = sorted(missing_scanners)
+    if missing_scanners:
+        logger.warning(
+            "%d precheck scanner(s) are not installed and were skipped entirely this round: "
+            "%s -- this is a standing coverage gap, not a blocked review (install the "
+            "missing tool(s) to close it)",
+            len(missing_scanners),
+            ", ".join(missing_scanners),
+        )
 
     scan_batches = await asyncio.gather(*(coro for _, coro in named_scans))
     results: list[SarifResult] = [r for batch in scan_batches for r in (batch or [])]
@@ -694,7 +719,7 @@ async def run_precheck(
         # different events, and this is the one place that distinction
         # would otherwise be lost -- a bare PrecheckResult() here reads
         # identically to "everything ran clean."
-        return PrecheckResult(failed_scanners=failed_scanners)
+        return PrecheckResult(failed_scanners=failed_scanners, missing_scanners=missing_scanners)
 
     rule_ids = sorted({r.rule_id for r in results})
     statuses = await select_rule_statuses(rule_ids)
@@ -727,5 +752,8 @@ async def run_precheck(
         candidate = candidate[:_MAX_RESULTS]
 
     return PrecheckResult(
-        candidate_findings=candidate, verified_findings=verified, failed_scanners=failed_scanners
+        candidate_findings=candidate,
+        verified_findings=verified,
+        failed_scanners=failed_scanners,
+        missing_scanners=missing_scanners,
     )

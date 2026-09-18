@@ -80,7 +80,9 @@ def test_semgrep_available_reflects_path(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_run_precheck_noop_when_semgrep_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
     result = await run_precheck("/tmp/worktree")
-    assert result == PrecheckResult()
+    # zizmor/trivy are the only two always-on scanners besides semgrep, and
+    # the autouse fixture marks both unavailable -- see missing_scanners.
+    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
 
 
 async def test_run_precheck_noop_when_no_rule_files(
@@ -90,7 +92,7 @@ async def test_run_precheck_noop_when_no_rule_files(
     monkeypatch.setattr("argus.precheck.engine.resolve_rules_dir", lambda: tmp_path)
     monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: False)
     result = await run_precheck("/tmp/worktree")
-    assert result == PrecheckResult()
+    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
 
 
 async def test_run_precheck_runs_zizmor_even_without_custom_rules_dir(
@@ -211,6 +213,45 @@ async def test_run_precheck_failed_scanner_coexists_with_real_findings(
 
     assert [f.rule_id for f in result.candidate_findings] == ["trivy/github-pat"]
     assert result.failed_scanners == ["zizmor"]
+
+
+async def test_run_precheck_reports_never_installed_scanner_separately_from_crashed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scanner whose ``*_available()`` check returns ``False`` never gets
+    a coroutine to crash -- it must be named in ``missing_scanners``, not
+    ``failed_scanners``, so a standing "not installed" config gap stays
+    distinguishable downstream from a transient crash (see
+    ``PrecheckResult.missing_scanners``'s own docstring)."""
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+    monkeypatch.setattr("argus.precheck.engine.zizmor_available", lambda: True)
+    monkeypatch.setattr("argus.precheck.engine.trivy_available", lambda: False)
+
+    with patch("argus.precheck.engine.run_zizmor_sarif", new=AsyncMock(return_value=None)):
+        result = await run_precheck("/tmp/worktree")
+
+    assert result.failed_scanners == ["zizmor"]
+    assert result.missing_scanners == ["trivy"]
+
+
+async def test_run_precheck_reports_missing_changed_files_scanners_when_diff_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """squawk/checkov/actionlint/eslint are only even considered when
+    ``changed_files`` is provided -- confirm each lands in
+    ``missing_scanners`` by name, sorted, in that scoped path too."""
+    monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
+
+    result = await run_precheck("/tmp/worktree", changed_files=["a.py"])
+
+    assert result.missing_scanners == [
+        "actionlint",
+        "checkov",
+        "eslint",
+        "squawk",
+        "trivy",
+        "zizmor",
+    ]
 
 
 async def test_run_precheck_merges_semgrep_and_zizmor_findings(
@@ -342,7 +383,10 @@ async def test_run_precheck_skips_squawk_actionlint_checkov_eslint_when_no_chang
     ):
         result = await run_precheck("/tmp/worktree")
 
-    assert result == PrecheckResult()
+    # squawk/checkov/actionlint/eslint are set available but never checked
+    # (no changed_files) -- only zizmor/trivy (autouse-unavailable, always
+    # checked) end up in missing_scanners.
+    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
     mock_squawk.assert_not_awaited()
     mock_checkov.assert_not_awaited()
     mock_actionlint.assert_not_awaited()
@@ -505,7 +549,11 @@ async def test_run_precheck_drops_fileless_findings_when_scoped(
     ):
         result = await run_precheck("/tmp/worktree", changed_files=["a.py"])
 
-    assert result == PrecheckResult()
+    # Non-empty changed_files means every scanner (including the
+    # changed_files-only ones) is checked -- all six are autouse-unavailable.
+    assert result == PrecheckResult(
+        missing_scanners=["actionlint", "checkov", "eslint", "squawk", "trivy", "zizmor"]
+    )
 
 
 async def test_run_precheck_empty_changed_files_is_a_full_noop(
@@ -593,7 +641,7 @@ async def test_run_precheck_nonzero_exit_returns_empty(
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         result = await run_precheck("/tmp/worktree")
 
-    assert result == PrecheckResult()
+    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
 
 
 async def test_run_precheck_timeout_returns_empty(
@@ -620,7 +668,7 @@ async def test_run_precheck_timeout_returns_empty(
     with patch("asyncio.create_subprocess_exec", return_value=proc):
         result = await run_precheck("/tmp/worktree")
 
-    assert result == PrecheckResult()
+    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
 
 
 def test_has_rule_files_finds_nested_rules(tmp_path) -> None:
