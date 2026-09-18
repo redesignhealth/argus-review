@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-09-18
+
+### Added
+
+- `failure_reason="turn_budget_exhausted"` (schema 018) on the Gemini and OpenAI
+  runner paths (#24): a reviewer session that runs out of turns without ever
+  calling `finish_review` is now flagged as a failure instead of returning
+  silently as a clean, zero-findings review. Across a six-PR replay, 17 of 52
+  reviewer sessions exhausted their budget this way, costing ~$18.69 (38% of
+  total spend) for no usable output — none of it previously visible.
+- A finish-now nudge injected 3 turns before the turn-budget ceiling on the
+  Gemini and OpenAI loops, plus a one-line budget disclosure added to their
+  system prompts (#24), so a session that's about to exhaust is told to
+  converge instead of continuing to explore.
+- A 75% mid-budget checkpoint nudge on the same two loops (TECH-6560),
+  independent of and in addition to the existing end-of-budget nudge above: a
+  softer "you're roughly 75% through your turn budget, start converging if
+  you have enough" check-in, fired early enough not to discourage legitimate
+  exploration on large diffs, with a full turn gap left before the emergency
+  nudge (turn 75 vs. turn 97 on Gemini's 100-turn budget; turn 22 vs. turn 27
+  on OpenAI's 30-turn budget). Not applied to the Claude Agent SDK path,
+  which has no documented mid-stream prompt-injection hook.
+- Per-stage cost and duration ledger (#24), priced through the existing
+  litellm pricing table and surfaced on `ReviewResponse.stage_costs` /
+  `stage_seconds`. Previously only reviewer-agent cost was tracked; the
+  planner, preflight, coverage check, and writer stages each reported $0.00,
+  together ~6% of real spend (the planner alone 4.9%).
+- Missing/uninstalled deterministic precheck scanners are now surfaced as
+  degraded coverage (#24), distinct from a scanner that ran and found
+  nothing. Four of six configured scanner binaries were absent in every
+  measured production run, so a review could previously report clean having
+  never actually scanned for secrets or destructive migrations.
+
+### Changed
+
+- Raised the Gemini reviewer's turn budget from 45 to 100 (TECH-6558),
+  `argus/gemini_runner.py`'s `_MAX_TURNS_GEMINI`. Gemini sessions were still
+  exhausting the 45-turn budget introduced in 0.2.4 even with the new
+  finish-now nudge above; raising the ceiling is a cheap mitigation to try
+  independent of the nudge, not a replacement for it — watch exhaustion
+  rates on real rounds to confirm it helps before assuming it does.
+- A failed reviewer's coverage-gap finding is now promoted to BLOCKING when
+  nothing else in the round already blocks (#24), so a round can no longer
+  APPROVE on coverage it knows is degraded (a failed reviewer contributes
+  zero findings, which otherwise looks identical to a clean review).
+- The planner is now instructed to cap system-group size (#24): turn-budget
+  exhaustion clustered on the largest planner groups in the replayed sample.
+
+### Fixed
+
+- A table rebuild in the SQLite storage backend that widens
+  `agent_runs.failure_reason` copied rows with `SELECT *`, pairing columns
+  positionally; a database that gained the column via `ALTER TABLE` has it
+  last, while the DDL declares it mid-table, silently shifting a datetime
+  into `failure_reason` and tripping its CHECK constraint on startup (#24).
+  Copies by explicit column name now, with a regression test.
+- semgrep was scheduled in the precheck engine without an availability
+  check, so an absent binary never reached the new `missing_scanners`
+  reporting above — the exact gap that feature exists to close, for every
+  other scanner (#24).
+- `run_lite_review`'s extraction cost went unrecorded once the new per-stage
+  ledger became the only cost source, underreporting every lite review (#24).
+- Per-stage durations were measured from handler construction rather than
+  the call itself, unpriced models were silently costed as $0, and a
+  reviewer failure skipped its risk-level bump when a precheck failure had
+  already forced BLOCKING (#24).
+
 ## [0.2.4] - 2026-09-17
 
 ### Changed
@@ -259,7 +326,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/redesignhealth/argus-review/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/redesignhealth/argus-review/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/redesignhealth/argus-review/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/redesignhealth/argus-review/compare/v0.2.1...v0.2.2
