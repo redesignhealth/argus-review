@@ -1511,6 +1511,8 @@ async def run_lite_review(
             instructions="You are a JSON extraction assistant. Parse the review text into the schema.",
             text_format=response_format,
         )
+        if resp.usage is not None:
+            record_stage_cost("lite_extract", price_openai_usage(GPT_MINI, resp.usage))
         return ReviewResponse.model_validate_json(resp.output_text)
 
     response = await asyncio.to_thread(_extract)

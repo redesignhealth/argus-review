@@ -616,14 +616,20 @@ async def run_precheck(
     # (name, coroutine) pairs, not bare coroutines -- the name is what lets
     # the aggregation below report *which* scanner returned None (a real
     # failure) rather than just "something failed somewhere". semgrep is
-    # deliberately excluded from this tracking -- see PrecheckResult's
-    # docstring for why a semgrep failure isn't observable at this layer.
-    named_scans: list[tuple[str, Coroutine[Any, Any, list[SarifResult] | None]]] = [
-        ("_semgrep_precheck", _run_semgrep_precheck(worktree_path))
-    ]
+    # deliberately excluded from this failed_scanners tracking -- see
+    # PrecheckResult's docstring for why a semgrep *failure* isn't observable
+    # at this layer. A missing semgrep binary is a different thing and is
+    # tracked below like every other scanner.
+    named_scans: list[tuple[str, Coroutine[Any, Any, list[SarifResult] | None]]] = []
     # Collected so a never-installed scanner is as visible downstream as a
     # crashed one (see PrecheckResult.missing_scanners).
     missing_scanners: list[str] = []
+
+    if semgrep_available():
+        named_scans.append(("_semgrep_precheck", _run_semgrep_precheck(worktree_path)))
+    else:
+        missing_scanners.append("semgrep")
+        logger.info("semgrep not on PATH (argus[prechecks] extra not installed) — skipping scan")
 
     if zizmor_available():
         named_scans.append(("zizmor", run_zizmor_sarif(worktree_path)))

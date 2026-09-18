@@ -97,6 +97,9 @@ The canonical schema is in `schema/*.sql` in this repo. Apply them in order:
   or the Claude Agent SDK path) runs out of its tool-calling turn budget
   without ever calling `finish_review` — previously indistinguishable
   from a session that completed normally and genuinely found nothing.
+  **Must be applied before deploying code that constructs
+  `AgentRunIn(failure_reason="turn_budget_exhausted")`** — it's a hard
+  ordering dependency, not just a convenience migration.
 
 The numbering (008-011, 015-018) is not a typo or a sign of missing
 prerequisites — these files are extracted from a longer internal migration

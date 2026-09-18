@@ -10,6 +10,7 @@ from contextvars import ContextVar
 from typing import Any
 
 from langchain_core.callbacks import UsageMetadataCallbackHandler
+from langchain_core.messages import BaseMessage
 from langchain_core.messages.ai import UsageMetadata
 from langchain_core.outputs import LLMResult
 from openai.types.responses.response_usage import ResponseUsage
@@ -55,6 +56,7 @@ def stage_seconds() -> dict[str, float]:
 def _price_usage(model: str, usage: UsageMetadata) -> float:
     token_cost = get_token_cost(model.rsplit(":", 1)[-1])
     if token_cost is None:
+        logger.warning("No pricing entry for model %r -- costing this call as $0", model)
         return 0.0
     input_details = usage.get("input_token_details") or {}
     cache_read = input_details.get("cache_read", 0)
@@ -79,6 +81,7 @@ def price_openai_usage(model: str, usage: ResponseUsage) -> float:
     """
     token_cost = get_token_cost(model)
     if token_cost is None:
+        logger.warning("No pricing entry for model %r -- costing this call as $0", model)
         return 0.0
     cached = usage.input_tokens_details.cached_tokens if usage.input_tokens_details else 0
     return float(
@@ -97,6 +100,13 @@ class StageCostCallbackHandler(UsageMetadataCallbackHandler):
         self._start = time.monotonic()
 
     def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], **kwargs: Any) -> None:
+        self._start = time.monotonic()
+
+    def on_chat_model_start(
+        self, serialized: dict[str, Any], messages: list[list[BaseMessage]], **kwargs: Any
+    ) -> None:
+        # LangChain dispatches this (not on_llm_start) for BaseChatModel calls,
+        # which is what every stage here actually uses.
         self._start = time.monotonic()
 
     def on_llm_end(self, response: LLMResult, **kwargs: Any) -> None:

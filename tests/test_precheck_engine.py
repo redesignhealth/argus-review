@@ -80,9 +80,9 @@ def test_semgrep_available_reflects_path(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_run_precheck_noop_when_semgrep_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("argus.precheck.engine.semgrep_available", lambda: False)
     result = await run_precheck("/tmp/worktree")
-    # zizmor/trivy are the only two always-on scanners besides semgrep, and
-    # the autouse fixture marks both unavailable -- see missing_scanners.
-    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
+    # zizmor/trivy are the only other always-on scanners, and the autouse
+    # fixture marks both unavailable -- see missing_scanners.
+    assert result == PrecheckResult(missing_scanners=["semgrep", "trivy", "zizmor"])
 
 
 async def test_run_precheck_noop_when_no_rule_files(
@@ -231,7 +231,7 @@ async def test_run_precheck_reports_never_installed_scanner_separately_from_cras
         result = await run_precheck("/tmp/worktree")
 
     assert result.failed_scanners == ["zizmor"]
-    assert result.missing_scanners == ["trivy"]
+    assert result.missing_scanners == ["semgrep", "trivy"]
 
 
 async def test_run_precheck_reports_missing_changed_files_scanners_when_diff_scoped(
@@ -248,6 +248,7 @@ async def test_run_precheck_reports_missing_changed_files_scanners_when_diff_sco
         "actionlint",
         "checkov",
         "eslint",
+        "semgrep",
         "squawk",
         "trivy",
         "zizmor",
@@ -384,9 +385,9 @@ async def test_run_precheck_skips_squawk_actionlint_checkov_eslint_when_no_chang
         result = await run_precheck("/tmp/worktree")
 
     # squawk/checkov/actionlint/eslint are set available but never checked
-    # (no changed_files) -- only zizmor/trivy (autouse-unavailable, always
-    # checked) end up in missing_scanners.
-    assert result == PrecheckResult(missing_scanners=["trivy", "zizmor"])
+    # (no changed_files) -- only semgrep/zizmor/trivy (always checked) end
+    # up in missing_scanners.
+    assert result == PrecheckResult(missing_scanners=["semgrep", "trivy", "zizmor"])
     mock_squawk.assert_not_awaited()
     mock_checkov.assert_not_awaited()
     mock_actionlint.assert_not_awaited()

@@ -275,6 +275,96 @@ async def test_pre_existing_file_with_narrow_failure_reason_check_self_widens(
         conn.close()
 
 
+async def test_widen_after_alter_added_column_keeps_values_in_their_columns(
+    tmp_path: Path,
+) -> None:
+    """A pre-existing file where ``failure_reason`` arrived via
+    ``ALTER TABLE ... ADD COLUMN`` has it *last*, unlike
+    ``_AGENT_RUNS_TABLE_DDL`` which declares it before ``created_at``. The
+    widening rebuild must copy by column name, not position, or values shift
+    into the wrong columns.
+    """
+    db_path = tmp_path / "altered.db"
+    review_id = "55555555-5555-5555-5555-555555555555"
+    run_id = "66666666-6666-6666-6666-666666666666"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("""
+            CREATE TABLE code_reviews (
+                id TEXT PRIMARY KEY,
+                flow_run_id TEXT,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_runs (
+                id TEXT PRIMARY KEY,
+                code_review_id TEXT NOT NULL REFERENCES code_reviews (id) ON DELETE CASCADE,
+                agent_name TEXT NOT NULL,
+                agent_type TEXT NOT NULL,
+                model TEXT,
+                cost_usd REAL DEFAULT 0,
+                duration_seconds REAL DEFAULT 0,
+                started_at TEXT,
+                finished_at TEXT,
+                tool_call_count INTEGER DEFAULT 0,
+                tool_names TEXT,
+                context7_call_count INTEGER DEFAULT 0,
+                files_explored TEXT,
+                finding_count INTEGER DEFAULT 0,
+                result_text_length INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_agent_runs_review ON agent_runs (code_review_id);
+        """)
+        # Mirrors _migrate_agent_runs_failure_reason's ALTER path: the column
+        # lands after created_at, not before it as in _AGENT_RUNS_TABLE_DDL.
+        conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN failure_reason TEXT "
+            "CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'worker_crashed'))"
+        )
+        conn.execute(
+            "INSERT INTO code_reviews (id, repo, pr_number, created_at) VALUES (?, ?, ?, ?)",
+            (review_id, "org/repo", 1, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO agent_runs "
+            "(id, code_review_id, agent_name, agent_type, created_at, failure_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, review_id, "system:pre-existing", "system", "2026-01-01T00:00:00Z", "timeout"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    backend = SqliteHistoryBackend(db_path=db_path)
+    try:
+        await backend.insert_agent_runs(
+            code_review_id=review_id,
+            runs=[
+                AgentRunIn(
+                    agent_name="system:exhausted",
+                    agent_type="system",
+                    failure_reason="turn_budget_exhausted",
+                )
+            ],
+        )
+    finally:
+        await backend.aclose()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT created_at, failure_reason FROM agent_runs WHERE agent_name = ?",
+            ("system:pre-existing",),
+        ).fetchone()
+        assert row[0] == "2026-01-01T00:00:00Z"
+        assert row[1] == "timeout"
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Concurrent open: two backend instances, same file
 # ---------------------------------------------------------------------------

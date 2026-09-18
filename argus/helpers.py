@@ -404,7 +404,11 @@ def apply_precheck_gate_and_surface_degraded_coverage(
         # order -- so this slice is exactly the findings for failed reviewer
         # sessions, never a precheck scanner's.
         reviewer_failure_count = len(failed_reviewer_labels(findings_models))
-        if reviewer_failure_count and response.verdict == Verdict.APPROVE:
+        if reviewer_failure_count:
+            # Verdict may already be BLOCKING (e.g. the precheck scanner-failure
+            # gate above already forced it) -- that part of the gate is then
+            # redundant, but the severity promotion and risk_level bump below
+            # are not, so this must still run regardless of the current verdict.
             apply_reviewer_failure_gate(response, new_findings[:reviewer_failure_count])
     return gate_added_precheck_finding, failed_labels
 

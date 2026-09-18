@@ -438,7 +438,15 @@ class SqliteHistoryBackend:
         # own CREATE INDEX below can reuse that name for the new table.
         conn.execute("DROP INDEX IF EXISTS idx_agent_runs_review")
         conn.executescript(_AGENT_RUNS_TABLE_DDL)
-        conn.execute("INSERT INTO agent_runs SELECT * FROM agent_runs_old")
+        # A file that added failure_reason via ALTER TABLE has it last, while the
+        # DDL declares it mid-table -- `SELECT *` would copy into wrong columns.
+        new_columns = [row[1] for row in conn.execute("PRAGMA table_info(agent_runs)")]
+        old_columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_runs_old)")}
+        shared_columns = [c for c in new_columns if c in old_columns]
+        column_list = ", ".join(shared_columns)
+        conn.execute(
+            f"INSERT INTO agent_runs ({column_list}) SELECT {column_list} FROM agent_runs_old"
+        )
         conn.execute("DROP TABLE agent_runs_old")
 
     async def _connection(self) -> sqlite3.Connection:
