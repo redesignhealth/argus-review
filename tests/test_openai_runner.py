@@ -419,6 +419,114 @@ class TestOpenAIRunnerBasicLoop:
             call_input = call.kwargs["input"]
             assert not (isinstance(call_input, list) and nudge_item in call_input)
 
+    async def test_mid_budget_nudge_injected_once_at_75_percent(self, tmp_path: Any) -> None:
+        """A session that never calls finish_review gets the mid-budget
+        checkpoint nudge exactly once, at 75% of _MAX_TURNS -- in addition
+        to (not instead of) the end-of-budget _TURN_BUDGET_NUDGE."""
+        from argus.runners import _MAX_TURNS, _MID_BUDGET_NUDGE, _compute_mid_budget_nudge_turn
+
+        finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
+        responses = [
+            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS)
+        ]
+        client = _make_fake_client(responses)
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "turn_budget_exhausted"
+
+        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS)
+        assert mid_budget_turn is not None
+        nudge_item = {"role": "user", "content": _MID_BUDGET_NUDGE}
+        for i, call in enumerate(client.responses.create.call_args_list):
+            call_input = call.kwargs["input"]
+            has_nudge = isinstance(call_input, list) and nudge_item in call_input
+            assert has_nudge == (i == mid_budget_turn)
+
+    async def test_finish_review_before_mid_budget_nudge_turn_never_receives_it(
+        self, tmp_path: Any
+    ) -> None:
+        from argus.runners import _MID_BUDGET_NUDGE
+
+        finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
+        responses = [
+            _make_response(calls=[finding_call], resp_id="r_0"),
+            _make_response(calls=[("finish_review", {"files_explored": ["f.py"]})], resp_id="r_1"),
+        ]
+        client = _make_fake_client(responses)
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason is None
+        nudge_item = {"role": "user", "content": _MID_BUDGET_NUDGE}
+        for call in client.responses.create.call_args_list:
+            call_input = call.kwargs["input"]
+            assert not (isinstance(call_input, list) and nudge_item in call_input)
+
+    async def test_both_nudges_fire_at_distinct_turns_without_clobbering(
+        self, tmp_path: Any
+    ) -> None:
+        """An exhausted session must receive BOTH the mid-budget checkpoint
+        nudge and the end-of-budget emergency nudge, at their own distinct
+        turns -- neither should suppress or overwrite the other."""
+        from argus.runners import (
+            _MAX_TURNS,
+            _MID_BUDGET_NUDGE,
+            _NUDGE_TURNS_BEFORE_BUDGET,
+            _TURN_BUDGET_NUDGE,
+            _compute_mid_budget_nudge_turn,
+        )
+
+        finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
+        responses = [
+            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS)
+        ]
+        client = _make_fake_client(responses)
+        entry = _make_entry()
+
+        with patch("argus.openai_runner._build_client", return_value=client):
+            result = await run_session_openai(
+                entry=entry,
+                system_prompt="system",
+                user_message="user",
+                settings=_make_settings(),
+                repo_root=str(tmp_path),
+            )
+
+        assert result.failure_reason == "turn_budget_exhausted"
+
+        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS)
+        emergency_turn = _MAX_TURNS - _NUDGE_TURNS_BEFORE_BUDGET
+        assert mid_budget_turn is not None
+        assert mid_budget_turn != emergency_turn
+
+        mid_nudge_item = {"role": "user", "content": _MID_BUDGET_NUDGE}
+        emergency_nudge_item = {"role": "user", "content": _TURN_BUDGET_NUDGE}
+        for i, call in enumerate(client.responses.create.call_args_list):
+            call_input = call.kwargs["input"]
+            has_mid_nudge = isinstance(call_input, list) and mid_nudge_item in call_input
+            has_emergency_nudge = (
+                isinstance(call_input, list) and emergency_nudge_item in call_input
+            )
+            assert has_mid_nudge == (i == mid_budget_turn)
+            assert has_emergency_nudge == (i == emergency_turn)
+
 
 class TestOpenAIRunnerUsageAndCost:
     async def test_usage_summed_across_every_turn_not_just_the_last(self, tmp_path: Any) -> None:

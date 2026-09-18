@@ -162,6 +162,41 @@ _TURN_BUDGET_SYSTEM_PROMPT_LINE = (
     "a review that never calls it is discarded entirely."
 )
 
+# Earlier "checkpoint" nudge, fired once at 75% of the turn budget -- in
+# addition to (not instead of) _TURN_BUDGET_NUDGE above. The system prompt
+# only discloses the turn budget once, at turn 0 (_TURN_BUDGET_SYSTEM_PROMPT_
+# LINE); a long, uncached conversation can lose track of it long before the
+# emergency _TURN_BUDGET_NUDGE fires with only _NUDGE_TURNS_BEFORE_BUDGET
+# turns left to act on it.
+_MID_BUDGET_NUDGE_FRACTION = 0.75
+_MID_BUDGET_NUDGE = (
+    "You are roughly 75% through your turn budget. If you have gathered enough "
+    "context to identify findings, begin converging toward `finish_review` now "
+    "rather than continuing to explore -- you do not need to use your full budget."
+)
+
+
+def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
+    """Return the turn at which to fire the 75%-of-budget checkpoint nudge
+    for a given ``max_turns`` budget, or ``None`` if that turn would land at
+    or after the existing end-of-budget nudge turn (``max_turns -
+    _NUDGE_TURNS_BEFORE_BUDGET``).
+
+    This guards against a future change to ``_MID_BUDGET_NUDGE_FRACTION``,
+    ``_NUDGE_TURNS_BEFORE_BUDGET``, or a runner's own ``max_turns`` silently
+    colliding the two nudges onto the same turn -- which would either
+    double-post one message, or silently drop the mid-budget one. Not
+    reachable at today's values (75 vs. 97 for Gemini's 100-turn budget, 22
+    vs. 27 for the shared 30-turn budget) -- only with a much smaller
+    ``max_turns``.
+    """
+    checkpoint_turn = int(max_turns * _MID_BUDGET_NUDGE_FRACTION)
+    emergency_nudge_turn = max_turns - _NUDGE_TURNS_BEFORE_BUDGET
+    if checkpoint_turn >= emergency_nudge_turn:
+        return None
+    return checkpoint_turn
+
+
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned
 # worktree has been provisioned (e.g. local dev runs, tests, subprocess
 # worker). In production, callers pass an explicit repo_root provisioned
