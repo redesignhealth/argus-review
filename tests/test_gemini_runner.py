@@ -432,6 +432,125 @@ class TestTurnBudgetExhaustion:
             for p in content.parts
         )
 
+    async def test_mid_budget_nudge_injected_once_at_75_percent(self) -> None:
+        """A session that never calls finish_review gets the mid-budget
+        checkpoint nudge exactly once, at 75% of _MAX_TURNS_GEMINI -- in
+        addition to (not instead of) the end-of-budget _TURN_BUDGET_NUDGE."""
+        from argus.gemini_runner import _MAX_TURNS_GEMINI
+        from argus.runners import _MID_BUDGET_NUDGE, _compute_mid_budget_nudge_turn
+
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+        responses = [
+            _make_response(
+                calls=[("report_finding", {"file": None, "line": None, "description": "x"})]
+            )
+            for _ in range(_MAX_TURNS_GEMINI)
+        ]
+        fake_client = _make_fake_client(responses)
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason == "turn_budget_exhausted"
+        final_contents = fake_client.aio.models.generate_content.await_args.kwargs["contents"]
+        mid_budget_positions = [
+            i
+            for i, content in enumerate(final_contents)
+            if any(getattr(p, "text", None) == _MID_BUDGET_NUDGE for p in content.parts)
+        ]
+        assert len(mid_budget_positions) == 1
+        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_GEMINI)
+        assert mid_budget_turn is not None
+        assert mid_budget_positions[0] == 2 * mid_budget_turn
+
+    async def test_finish_review_before_mid_budget_nudge_turn_never_receives_it(self) -> None:
+        from argus.runners import _MID_BUDGET_NUDGE
+
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+        turn1 = _make_response(
+            calls=[("report_finding", {"file": None, "line": None, "description": "x"})]
+        )
+        turn2 = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([turn1, turn2])
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason is None
+        final_contents = fake_client.aio.models.generate_content.await_args.kwargs["contents"]
+        assert not any(
+            getattr(p, "text", None) == _MID_BUDGET_NUDGE
+            for content in final_contents
+            for p in content.parts
+        )
+
+    async def test_both_nudges_fire_at_distinct_turns_without_clobbering(self) -> None:
+        """An exhausted session must receive BOTH the mid-budget checkpoint
+        nudge and the end-of-budget emergency nudge, at their own distinct
+        turns -- neither should suppress or overwrite the other."""
+        from argus.gemini_runner import _MAX_TURNS_GEMINI
+        from argus.runners import (
+            _MID_BUDGET_NUDGE,
+            _NUDGE_TURNS_BEFORE_BUDGET,
+            _TURN_BUDGET_NUDGE,
+            _compute_mid_budget_nudge_turn,
+        )
+
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+        responses = [
+            _make_response(
+                calls=[("report_finding", {"file": None, "line": None, "description": "x"})]
+            )
+            for _ in range(_MAX_TURNS_GEMINI)
+        ]
+        fake_client = _make_fake_client(responses)
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason == "turn_budget_exhausted"
+        final_contents = fake_client.aio.models.generate_content.await_args.kwargs["contents"]
+
+        def _positions_of(text: str) -> list[int]:
+            return [
+                i
+                for i, content in enumerate(final_contents)
+                if any(getattr(p, "text", None) == text for p in content.parts)
+            ]
+
+        mid_positions = _positions_of(_MID_BUDGET_NUDGE)
+        emergency_positions = _positions_of(_TURN_BUDGET_NUDGE)
+        assert len(mid_positions) == 1
+        assert len(emergency_positions) == 1
+        assert mid_positions != emergency_positions
+
+        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_GEMINI)
+        emergency_turn = _MAX_TURNS_GEMINI - _NUDGE_TURNS_BEFORE_BUDGET
+        assert mid_budget_turn is not None
+        assert mid_positions[0] == 2 * mid_budget_turn
+        assert emergency_positions[0] == 2 * emergency_turn
+
 
 # ---------------------------------------------------------------------------
 # Explicit context caching

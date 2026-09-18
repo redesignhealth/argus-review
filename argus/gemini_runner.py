@@ -159,11 +159,13 @@ from argus.gemini_cache import GeminiCacheKeeper
 from argus.llm.models import estimate_cost_usd
 from argus.llm.models import resolve as resolve_model_alias
 from argus.runners import (
+    _MID_BUDGET_NUDGE,
     _NUDGE_TURNS_BEFORE_BUDGET,
     _SUBPROCESS_TIMEOUT_S,
     _TURN_BUDGET_NUDGE,
     _TURN_BUDGET_SYSTEM_PROMPT_LINE,
     SessionResult,
+    _compute_mid_budget_nudge_turn,
     _resolve_repo_root,
 )
 
@@ -697,6 +699,8 @@ async def _run_turns(
         usage_thoughts_total = 0
         usage_tool_use_prompt_total = 0
 
+        _mid_budget_nudge_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_GEMINI)
+
         with review_tools.review_session(repo_root) as findings_sink:
             for _turn in range(_MAX_TURNS_GEMINI):
                 if (
@@ -704,6 +708,16 @@ async def _run_turns(
                     and contents[-1].parts is not None
                 ):
                     contents[-1].parts.append(types.Part.from_text(text=_TURN_BUDGET_NUDGE))
+                # Not an `elif` -- these are two independent checkpoints at
+                # different turns and must both be able to fire in the same
+                # session (see _compute_mid_budget_nudge_turn's docstring
+                # for why they can never land on the same turn today).
+                if (
+                    _mid_budget_nudge_turn is not None
+                    and _turn == _mid_budget_nudge_turn
+                    and contents[-1].parts is not None
+                ):
+                    contents[-1].parts.append(types.Part.from_text(text=_MID_BUDGET_NUDGE))
                 try:
                     response = await client.aio.models.generate_content(
                         model=model, contents=contents, config=config
