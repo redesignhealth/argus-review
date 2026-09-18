@@ -132,14 +132,47 @@ _CODE_REVIEW_COLUMNS = (
 )
 _CODE_REVIEW_COLUMNS_SQL = ", ".join(_CODE_REVIEW_COLUMNS)
 
+# Shared between the CREATE TABLE below, the column-add migration for
+# pre-existing files missing the column entirely, and the CHECK-widening
+# rebuild for pre-existing files that already have it under the old,
+# narrower constraint -- one definition so the three can't drift apart.
+_FAILURE_REASON_VALUES_SQL = "'timeout', 'worker_crashed', 'turn_budget_exhausted'"
+
 # =============================================================================
 # DDL — idempotent bootstrap, mirrors schema/008 + schema/009 + schema/011 +
-# schema/015 + schema/016 (review_patterns from schema/010 is out of scope:
+# schema/015 + schema/016 + schema/018 (review_patterns from schema/010 is out of scope:
 # it belongs to the weekly feedback-loop flow, not the round-history path
 # this module serves).
 # =============================================================================
 
-_BOOTSTRAP_DDL = """
+_AGENT_RUNS_TABLE_DDL = f"""
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id TEXT PRIMARY KEY,
+    code_review_id TEXT NOT NULL
+        REFERENCES code_reviews (id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL,
+    agent_type TEXT NOT NULL,
+    model TEXT,
+    cost_usd REAL DEFAULT 0,
+    duration_seconds REAL DEFAULT 0,
+    started_at TEXT,
+    finished_at TEXT,
+    tool_call_count INTEGER DEFAULT 0,
+    tool_names TEXT,
+    context7_call_count INTEGER DEFAULT 0,
+    files_explored TEXT,
+    finding_count INTEGER DEFAULT 0,
+    result_text_length INTEGER DEFAULT 0,
+    failure_reason TEXT
+        CHECK (failure_reason IS NULL OR failure_reason IN ({_FAILURE_REASON_VALUES_SQL})),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_review
+    ON agent_runs (code_review_id);
+"""
+
+_BOOTSTRAP_DDL = f"""
 CREATE TABLE IF NOT EXISTS code_reviews (
     id TEXT PRIMARY KEY,
     flow_run_id TEXT,
@@ -172,31 +205,7 @@ CREATE INDEX IF NOT EXISTS idx_code_reviews_repo_pr
 CREATE INDEX IF NOT EXISTS idx_code_reviews_created_at
     ON code_reviews (created_at);
 
-CREATE TABLE IF NOT EXISTS agent_runs (
-    id TEXT PRIMARY KEY,
-    code_review_id TEXT NOT NULL
-        REFERENCES code_reviews (id) ON DELETE CASCADE,
-    agent_name TEXT NOT NULL,
-    agent_type TEXT NOT NULL,
-    model TEXT,
-    cost_usd REAL DEFAULT 0,
-    duration_seconds REAL DEFAULT 0,
-    started_at TEXT,
-    finished_at TEXT,
-    tool_call_count INTEGER DEFAULT 0,
-    tool_names TEXT,
-    context7_call_count INTEGER DEFAULT 0,
-    files_explored TEXT,
-    finding_count INTEGER DEFAULT 0,
-    result_text_length INTEGER DEFAULT 0,
-    failure_reason TEXT
-        CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'worker_crashed')),
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_agent_runs_review
-    ON agent_runs (code_review_id);
-"""
+{_AGENT_RUNS_TABLE_DDL}"""
 
 # =============================================================================
 # SQL constants
@@ -398,8 +407,39 @@ class SqliteHistoryBackend:
         if "failure_reason" not in columns:
             conn.execute(
                 "ALTER TABLE agent_runs ADD COLUMN failure_reason TEXT "
-                "CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'worker_crashed'))"
+                f"CHECK (failure_reason IS NULL OR failure_reason IN ({_FAILURE_REASON_VALUES_SQL}))"
             )
+            return
+        SqliteHistoryBackend._widen_failure_reason_check(conn)
+
+    @staticmethod
+    def _widen_failure_reason_check(conn: sqlite3.Connection) -> None:
+        """Rebuild ``agent_runs`` if its ``failure_reason`` CHECK constraint
+        still only allows the original two values.
+
+        SQLite has no ``ALTER TABLE ... DROP/MODIFY CONSTRAINT``, so widening
+        an existing CHECK requires the standard rebuild: rename the table,
+        recreate it via ``_AGENT_RUNS_TABLE_DDL`` (so it can't drift from a
+        fresh database's constraint), copy rows across, drop the renamed
+        original.
+
+        Guarded by inspecting the table's own stored SQL first, so this is a
+        no-op read in the common case where the constraint is already current.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'"
+        ).fetchone()
+        existing_sql = row[0] if row is not None else None
+        if existing_sql is None or "turn_budget_exhausted" in existing_sql:
+            return
+        conn.execute("ALTER TABLE agent_runs RENAME TO agent_runs_old")
+        # The index name is still attached to the just-renamed table under
+        # its original name -- drop it explicitly so _AGENT_RUNS_TABLE_DDL's
+        # own CREATE INDEX below can reuse that name for the new table.
+        conn.execute("DROP INDEX IF EXISTS idx_agent_runs_review")
+        conn.executescript(_AGENT_RUNS_TABLE_DDL)
+        conn.execute("INSERT INTO agent_runs SELECT * FROM agent_runs_old")
+        conn.execute("DROP TABLE agent_runs_old")
 
     async def _connection(self) -> sqlite3.Connection:
         # Must hold self._lock across the check-and-set: without it, two

@@ -167,6 +167,114 @@ async def test_pre_existing_file_without_failure_reason_column_self_heals(
         conn.close()
 
 
+async def test_pre_existing_file_with_narrow_failure_reason_check_self_widens(
+    tmp_path: Path,
+) -> None:
+    """A local history.db created under the original two-value CHECK
+    constraint must accept 'turn_budget_exhausted' without a manual
+    migration -- SQLite can't ALTER a CHECK constraint in place, so
+    ``SqliteHistoryBackend._widen_failure_reason_check`` must rebuild the
+    table instead. Also verifies a pre-existing row survives the rebuild.
+    """
+    db_path = tmp_path / "narrow.db"
+    review_id = "22222222-2222-2222-2222-222222222222"
+    run_id = "33333333-3333-3333-3333-333333333333"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("""
+            CREATE TABLE code_reviews (
+                id TEXT PRIMARY KEY,
+                flow_run_id TEXT,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE agent_runs (
+                id TEXT PRIMARY KEY,
+                code_review_id TEXT NOT NULL REFERENCES code_reviews (id) ON DELETE CASCADE,
+                agent_name TEXT NOT NULL,
+                agent_type TEXT NOT NULL,
+                model TEXT,
+                cost_usd REAL DEFAULT 0,
+                duration_seconds REAL DEFAULT 0,
+                started_at TEXT,
+                finished_at TEXT,
+                tool_call_count INTEGER DEFAULT 0,
+                tool_names TEXT,
+                context7_call_count INTEGER DEFAULT 0,
+                files_explored TEXT,
+                finding_count INTEGER DEFAULT 0,
+                result_text_length INTEGER DEFAULT 0,
+                failure_reason TEXT
+                    CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'worker_crashed')),
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_agent_runs_review ON agent_runs (code_review_id);
+        """)
+        conn.execute(
+            "INSERT INTO code_reviews (id, repo, pr_number, created_at) VALUES (?, ?, ?, ?)",
+            (review_id, "org/repo", 1, "2026-01-01T00:00:00Z"),
+        )
+        conn.execute(
+            "INSERT INTO agent_runs "
+            "(id, code_review_id, agent_name, agent_type, failure_reason, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, review_id, "system:pre-existing", "system", "timeout", "2026-01-01T00:00:00Z"),
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO agent_runs (id, code_review_id, agent_name, agent_type, "
+                "failure_reason, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "44444444-4444-4444-4444-444444444444",
+                    review_id,
+                    "system:rejected",
+                    "system",
+                    "turn_budget_exhausted",
+                    "2026-01-01T00:00:00Z",
+                ),
+            )
+    finally:
+        conn.close()
+
+    backend = SqliteHistoryBackend(db_path=db_path)
+    try:
+        # Would raise sqlite3.IntegrityError if the rebuild hadn't widened
+        # the CHECK constraint.
+        await backend.insert_agent_runs(
+            code_review_id=review_id,
+            runs=[
+                AgentRunIn(
+                    agent_name="system:exhausted",
+                    agent_type="system",
+                    failure_reason="turn_budget_exhausted",
+                )
+            ],
+        )
+    finally:
+        await backend.aclose()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT agent_name, failure_reason FROM agent_runs")
+        }
+        # Pre-existing row survived the rebuild ...
+        assert rows["system:pre-existing"] == "timeout"
+        # ... and the new value is now accepted.
+        assert rows["system:exhausted"] == "turn_budget_exhausted"
+        indexes = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall()
+        }
+        assert "idx_agent_runs_review" in indexes
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Concurrent open: two backend instances, same file
 # ---------------------------------------------------------------------------

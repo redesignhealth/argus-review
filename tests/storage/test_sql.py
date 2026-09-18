@@ -407,6 +407,15 @@ def test_agent_run_in_accepts_worker_crashed_failure_reason() -> None:
     assert run.failure_reason == "worker_crashed"
 
 
+def test_agent_run_in_accepts_turn_budget_exhausted_failure_reason() -> None:
+    run = AgentRunIn(
+        agent_name="system:Foo",
+        agent_type="system",
+        failure_reason="turn_budget_exhausted",
+    )
+    assert run.failure_reason == "turn_budget_exhausted"
+
+
 # ---------------------------------------------------------------------------
 # Model round-trip
 # ---------------------------------------------------------------------------

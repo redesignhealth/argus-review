@@ -91,8 +91,14 @@ The canonical schema is in `schema/*.sql` in this repo. Apply them in order:
   no SQLite or HTTP equivalent for these tables, so self-hosters not
   running Postgres can skip it (the precheck gate's custom-rule execution
   simply never graduates any rule past `candidate` without it).
+- `schema/018_widen_agent_runs_failure_reason.sql` — widens the
+  `failure_reason` CHECK constraint schema/016 added with a third value,
+  `'turn_budget_exhausted'`, set when a reviewer session (Gemini, OpenAI,
+  or the Claude Agent SDK path) runs out of its tool-calling turn budget
+  without ever calling `finish_review` — previously indistinguishable
+  from a session that completed normally and genuinely found nothing.
 
-The numbering (008-011, 015-017) is not a typo or a sign of missing
+The numbering (008-011, 015-018) is not a typo or a sign of missing
 prerequisites — these files are extracted from a longer internal migration
 sequence, and `008_add_code_reviews.sql` creates the `review_service` schema
 from scratch, so nothing before it in that original sequence is needed

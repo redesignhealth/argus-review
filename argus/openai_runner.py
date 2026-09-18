@@ -111,7 +111,10 @@ from argus.llm.models import estimate_cost_usd
 from argus.llm.models import resolve as resolve_model_alias
 from argus.runners import (
     _MAX_TURNS,
+    _NUDGE_TURNS_BEFORE_BUDGET,
     _SUBPROCESS_TIMEOUT_S,
+    _TURN_BUDGET_NUDGE,
+    _TURN_BUDGET_SYSTEM_PROMPT_LINE,
     SessionResult,
     _resolve_repo_root,
 )
@@ -411,6 +414,9 @@ async def _run_turns(
     have already completed still returns a ``SessionResult`` reflecting
     whatever those completed turns actually produced and billed.
     """
+    system_prompt = (
+        system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS)
+    )
     api_key = getattr(settings, "OPENAI_API_KEY", None)
     base_url = getattr(settings, "OPENAI_BASE_URL", None)
 
@@ -434,7 +440,7 @@ async def _run_turns(
     usage_cached_total = 0
 
     def _build_result(
-        failure_reason: Literal["timeout", "worker_crashed"] | None,
+        failure_reason: Literal["timeout", "worker_crashed", "turn_budget_exhausted"] | None,
     ) -> SessionResult:
         """Build a ``SessionResult`` from whatever has accumulated so far.
 
@@ -495,6 +501,7 @@ async def _run_turns(
             failure_reason=failure_reason,
         )
 
+    exhausted = False
     try:
         async with asyncio.timeout(timeout_s):
             with review_tools.review_session(repo_root) as findings_sink:
@@ -615,20 +622,21 @@ async def _run_turns(
                     if finished:
                         break
 
+                    if _turn + 1 == _MAX_TURNS - _NUDGE_TURNS_BEFORE_BUDGET:
+                        tool_outputs.append({"role": "user", "content": _TURN_BUDGET_NUDGE})
+
                     previous_response_id = getattr(response, "id", None)
                 else:
-                    # `for...else`: only reached if every one of _MAX_TURNS
-                    # iterations executed a function call and none of them was
-                    # finish_review -- i.e. the turn budget was exhausted.
-                    # We preserve all accumulated findings with failure_reason=None
-                    # so partial progress is not discarded by the review graph.
+                    # `for...else`: only reached if every iteration executed a
+                    # function call and none was finish_review, i.e. exhausted.
                     logger.warning(
                         "OpenAI session [%s] exhausted its %d-turn budget without a finish_review call",
                         label or "unlabeled",
                         _MAX_TURNS,
                     )
+                    exhausted = True
 
-        return _build_result(None)
+        return _build_result("turn_budget_exhausted" if exhausted else None)
     except (TimeoutError, APITimeoutError, httpx.TimeoutException):
         # Session timeout is enforced via asyncio.timeout() inside this function.
         # Its expiry raises TimeoutError, distinguishable from a genuine external

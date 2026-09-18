@@ -33,10 +33,20 @@ from google.genai import errors as genai_errors  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from argus.bench import BenchEntry  # noqa: E402
-from argus.gemini_runner import run_session_gemini  # noqa: E402
+from argus.gemini_runner import _MAX_TURNS_GEMINI, run_session_gemini  # noqa: E402
 from argus.llm.models import resolve as resolve_alias  # noqa: E402
+from argus.runners import _TURN_BUDGET_SYSTEM_PROMPT_LINE  # noqa: E402
 
 pytestmark = pytest.mark.asyncio
+
+
+def _with_turn_budget_line(system_prompt: str) -> str:
+    """The runner appends the shared turn-budget disclosure to every system
+    prompt it's given -- tests that assert on the exact system_instruction
+    sent to the API must account for it."""
+    return (
+        system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS_GEMINI)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +333,10 @@ class TestMultipleSimultaneousFunctionCalls:
 
 class TestTurnBudgetExhaustion:
     async def test_exhausting_max_turns_still_returns_a_result(self) -> None:
+        """Exhaustion must be visible via failure_reason, not silently
+        indistinguishable from a clean 0-finding completion -- while still
+        preserving whatever findings were reported before the budget ran
+        out (partial progress is not discarded)."""
         from argus.gemini_runner import _MAX_TURNS_GEMINI
 
         entry = _make_entry(caching="off")
@@ -348,10 +362,75 @@ class TestTurnBudgetExhaustion:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        assert result.failure_reason is None
+        assert result.failure_reason == "turn_budget_exhausted"
         assert fake_client.aio.models.generate_content.await_count == _MAX_TURNS_GEMINI
         payload = _parse_result_json(result.result_text)
         assert len(payload["findings"]) == _MAX_TURNS_GEMINI
+
+    async def test_nudge_injected_once_at_turn_budget_minus_three(self) -> None:
+        """A session that never calls finish_review gets nudged exactly once,
+        _NUDGE_TURNS_BEFORE_BUDGET turns before exhaustion, and still preserves
+        findings reported both before and after the nudge."""
+        from argus.gemini_runner import _MAX_TURNS_GEMINI
+        from argus.runners import _NUDGE_TURNS_BEFORE_BUDGET, _TURN_BUDGET_NUDGE
+
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+        responses = [
+            _make_response(
+                calls=[("report_finding", {"file": None, "line": None, "description": "x"})]
+            )
+            for _ in range(_MAX_TURNS_GEMINI)
+        ]
+        fake_client = _make_fake_client(responses)
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason == "turn_budget_exhausted"
+        final_contents = fake_client.aio.models.generate_content.await_args.kwargs["contents"]
+        nudge_positions = [
+            i
+            for i, content in enumerate(final_contents)
+            if any(getattr(p, "text", None) == _TURN_BUDGET_NUDGE for p in content.parts)
+        ]
+        assert len(nudge_positions) == 1
+        threshold = _MAX_TURNS_GEMINI - _NUDGE_TURNS_BEFORE_BUDGET
+        assert nudge_positions[0] == 2 * threshold
+
+    async def test_finish_review_before_nudge_turn_never_receives_nudge(self) -> None:
+        from argus.runners import _TURN_BUDGET_NUDGE
+
+        entry = _make_entry(caching="off")
+        settings = _make_settings()
+        turn1 = _make_response(
+            calls=[("report_finding", {"file": None, "line": None, "description": "x"})]
+        )
+        turn2 = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([turn1, turn2])
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            result = await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        assert result.failure_reason is None
+        final_contents = fake_client.aio.models.generate_content.await_args.kwargs["contents"]
+        assert not any(
+            getattr(p, "text", None) == _TURN_BUDGET_NUDGE
+            for content in final_contents
+            for p in content.parts
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +462,7 @@ class TestCacheActivation:
         create_kwargs = fake_client.caches.create.call_args.kwargs
         assert create_kwargs["model"] == resolve_alias("gemini-frontier")
         create_config = create_kwargs["config"]
-        assert create_config.system_instruction == "You are a reviewer."
+        assert create_config.system_instruction == _with_turn_budget_line("You are a reviewer.")
         assert create_config.tools is not None
         assert create_config.ttl == "3600s"
 
@@ -422,7 +501,7 @@ class TestCacheActivation:
 
         fake_client.caches.create.assert_not_called()
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
-        assert generate_kwargs["config"].system_instruction == "sys"
+        assert generate_kwargs["config"].system_instruction == _with_turn_budget_line("sys")
         assert generate_kwargs["config"].cached_content is None
 
 
@@ -454,7 +533,7 @@ class TestCacheCreationFailureDegradesGracefully:
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         # Fell back to an uncached request.
         assert generate_kwargs["config"].cached_content is None
-        assert generate_kwargs["config"].system_instruction == "sys"
+        assert generate_kwargs["config"].system_instruction == _with_turn_budget_line("sys")
         assert any("cache" in record.message.lower() for record in caplog.records)
 
 
@@ -790,7 +869,7 @@ class TestToolConfigNeverCombinedWithCachedContent:
         retry_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         retry_config = retry_kwargs["config"]
         assert retry_config.cached_content is None
-        assert retry_config.system_instruction == "sys"
+        assert retry_config.system_instruction == _with_turn_budget_line("sys")
         assert retry_config.tools is not None
         assert retry_config.tool_config is not None
         assert retry_config.tool_config.function_calling_config.mode == "ANY"
@@ -1333,7 +1412,7 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
         # for a dedicated test of the tool_config restoration).
         retry_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         assert retry_kwargs["config"].cached_content is None
-        assert retry_kwargs["config"].system_instruction == "sys"
+        assert retry_kwargs["config"].system_instruction == _with_turn_budget_line("sys")
         assert retry_kwargs["config"].tools is not None
         assert retry_kwargs["config"].tool_config is not None
 

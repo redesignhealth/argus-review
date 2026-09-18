@@ -292,6 +292,53 @@ class TestUsageLoggingIsDefensive:
         assert result_log_calls[0].args[-2] == 10
 
 
+class TestTurnBudgetExhaustionSurfacesFailureReason:
+    """The Claude Agent SDK enforces `max_turns` itself and reports
+    exhaustion via `ResultMessage.subtype == "error_max_turns"` rather than
+    raising -- unlike the Gemini/OpenAI runners' own hand-written turn
+    loops, there is no `for...else` here. Before this test, that signal was
+    read nowhere: `_run_claude_session` took `message.result` as a normal
+    result and returned `failure_reason=None`, indistinguishable from a
+    reviewer that finished cleanly and genuinely found nothing.
+    """
+
+    def test_error_max_turns_sets_turn_budget_exhausted(self) -> None:
+        messages = [
+            AssistantMessage(content=[TextBlock(text="still exploring")], model=CLAUDE_DEFAULT),
+            ResultMessage(
+                subtype="error_max_turns",
+                duration_ms=100,
+                duration_api_ms=90,
+                is_error=True,
+                num_turns=30,
+                session_id="sess-1",
+                result="partial, unfinished output",
+                usage=None,
+                model_usage=None,
+            ),
+        ]
+        result = _run_session(messages)
+        assert result.failure_reason == "turn_budget_exhausted"
+
+    def test_clean_success_leaves_failure_reason_none(self) -> None:
+        messages = [
+            AssistantMessage(content=[TextBlock(text="done")], model=CLAUDE_DEFAULT),
+            ResultMessage(
+                subtype="success",
+                duration_ms=100,
+                duration_api_ms=90,
+                is_error=False,
+                num_turns=3,
+                session_id="sess-1",
+                result='```json\n{"findings": []}\n```',
+                usage=None,
+                model_usage=None,
+            ),
+        ]
+        result = _run_session(messages)
+        assert result.failure_reason is None
+
+
 class TestLangSmithEnrichmentIsDefensive:
     """TECH-4734 phase 2: LangSmith span enrichment and the local ledger fallback
     must never break a review session, whether tracing is off or a write fails.

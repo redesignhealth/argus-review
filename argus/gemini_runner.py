@@ -159,7 +159,10 @@ from argus.gemini_cache import GeminiCacheKeeper
 from argus.llm.models import estimate_cost_usd
 from argus.llm.models import resolve as resolve_model_alias
 from argus.runners import (
+    _NUDGE_TURNS_BEFORE_BUDGET,
     _SUBPROCESS_TIMEOUT_S,
+    _TURN_BUDGET_NUDGE,
+    _TURN_BUDGET_SYSTEM_PROMPT_LINE,
     SessionResult,
     _resolve_repo_root,
 )
@@ -594,10 +597,15 @@ async def _run_turns(
     timeout_s: float,
     started_at: datetime,
 ) -> SessionResult:
-    """The actual tool-calling loop. Always returns with ``failure_reason=None``
-    -- the enclosing ``run_session_gemini`` is what applies the timeout and
-    turns a cancellation into a ``failure_reason="timeout"`` result instead.
+    """The actual tool-calling loop. Returns ``failure_reason="turn_budget_exhausted"``
+    when the loop ran out of turns without a ``finish_review`` call, else
+    ``None`` -- the enclosing ``run_session_gemini`` is what applies the
+    timeout and turns a cancellation into a ``failure_reason="timeout"``
+    result instead.
     """
+    system_prompt = (
+        system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS_GEMINI)
+    )
     _, api_key = settings.google_credential
     # Second layer of defense: `asyncio.wait_for` in `run_session_gemini`
     # cannot interrupt an in-flight blocking SDK call once it has started
@@ -682,6 +690,7 @@ async def _run_turns(
 
         tool_calls: list[str] = []
         files_explored: list[str] = []
+        exhausted = False
         usage_prompt_total = 0
         usage_candidates_total = 0
         usage_cached_total = 0
@@ -690,6 +699,11 @@ async def _run_turns(
 
         with review_tools.review_session(repo_root) as findings_sink:
             for _turn in range(_MAX_TURNS_GEMINI):
+                if (
+                    _turn == _MAX_TURNS_GEMINI - _NUDGE_TURNS_BEFORE_BUDGET
+                    and contents[-1].parts is not None
+                ):
+                    contents[-1].parts.append(types.Part.from_text(text=_TURN_BUDGET_NUDGE))
                 try:
                     response = await client.aio.models.generate_content(
                         model=model, contents=contents, config=config
@@ -819,14 +833,14 @@ async def _run_turns(
                 if finished:
                     break
             else:
-                # `for...else`: only reached if every one of _MAX_TURNS_GEMINI
-                # iterations executed a function call and none of them was
-                # finish_review -- i.e. the turn budget was exhausted.
+                # `for...else`: only reached if every iteration executed a
+                # function call and none was finish_review, i.e. exhausted.
                 logger.warning(
                     "Gemini session [%s] exhausted its %d-turn budget without a finish_review call",
                     label or "unlabeled",
                     _MAX_TURNS_GEMINI,
                 )
+                exhausted = True
 
             result_text = _build_result_text(findings_sink, files_explored)
 
@@ -874,7 +888,7 @@ async def _run_turns(
             # docstring) -- always 0, never derived from tool_calls.
             context7_call_count=0,
             model=model,
-            failure_reason=None,
+            failure_reason="turn_budget_exhausted" if exhausted else None,
         )
     finally:
         # Every session creates both a sync and async HTTP client (the sync

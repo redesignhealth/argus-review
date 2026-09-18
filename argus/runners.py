@@ -141,7 +141,27 @@ if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
         _CROSS_CUTTING_MODEL,
     )
 
+# Shared by every Claude-path session (system/specialist/cross-cutting/tests-and-docs
+# reviewers, feedback verifier, blocking validator).
 _MAX_TURNS = 30
+
+# Nudges the Gemini/OpenAI turn loops (see their own _run_turns) to call
+# finish_review a few turns before the budget runs out.
+_NUDGE_TURNS_BEFORE_BUDGET = 3
+_TURN_BUDGET_NUDGE = (
+    f"You have {_NUDGE_TURNS_BEFORE_BUDGET} turns left. Call `finish_review` now with "
+    "whatever you have found so far. Do not read or search any further. If you have "
+    "found nothing, call `finish_review` with an empty findings list."
+)
+
+# One-sentence turn-budget disclosure appended to the Gemini/OpenAI reviewer
+# system prompts. Not used on the Claude path (_run_claude_session), which
+# has no mid-stream nudge for the sentence to work with.
+_TURN_BUDGET_SYSTEM_PROMPT_LINE = (
+    "You have at most {max_turns} turns. Call `finish_review` before you run out -- "
+    "a review that never calls it is discarded entirely."
+)
+
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned
 # worktree has been provisioned (e.g. local dev runs, tests, subprocess
 # worker). In production, callers pass an explicit repo_root provisioned
@@ -348,7 +368,7 @@ class SessionResult:
     tool_names: list[str] = field(default_factory=list)
     context7_call_count: int = 0
     model: str | None = None
-    failure_reason: Literal["timeout", "worker_crashed"] | None = None
+    failure_reason: Literal["timeout", "worker_crashed", "turn_budget_exhausted"] | None = None
     timed_out: bool = False
 
     def __post_init__(self) -> None:
@@ -362,7 +382,7 @@ def _empty_session_result(
     duration_seconds: float = 0.0,
     started_at: datetime | None = None,
     *,
-    failure_reason: Literal["timeout", "worker_crashed"],
+    failure_reason: Literal["timeout", "worker_crashed", "turn_budget_exhausted"],
 ) -> SessionResult:
     """Default SessionResult for subprocess timeout / worker failure.
 
@@ -1689,6 +1709,7 @@ async def _run_claude_session(
         cost_usd = 0.0
         tool_calls: list[str] = []
         message_index = 0
+        failure_reason: Literal["turn_budget_exhausted"] | None = None
         async for message in client.receive_response():
             if isinstance(message, TaskStartedMessage):
                 logger.info("Agent session started: %s model=%s", label or "unlabeled", model)
@@ -1779,6 +1800,17 @@ async def _run_claude_session(
                     getattr(message, "usage", None),
                     getattr(message, "model_usage", None),
                 )
+                # The SDK enforces max_turns itself and reports exhaustion via
+                # this subtype rather than raising, so result_text above may be
+                # partial rather than a real finish_review completion.
+                if message.subtype == "error_max_turns":
+                    logger.warning(
+                        "Agent [%s] exhausted its %d-turn budget (subtype=%s)",
+                        label or "unlabeled",
+                        _MAX_TURNS,
+                        message.subtype,
+                    )
+                    failure_reason = "turn_budget_exhausted"
     finished_at = datetime.now(timezone.utc)
 
     tool_names = [tc.split("(")[0] for tc in tool_calls]
@@ -1857,4 +1889,5 @@ async def _run_claude_session(
         tool_names=unique_tool_names,
         context7_call_count=len(context7_calls),
         model=model,
+        failure_reason=failure_reason,
     )
