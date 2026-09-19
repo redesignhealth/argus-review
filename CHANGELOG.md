@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Pinned `openai` dependency to `<2` (`openai>=1.50.0,<2`) in `pyproject.toml`
+  (TECH-6590). An unbounded `openai>=1.50.0` declaration caused unconstrained
+  package installs (such as from the `/argus-review-loop` skill) to pick up
+  `openai==3.0.0`+, whose breaking internal changes caused review rounds to crash
+  at `write_review` / `_extract` with `TypeError: pydantic_to_response_format() got an unexpected keyword argument 'exclude'`
+  after full review pipeline execution.
+
 ## [0.2.5] - 2026-09-18
 
 ### Added
