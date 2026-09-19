@@ -80,3 +80,41 @@ class TestGetAsyncOpenAIClientBaseURL:
 
         mock_async_openai.assert_called_once()
         assert mock_async_openai.call_args.kwargs["base_url"] is None
+
+
+class TestOpenAIClientSyncRespond:
+    def test_respond_passes_text_format_to_responses_create(self) -> None:
+        """text_format is wrapped in text={'format': text_format} for client.responses.create."""
+        settings = _make_settings(None)
+        mock_response = MagicMock()
+        mock_response.model = "gpt-5.4-mini"
+        mock_response.status = "completed"
+        mock_response.output = []
+        mock_response.output_text = "{}"
+
+        mock_client_instance = MagicMock()
+        mock_client_instance.responses.create.return_value = mock_response
+
+        text_format = {
+            "type": "json_schema",
+            "name": "test_schema",
+            "strict": True,
+            "schema": {"type": "object", "properties": {}},
+        }
+
+        with (
+            patch("argus.openai_client.get_settings", return_value=settings),
+            patch("argus.openai_client.OpenAI", return_value=mock_client_instance),
+            patch("argus.openai_client.wrap_openai", side_effect=lambda client: client),
+        ):
+            client = OpenAIClientSync()
+            resp = client.respond(
+                input="test prompt",
+                text_format=text_format,
+            )
+
+        mock_client_instance.responses.create.assert_called_once()
+        call_kwargs = mock_client_instance.responses.create.call_args.kwargs
+        assert call_kwargs["text"] == {"format": text_format}
+        assert call_kwargs["input"] == "test prompt"
+        assert resp == mock_response

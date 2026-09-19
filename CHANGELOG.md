@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded `openai` dependency to `>=1.66.0,<2` in `pyproject.toml` (TECH-6590) to
+  prevent unconstrained fresh installs from resolving to a future breaking major
+  release. The floor was also tightened from `>=1.50.0` to `>=1.66.0` where the
+  OpenAI Responses API (`client.responses.create()`) used by this codebase was
+  introduced. (Note: this is a general hygiene fix; it does not address the root
+  cause of the TECH-6590-reported crash, which was a separate shared-venv version-skew
+  issue tracked in TECH-6592.)
+
 ## [0.2.5] - 2026-09-18
 
 ### Added
