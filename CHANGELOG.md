@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-09-19
+
 ### Fixed
 
 - Bounded `openai` dependency to `>=1.66.0,<2` in `pyproject.toml` (TECH-6590) to
@@ -336,7 +338,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/redesignhealth/argus-review/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/redesignhealth/argus-review/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/redesignhealth/argus-review/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/redesignhealth/argus-review/compare/v0.2.2...v0.2.3
