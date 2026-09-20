@@ -893,6 +893,33 @@ class TestPureRenameExemption:
         assert response.verdict == Verdict.BLOCKING
 
     @pytest.mark.asyncio
+    async def test_renamed_file_without_sha_fails_closed(self) -> None:
+        """A rename without a head sha fails closed and short-circuits metadata/tree lookup."""
+        mock_gh = MagicMock()
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "old/x.tf",
+                "status": "renamed",
+                "patch": None,
+                "sha": "",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+        mock_gh.get_compare_metadata.assert_not_called()
+        mock_gh.get_tree_blob_shas.assert_not_called()
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
     async def test_rename_exemption_fails_closed_when_tree_fetch_fails(self) -> None:
         """When get_tree_blob_shas raises an exception, fails closed."""
         mock_gh = MagicMock()
