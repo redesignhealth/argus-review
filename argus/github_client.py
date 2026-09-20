@@ -500,7 +500,8 @@ class GitHubClient:
         """Return list of files changed between base and head with status and patch.
 
         Calls ``/repos/{repo}/compare/{base}...{head}`` JSON endpoint and
-        extracts file objects with ``filename``, ``status``, and ``patch``.
+        extracts file objects with ``filename``, ``status``, ``patch``,
+        ``previous_filename``, and ``sha``.
         Note: GitHub caps this list at 300 files without pagination.
 
         Args:
@@ -532,6 +533,7 @@ class GitHubClient:
                         "status": f.get("status", "modified"),
                         "patch": f.get("patch", ""),
                         "previous_filename": f.get("previous_filename", ""),
+                        "sha": f.get("sha", ""),
                     }
                 )
         return results, is_truncated
@@ -542,7 +544,7 @@ class GitHubClient:
         pr_number: int,
         max_files: int = 3000,
     ) -> tuple[list[dict[str, Any]], bool]:
-        """Get all files changed in a PR with status and patch, paginated.
+        """Get all files changed in a PR with status, patch, previous_filename, and sha, paginated.
 
         Calls ``/repos/{repo}/pulls/{pr_number}/files`` paginating up to max_files.
 
@@ -573,9 +575,41 @@ class GitHubClient:
                         "status": f.get("status", "modified"),
                         "patch": f.get("patch", ""),
                         "previous_filename": f.get("previous_filename", ""),
+                        "sha": f.get("sha", ""),
                     }
                 )
         return results, is_truncated
+
+    def get_tree_blob_shas(self, repo: str, ref: str) -> tuple[dict[str, str], bool]:
+        """Return {path: blob_sha} for every blob in the tree at ``ref``.
+
+        Calls ``/repos/{repo}/git/trees/{ref}?recursive=1`` in a single request.
+        ``ref`` may be a commit SHA, tree SHA, or branch name.
+
+        Used by the bench-configuration guard (TECH-6633) to prove that a
+        GitHub-reported rename carries zero content change, in the case where
+        GitHub omits ``patch`` for 100%-similarity renames.
+
+        Returns:
+            Tuple of ({path: blob_sha} for entries with type == "blob",
+            is_truncated bool). When truncated, the map is incomplete and
+            callers MUST treat a missing path as unverified, not as absent.
+        """
+        data = self._request("GET", f"/repos/{repo}/git/trees/{ref}", params={"recursive": "1"})
+        is_truncated = bool(data.get("truncated", False))
+        if is_truncated:
+            logger.warning(
+                "get_tree_blob_shas: tree at %s in %s is truncated; blob map is incomplete",
+                ref,
+                repo,
+            )
+        tree_entries = data.get("tree") or []
+        blob_shas = {
+            e["path"]: e["sha"]
+            for e in tree_entries
+            if isinstance(e, dict) and e.get("type") == "blob" and e.get("path") and e.get("sha")
+        }
+        return blob_shas, is_truncated
 
     def get_compare_commits(
         self,

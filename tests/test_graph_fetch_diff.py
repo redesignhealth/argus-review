@@ -345,6 +345,86 @@ class TestFetchFullPrChangedFiles:
         assert unconfirmed is not None
         assert "exceeded maximum file limit" in unconfirmed
 
+    @pytest.mark.asyncio
+    async def test_previous_filename_and_sha_plumbed_through(self) -> None:
+        """previous_filename and sha from get_compare_files are plumbed into parsed_files."""
+        from argus.graph import _fetch_full_pr_changed_files
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [
+                {
+                    "filename": "new/path.py",
+                    "previous_filename": "old/path.py",
+                    "status": "renamed",
+                    "patch": "",
+                    "sha": "blob123",
+                }
+            ],
+            False,
+        )
+        mock_gh.get_compare_metadata.return_value = MagicMock(merge_base_sha="mb123")
+        mock_gh.get_tree_blob_shas.return_value = ({"old/path.py": "blob123"}, False)
+
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            files, unconfirmed = await _fetch_full_pr_changed_files(
+                _make_request(pr_number=42),
+                base_branch="main",
+                head_sha="head1234",
+                round_diff="diff",
+                prior_sha=None,
+            )
+
+        assert len(files) == 1
+        assert files[0]["filename"] == "new/path.py"
+        assert files[0]["previous_filename"] == "old/path.py"
+        assert files[0]["sha"] == "blob123"
+        assert files[0]["content_identical_rename"] is True
+        assert unconfirmed is None
+
+    @pytest.mark.asyncio
+    async def test_pr_files_pagination_preserves_rename_fields(self) -> None:
+        """PR-files pagination rebuilds parsed_files with previous_filename, sha, and annotates renames."""
+        from argus.graph import _fetch_full_pr_changed_files
+
+        mock_gh = MagicMock()
+        # compare files is truncated to trigger PR pagination
+        mock_gh.get_compare_files.return_value = (
+            [{"filename": f"file_{i}.py", "status": "modified"} for i in range(300)],
+            True,
+        )
+        # get_pr_files returns paginated files including a pure rename
+        mock_gh.get_pr_files.return_value = (
+            [
+                {
+                    "filename": "new/renamed.py",
+                    "previous_filename": "old/renamed.py",
+                    "status": "renamed",
+                    "patch": "",
+                    "sha": "sha456",
+                }
+            ],
+            False,
+        )
+        mock_gh.get_compare_metadata.return_value = MagicMock(merge_base_sha="mb456")
+        mock_gh.get_tree_blob_shas.return_value = ({"old/renamed.py": "sha456"}, False)
+
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            files, unconfirmed = await _fetch_full_pr_changed_files(
+                _make_request(pr_number=42),
+                base_branch="main",
+                head_sha="head1234",
+                round_diff="diff",
+                prior_sha=None,
+            )
+
+        assert unconfirmed is None
+        assert len(files) == 1
+        assert files[0]["filename"] == "new/renamed.py"
+        assert files[0]["previous_filename"] == "old/renamed.py"
+        assert files[0]["sha"] == "sha456"
+        assert files[0]["content_identical_rename"] is True
+
 
 class TestNodeFetchDiffBenchConfig:
     """Tests for _node_fetch_diff bench_config_changes state population."""
