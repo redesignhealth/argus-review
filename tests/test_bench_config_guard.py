@@ -708,3 +708,359 @@ class TestRunReviewBenchGuardIntegration:
         assert any(f.category == "argus-self-config" for f in result.findings)
         assert any("Unable to verify" in f.description for f in result.findings)
         assert "Verdict forced to BLOCKING" in result.review_comment
+
+
+# ---------------------------------------------------------------------------
+# Pure rename exemption tests (TECH-6633)
+# ---------------------------------------------------------------------------
+
+
+class TestPureRenameExemption:
+    """Tests for pure (byte-identical) rename exemption in bench config guard (TECH-6633)."""
+
+    async def _run_fetch_diff(
+        self,
+        files: list[dict[str, Any]],
+        mock_gh: MagicMock,
+        repo: str = "org/repo",
+        pr_number: int = 42,
+    ) -> dict[str, Any]:
+        req = ReviewRequest(repo=repo, pr_number=pr_number)
+        diff = "diff --git a/f.py b/f.py\n"
+        mock_gh.get_compare_files.return_value = (files, False)
+
+        state = {"request": req.model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "desc", "head12345678", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            return await _node_fetch_diff(state, config)
+
+    @pytest.mark.asyncio
+    async def test_pure_rename_with_missing_patch_does_not_fail_closed(self) -> None:
+        """A pure rename with missing patch and matching blob SHAs does not trigger fail-closed."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = ({"old/x.tf": "abc"}, False)
+
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "old/x.tf",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is None
+        assert node_result["bench_config_changes"] == []
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+
+    @pytest.mark.asyncio
+    async def test_rename_into_bench_config_path_flags_bench_change_not_unconfirmed(self) -> None:
+        """Renaming a file into a bench config path flags bench_config_changes, not unconfirmed."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = ({"config/bench.toml": "abc"}, False)
+
+        files = [
+            {
+                "filename": ".argus/bench.toml",
+                "previous_filename": "config/bench.toml",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is None
+        assert ".argus/bench.toml" in node_result["bench_config_changes"]
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+        assert not any("Unable to verify" in f.description for f in response.findings)
+
+    @pytest.mark.asyncio
+    async def test_rename_away_from_bench_config_path_still_flags(self) -> None:
+        """Renaming a bench config path away is caught on previous_filename, not unconfirmed."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = ({".argus/bench.toml": "abc"}, False)
+
+        files = [
+            {
+                "filename": "config/bench.toml.bak",
+                "previous_filename": ".argus/bench.toml",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert ".argus/bench.toml" in node_result["bench_config_changes"]
+        assert node_result["bench_config_unconfirmed"] is None
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+        assert not any("Unable to verify" in f.description for f in response.findings)
+
+    @pytest.mark.asyncio
+    async def test_renamed_file_with_differing_blob_sha_fails_closed(self) -> None:
+        """A rename whose head SHA differs from base SHA fails closed."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = ({"old/x.tf": "zzz"}, False)
+
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "old/x.tf",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
+    async def test_renamed_file_without_previous_filename_fails_closed(self) -> None:
+        """A rename without previous_filename fails closed and short-circuits tree lookup."""
+        mock_gh = MagicMock()
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+        mock_gh.get_tree_blob_shas.assert_not_called()
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
+    async def test_rename_exemption_fails_closed_when_tree_fetch_fails(self) -> None:
+        """When get_tree_blob_shas raises an exception, fails closed."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.side_effect = RuntimeError("Tree fetch failed")
+
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "old/x.tf",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
+    async def test_rename_exemption_fails_closed_when_merge_base_unresolvable(self) -> None:
+        """When merge base cannot be resolved (exception or empty), fails closed in both cases."""
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "old/x.tf",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+
+        # Variant 1: get_compare_metadata raises RuntimeError
+        mock_gh1 = MagicMock()
+        mock_gh1.get_compare_metadata.side_effect = RuntimeError("Compare failed")
+        node_result1 = await self._run_fetch_diff(files, mock_gh1)
+        assert node_result1["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result1["bench_config_unconfirmed"]
+
+        # Variant 2: merge_base_sha is empty string
+        mock_gh2 = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = ""
+        mock_gh2.get_compare_metadata.return_value = mock_meta
+        node_result2 = await self._run_fetch_diff(files, mock_gh2)
+        assert node_result2["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result2["bench_config_unconfirmed"]
+
+    @pytest.mark.asyncio
+    async def test_rename_exemption_fails_closed_when_tree_truncated_and_path_missing(self) -> None:
+        """When tree is truncated and path is missing from the tree, fails closed."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = ({}, True)
+
+        files = [
+            {
+                "filename": "new/x.tf",
+                "previous_filename": "old/x.tf",
+                "status": "renamed",
+                "patch": None,
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
+    async def test_renamed_file_with_patch_uses_normal_routing_detection(self) -> None:
+        """Renamed file that has a patch goes through normal routing line detection."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = ({"old/x.py": "abc"}, False)
+
+        files = [
+            {
+                "filename": "new/x.py",
+                "previous_filename": "old/x.py",
+                "status": "renamed",
+                "patch": "+ARGUS_BENCH_FILE=evil.toml\n",
+                "sha": "abc",
+            }
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert any(
+            "added line modifying bench routing in new/x.py" in c
+            for c in node_result["bench_config_changes"]
+        )
+        assert node_result["bench_config_unconfirmed"] is None
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is True
+        assert response.verdict == Verdict.BLOCKING
+
+    @pytest.mark.asyncio
+    async def test_no_tree_fetch_when_no_rename_candidates(self) -> None:
+        """Cost guard: neither get_compare_metadata nor get_tree_blob_shas is called when no renames."""
+        mock_gh = MagicMock()
+        files = [{"filename": "src/app.py", "status": "modified", "patch": "+x\n"}]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is None
+        mock_gh.get_compare_metadata.assert_not_called()
+        mock_gh.get_tree_blob_shas.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_multiple_pure_renames_use_single_tree_fetch(self) -> None:
+        """Batching guard: multiple pure renames in one PR share a single tree fetch."""
+        mock_gh = MagicMock()
+        mock_meta = MagicMock()
+        mock_meta.merge_base_sha = "mb"
+        mock_gh.get_compare_metadata.return_value = mock_meta
+        mock_gh.get_tree_blob_shas.return_value = (
+            {"old1.py": "sha1", "old2.py": "sha2", "old3.py": "sha3"},
+            False,
+        )
+
+        files = [
+            {
+                "filename": "new1.py",
+                "previous_filename": "old1.py",
+                "status": "renamed",
+                "patch": None,
+                "sha": "sha1",
+            },
+            {
+                "filename": "new2.py",
+                "previous_filename": "old2.py",
+                "status": "renamed",
+                "patch": None,
+                "sha": "sha2",
+            },
+            {
+                "filename": "new3.py",
+                "previous_filename": "old3.py",
+                "status": "renamed",
+                "patch": None,
+                "sha": "sha3",
+            },
+        ]
+        node_result = await self._run_fetch_diff(files, mock_gh)
+
+        assert node_result["bench_config_unconfirmed"] is None
+        assert mock_gh.get_tree_blob_shas.call_count == 1

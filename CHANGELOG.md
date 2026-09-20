@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Bench-configuration verification (TECH-6282) no longer forces a BLOCKING verdict
+  on PRs containing 100%-similarity renames (TECH-6633). GitHub's compare and
+  PR-files APIs omit `patch` entirely for a pure `git mv` with zero byte-level
+  change, which the fail-closed guard read as unverifiable content — making it
+  structurally impossible for any PR containing a pure rename to reach APPROVE
+  (reproduced across ~18 review rounds on a real PR, on both 0.2.5 and 0.2.6).
+  A renamed file with a missing patch is now exempted **only** when its head blob
+  SHA is proven equal to the blob SHA of `previous_filename` at the merge base —
+  byte-identical content cannot introduce new bench-routing lines. Every other
+  missing-patch case still fails closed, including renames whose blob SHAs differ,
+  renames lacking `previous_filename`, and any case where the base-tree lookup
+  fails or is truncated.
+
+### Changed
+
+- The bench-configuration path check now evaluates **both** sides of a rename
+  (`filename` and `previous_filename`), matching `_is_high_blast_radius`'s
+  existing behaviour, so moving a bench config *out* of a recognised bench path
+  is still flagged (TECH-6633).
+
 ## [0.2.6] - 2026-09-19
 
 ### Fixed

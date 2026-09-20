@@ -707,6 +707,96 @@ def _extract_diff_file_statuses(diff: str) -> dict[str, str]:
     return statuses
 
 
+def _annotate_content_identical_renames(
+    gh: Any,
+    repo: str,
+    parsed_files: list[dict[str, Any]],
+    base_branch: str,
+    head_sha: str,
+) -> None:
+    """Mark pure (byte-identical) renames so the bench guard does not fail closed (TECH-6633).
+
+    GitHub omits ``patch`` entirely for 100%-similarity renames. Without this,
+    any PR containing a ``git mv`` can never reach APPROVE. Sets
+    ``content_identical_rename = True`` only when the file's head blob SHA is
+    PROVEN equal to the blob SHA of ``previous_filename`` at the merge base.
+    Any uncertainty leaves the flag False -> caller fails closed.
+
+    Mutates ``parsed_files`` in place. Never raises.
+    """
+    candidates = [
+        f
+        for f in parsed_files
+        if f.get("status") == "renamed"
+        and not f.get("patch")
+        and f.get("previous_filename")
+        and f.get("sha")
+    ]
+    if not candidates:
+        return
+
+    try:
+        merge_base = gh.get_compare_metadata(repo, base_branch, head_sha).merge_base_sha
+    except Exception as exc:
+        logger.warning(
+            "_annotate_content_identical_renames: failed to get compare metadata for %s (%s...%s): %s",
+            repo,
+            base_branch,
+            head_sha,
+            exc,
+        )
+        return
+
+    if not merge_base:
+        logger.warning(
+            "_annotate_content_identical_renames: empty merge_base_sha for %s (%s...%s)",
+            repo,
+            base_branch,
+            head_sha,
+        )
+        return
+
+    try:
+        base_shas, truncated = gh.get_tree_blob_shas(repo, merge_base)
+    except Exception as exc:
+        logger.warning(
+            "_annotate_content_identical_renames: failed to get tree blob SHAs for %s at %s: %s",
+            repo,
+            merge_base,
+            exc,
+        )
+        return
+
+    if truncated:
+        logger.warning(
+            "_annotate_content_identical_renames: tree at %s in %s is truncated; some paths may remain unverified",
+            merge_base,
+            repo,
+        )
+
+    verified_count = 0
+    for f in candidates:
+        base_sha = base_shas.get(f["previous_filename"])
+        if base_sha and base_sha == f["sha"]:
+            f["content_identical_rename"] = True
+            verified_count += 1
+        else:
+            logger.debug(
+                "_annotate_content_identical_renames: rename candidate %s (previous %s) SHA mismatch or missing in base tree (head_sha=%s, base_sha=%s)",
+                f.get("filename"),
+                f.get("previous_filename"),
+                f.get("sha"),
+                base_sha,
+            )
+
+    logger.info(
+        "_annotate_content_identical_renames: %d of %d rename candidates verified content-identical in %s",
+        verified_count,
+        len(candidates),
+        repo,
+    )
+
+
 async def _fetch_full_pr_changed_files(
     request: ReviewRequest,
     base_branch: str,
@@ -723,6 +813,8 @@ async def _fetch_full_pr_changed_files(
       missing changes past diff truncation points (e.g. max_lines=5000).
     - If compare list is truncated at 300 files and pr_number is available, paginates
       using PR files endpoint up to 3000 files.
+    - Annotates pure (byte-identical) renames (content_identical_rename=True) via base tree
+      blob SHA verification so pure renames with missing patch don't fail closed (TECH-6633).
     - If the list remains truncated or API calls fail after retry, returns an unconfirmed
       reason so the bench guard forces a BLOCKING verdict rather than silently approving.
     """
@@ -747,13 +839,25 @@ async def _fetch_full_pr_changed_files(
                 parsed_files: list[dict[str, Any]] = []
                 for f in files:
                     if isinstance(f, str):
-                        parsed_files.append({"filename": f, "status": "modified", "patch": ""})
+                        parsed_files.append(
+                            {
+                                "filename": f,
+                                "status": "modified",
+                                "patch": "",
+                                "previous_filename": "",
+                                "sha": "",
+                                "content_identical_rename": False,
+                            }
+                        )
                     elif isinstance(f, dict):
                         parsed_files.append(
                             {
                                 "filename": f.get("filename", ""),
                                 "status": f.get("status", "modified"),
                                 "patch": f.get("patch", ""),
+                                "previous_filename": f.get("previous_filename", ""),
+                                "sha": f.get("sha", ""),
+                                "content_identical_rename": False,
                             }
                         )
 
@@ -772,6 +876,11 @@ async def _fetch_full_pr_changed_files(
                                 if isinstance(pf, dict)
                                 else "modified",
                                 "patch": pf.get("patch", "") if isinstance(pf, dict) else "",
+                                "previous_filename": pf.get("previous_filename", "")
+                                if isinstance(pf, dict)
+                                else "",
+                                "sha": pf.get("sha", "") if isinstance(pf, dict) else "",
+                                "content_identical_rename": False,
                             }
                             for pf in pr_files
                         ]
@@ -780,6 +889,14 @@ async def _fetch_full_pr_changed_files(
                         logger.warning(
                             "Failed to paginate PR files for #%d: %s", request.pr_number, pr_exc
                         )
+
+                _annotate_content_identical_renames(
+                    gh=gh,
+                    repo=request.repo,
+                    parsed_files=parsed_files,
+                    base_branch=base,
+                    head_sha=head,
+                )
 
                 unconfirmed_reason: str | None = None
                 if is_truncated:
@@ -812,7 +929,15 @@ async def _fetch_full_pr_changed_files(
         )
         diff_statuses = _extract_diff_file_statuses(round_diff)
         fallback_files = [
-            {"filename": fn, "status": status, "patch": ""} for fn, status in diff_statuses.items()
+            {
+                "filename": fn,
+                "status": status,
+                "patch": "",
+                "previous_filename": "",
+                "sha": "",
+                "content_identical_rename": False,
+            }
+            for fn, status in diff_statuses.items()
         ]
         return fallback_files, unconfirmed_reason
 
@@ -2304,12 +2429,19 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         if f.get("status") == "removed":
             continue
         filename = f.get("filename", "")
-        if _is_bench_config_path(
-            filename,
-            bench_file_setting=settings.ARGUS_BENCH_FILE,
-            worktree_path=worktree_path,
-        ):
-            bench_config_changes.append(filename)
+        previous_filename = f.get("previous_filename", "") or ""
+
+        # TECH-6633: check BOTH sides of a rename so moving a bench config
+        # OUT of a bench path is caught, mirroring _is_high_blast_radius.
+        matched_bench_path = False
+        for candidate_path in (filename, previous_filename):
+            if candidate_path and _is_bench_config_path(
+                candidate_path,
+                bench_file_setting=settings.ARGUS_BENCH_FILE,
+                worktree_path=worktree_path,
+            ):
+                bench_config_changes.append(candidate_path)
+                matched_bench_path = True
 
         patch_content = f.get("patch")
         if patch_content:
@@ -2317,9 +2449,14 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
                 bench_config_changes.append(
                     f"added line modifying bench routing in {filename}: {line}"
                 )
-        elif not unconfirmed_reason and filename not in bench_config_changes:
+        elif (
+            not unconfirmed_reason
+            and not matched_bench_path
+            and not f.get("content_identical_rename")
+        ):
             unconfirmed_reason = (
-                f"Diff patch content missing or empty for '{filename}' in GitHub API "
+                f"Diff patch content missing or empty for '{filename}' "
+                f"(status={f.get('status', 'unknown')}) in GitHub API "
                 "response; complete changes could not be verified for bench routing"
             )
             logger.warning(unconfirmed_reason)
