@@ -11,6 +11,7 @@ Tests use ``pytest-httpx`` to mock the backend side; no real network.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -249,3 +250,70 @@ def test_install_raises_on_conflicting_reinstall() -> None:
     install_http_storage(read_url=_READ_URL, write_url=_WRITE_URL, auth="ApiKey k")
     with pytest.raises(HttpStorageError, match="different parameters"):
         install_http_storage(read_url=_READ_URL, write_url=_WRITE_URL, auth="ApiKey DIFFERENT")
+
+
+@pytest.mark.asyncio
+async def test_write_and_read_lite_round_round_trip(httpx_mock: HTTPXMock) -> None:
+    """A lite-mode round (reviewer_version="v3-lite") written via
+    HttpStorageClient.write_round round-trips through
+    read_latest_completed_round with reviewer_version preserved.
+    """
+    written_id = uuid4()
+    round_payload = _row_payload(
+        id=str(written_id),
+        reviewer_version="v3-lite",
+        verdict="APPROVE",
+        sha="131e334046bf",
+        result_json={"review_round": 8, "preflight_reason": "test-only diff"},
+    )
+    httpx_mock.add_response(
+        method="POST",
+        url="https://fake-storage-backend.test/api/v1/code-review/storage/reviews/acme/example-repo/158/rounds",
+        status_code=201,
+        json=round_payload,
+    )
+    httpx_mock.add_response(
+        method="GET",
+        url="https://fake-storage-backend.test/api/v1/code-review/storage/reviews/acme/example-repo/158",
+        status_code=200,
+        json={"rounds": [round_payload]},
+    )
+
+    client = HttpStorageClient(read_url=_READ_URL, write_url=_WRITE_URL, auth="ApiKey test")
+    try:
+        round_data = CodeReviewRound(
+            repo="acme/example-repo",
+            pr_number=158,
+            verdict="APPROVE",
+            risk_level="LOW",
+            blocking_count=0,
+            suggestion_count=0,
+            reviewer_version="v3-lite",
+            sha="131e334046bf",
+            result_json={"review_round": 8, "preflight_reason": "test-only diff"},
+        )
+        written = await client.write_round(
+            owner="acme", repo="example-repo", pr=158, round_data=round_data
+        )
+        assert written.id == written_id
+        assert written.reviewer_version == "v3-lite"
+
+        # Verify POST payload sent the reviewer_version
+        post_request = httpx_mock.get_requests()[0]
+        assert post_request.method == "POST"
+        posted_body = json.loads(post_request.content)
+        assert posted_body["reviewer_version"] == "v3-lite"
+        assert posted_body["sha"] == "131e334046bf"
+
+        latest, count = await client.read_latest_completed_round(
+            owner="acme", repo="example-repo", pr=158
+        )
+        assert latest is not None
+        assert latest.id == written_id
+        assert latest.reviewer_version == "v3-lite"
+        assert latest.verdict == "APPROVE"
+        assert latest.sha == "131e334046bf"
+        assert latest.result_json == {"review_round": 8, "preflight_reason": "test-only diff"}
+        assert count == 1
+    finally:
+        await client.aclose()
