@@ -2231,7 +2231,7 @@ async def _node_lite_review(state: ReviewState) -> dict[str, Any]:
         logger.info(
             "Lite round history markdown section omitted on HTTP storage path "
             "(select_recent_lite_rounds not implemented in HTTP shim; "
-            "the round's own finalize write still persists normally)"
+            "the round's own finalize write is not skipped and will be attempted normally)"
         )
 
     response.review_comment = (

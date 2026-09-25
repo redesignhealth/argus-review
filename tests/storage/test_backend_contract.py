@@ -10,9 +10,9 @@ operations:
 - **http**: wired via ``pytest-httpx`` standing in for the two-endpoint HTTP
   storage contract (see ``docs/STORAGE.md``). Operations not implemented by
   the minimal HTTP shim (e.g. status polling, recent-rounds listing,
-  select_recent_lite_rounds) are documented and marked xfail. Completed-round
-  persistence and latest-round reads (including for lite-mode reviews) are
-  fully supported and verified.
+  select_recent_lite_rounds, insert_agent_runs) are documented and marked xfail.
+  Completed-round persistence and latest-round reads (including for lite-mode
+  reviews) are fully supported and verified.
 - **postgres**: needs a live database and ``argus.storage.session`` wired
   up. Guarded with ``ARGUS_DB_URL`` / ``SUPABASE_DB_URL`` env-var presence and
   the ``integration`` marker, mirroring the pattern in
@@ -101,6 +101,9 @@ _HTTP_UNSUPPORTED_TESTS = {
     # select_recent_rounds -- not exposed over HTTP.
     "test_select_recent_rounds_orders_desc_and_respects_limit",
     "test_repeated_running_upsert_same_flow_run_id_does_not_duplicate",
+    # insert_agent_runs -- documented no-op on HTTP path (analytics inserts
+    # not covered by minimal HTTP shim, TECH-3487 follow-up).
+    "test_insert_agent_runs_batch",
     # select_recent_lite_rounds -- documented no-op (always returns []).
     "test_select_recent_lite_rounds_filters_reviewer_version",
     "test_select_recent_lite_rounds_default_limit_is_200",
@@ -110,6 +113,14 @@ _HTTP_UNSUPPORTED_TESTS = {
 def _mark_known_http_gaps(request: pytest.FixtureRequest) -> None:
     base_name = request.node.name.split("[")[0]
     if base_name in _HTTP_UNSUPPORTED_TESTS:
+        # insert_agent_runs is a documented no-op on the HTTP shim (analytics
+        # inserts not covered, TECH-3487 follow-up); the call does not assert
+        # rows or raise, so xfail directly rather than letting it pass vacuously.
+        if base_name == "test_insert_agent_runs_batch":
+            pytest.xfail(
+                "HTTP storage shim does not support agent_runs analytics inserts "
+                "(documented Phase-1 gap, TECH-3487)"
+            )
         request.node.add_marker(
             pytest.mark.xfail(
                 reason=(
@@ -200,10 +211,10 @@ async def backend(
         return
 
     if backend_kind == "http":
+        _mark_known_http_gaps(request)
         httpx_mock = request.getfixturevalue("httpx_mock")
         httpx_mock.add_callback(_FakeHttpStorageBackend().handle, is_reusable=True)
         install_http_storage(read_url=_HTTP_READ_URL, write_url=_HTTP_WRITE_URL)
-        _mark_known_http_gaps(request)
         try:
             yield HttpHistoryBackend()
         finally:
@@ -542,7 +553,7 @@ async def test_completed_upsert_same_flow_run_id_preserves_sha_via_coalesce(
 # ---------------------------------------------------------------------------
 
 
-async def test_insert_agent_runs_batch(backend: SqliteHistoryBackend) -> None:
+async def test_insert_agent_runs_batch(backend: HistoryBackend) -> None:
     review = await backend.upsert_completed_row(
         row=CodeReviewRoundIn(repo="org/repo6", pr_number=2, verdict="approve")
     )
