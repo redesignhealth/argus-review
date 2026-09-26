@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-09-26
+
+### Fixed
+
+- Reworded a misleading log message in `argus/graph.py`'s `_node_lite_review`
+  (TECH-6878, #29). The log previously stated "Lite round history skipped on HTTP
+  storage path", which was misinterpreted as indicating that review persistence
+  was skipped altogether and caused an operator/agent to file a false bug
+  report. The message now clarifies that only the comment markdown section for
+  prior lite history is omitted (because `select_recent_lite_rounds` is not
+  implemented in the HTTP storage shim), while the round's own finalize write is
+  not skipped and is attempted normally.
+- Added test coverage for lite-round persistence round-tripping through both the
+  SQLite and HTTP storage backends (previously untested for HTTP), verifying that
+  `reviewer_version="v3-lite"` is preserved on write and read (TECH-6878, #29).
+  Also marked `test_insert_agent_runs_batch[http]` as an explicit xfail for the
+  documented HTTP shim analytics gap rather than letting it pass vacuously.
+
 ## [0.2.6] - 2026-09-19
 
 ### Fixed
@@ -338,7 +356,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.6...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.7...HEAD
+[0.2.7]: https://github.com/redesignhealth/argus-review/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/redesignhealth/argus-review/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/redesignhealth/argus-review/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/redesignhealth/argus-review/compare/v0.2.3...v0.2.4
