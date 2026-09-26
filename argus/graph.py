@@ -2228,7 +2228,11 @@ async def _node_lite_review(state: ReviewState) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             logger.error("Failed to build lite round history — skipping section", exc_info=True)
     elif req.pr_number and _lite_history_backend_kind == "http":
-        logger.info("Lite round history skipped on HTTP storage path")
+        logger.info(
+            "Lite round history markdown section omitted on HTTP storage path "
+            "(select_recent_lite_rounds not implemented in HTTP shim; "
+            "the round's own finalize write is not skipped and will be attempted normally)"
+        )
 
     response.review_comment = (
         f"## Code Review — Round {round_num} (Lite Mode)\n\n"

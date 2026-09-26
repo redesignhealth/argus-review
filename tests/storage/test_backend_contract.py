@@ -3,22 +3,20 @@
 Every scenario in this file exercises the seven logical operations defined
 by ``argus/storage/sql.py`` (the Postgres canonical writer) purely through
 their Pydantic input/output shapes — no backend-specific assertions. The
-goal is a single suite that can run, unmodified, against any backend that
-implements the same operations: today that's just
-:class:`argus.storage.sqlite.SqliteHistoryBackend` (wired via the
-``backend`` fixture below); ``postgres`` and ``http`` params are declared
-already (each ``pytest.mark.skip``ped with the reason it isn't wired yet)
-so that adding those fixtures later is a matter of filling in the
-``elif`` branch in ``backend()`` — no test bodies change.
+goal is a single suite that runs against any backend implementing the same
+operations:
 
+- **sqlite**: fully supported locally (:class:`argus.storage.sqlite.SqliteHistoryBackend`).
+- **http**: wired via ``pytest-httpx`` standing in for the two-endpoint HTTP
+  storage contract (see ``docs/STORAGE.md``). Operations not implemented by
+  the minimal HTTP shim (e.g. status polling, recent-rounds listing,
+  select_recent_lite_rounds, insert_agent_runs) are documented and marked xfail.
+  Completed-round persistence and latest-round reads (including for lite-mode
+  reviews) are fully supported and verified.
 - **postgres**: needs a live database and ``argus.storage.session`` wired
-  up. Guard with ``ARGUS_DB_URL`` / ``SUPABASE_DB_URL`` env-var presence and
-  the ``integration`` marker once wired, mirroring the pattern in
+  up. Guarded with ``ARGUS_DB_URL`` / ``SUPABASE_DB_URL`` env-var presence and
+  the ``integration`` marker, mirroring the pattern in
   ``tests/storage/test_sql.py``.
-- **http**: needs a ``pytest-httpx`` fixture standing in for your configured
-  HTTP backend's endpoints (see ``docs/STORAGE.md`` for the contract). Once
-  wired, ``HttpStorageClient`` would sit behind the same seven-operation
-  surface as a thin adapter.
 
 Scenario coverage:
 
@@ -103,6 +101,9 @@ _HTTP_UNSUPPORTED_TESTS = {
     # select_recent_rounds -- not exposed over HTTP.
     "test_select_recent_rounds_orders_desc_and_respects_limit",
     "test_repeated_running_upsert_same_flow_run_id_does_not_duplicate",
+    # insert_agent_runs -- documented no-op on HTTP path (analytics inserts
+    # not covered by minimal HTTP shim, TECH-3487 follow-up).
+    "test_insert_agent_runs_batch",
     # select_recent_lite_rounds -- documented no-op (always returns []).
     "test_select_recent_lite_rounds_filters_reviewer_version",
     "test_select_recent_lite_rounds_default_limit_is_200",
@@ -112,6 +113,14 @@ _HTTP_UNSUPPORTED_TESTS = {
 def _mark_known_http_gaps(request: pytest.FixtureRequest) -> None:
     base_name = request.node.name.split("[")[0]
     if base_name in _HTTP_UNSUPPORTED_TESTS:
+        # insert_agent_runs is a documented no-op on the HTTP shim (analytics
+        # inserts not covered, TECH-3487 follow-up); the call does not assert
+        # rows or raise, so xfail directly rather than letting it pass vacuously.
+        if base_name == "test_insert_agent_runs_batch":
+            pytest.xfail(
+                "HTTP storage shim does not support agent_runs analytics inserts "
+                "(documented Phase-1 gap, TECH-3487)"
+            )
         request.node.add_marker(
             pytest.mark.xfail(
                 reason=(
@@ -202,10 +211,10 @@ async def backend(
         return
 
     if backend_kind == "http":
+        _mark_known_http_gaps(request)
         httpx_mock = request.getfixturevalue("httpx_mock")
         httpx_mock.add_callback(_FakeHttpStorageBackend().handle, is_reusable=True)
         install_http_storage(read_url=_HTTP_READ_URL, write_url=_HTTP_WRITE_URL)
-        _mark_known_http_gaps(request)
         try:
             yield HttpHistoryBackend()
         finally:
@@ -315,6 +324,79 @@ async def test_upsert_completed_row_defaults_reviewer_version_and_stage(
     assert written.reviewer_version == "v3"
     assert written.current_stage == "completed"
     assert written.verdict is None
+
+
+async def test_lite_round_completed_upsert_round_trips_through_latest(
+    backend: HistoryBackend,
+) -> None:
+    """Lite-mode rounds (reviewer_version='v3-lite') must persist via
+    upsert_completed_row and round-trip through select_latest_completed_round
+    on all backends (including the HTTP storage shim).
+    """
+    payload = CodeReviewRoundIn(
+        flow_run_id="fr-lite-rt-1",
+        repo="org/repo-lite",
+        pr_number=10,
+        verdict="approve",
+        risk_level="low",
+        blocking_count=0,
+        suggestion_count=0,
+        review_comment="lgtm lite review",
+        reviewer_version="v3-lite",
+        result_json={"review_round": 2, "preflight_reason": "test-only diff"},
+        sha="deadbeef123",
+        base_ref="main",
+    )
+
+    written = await backend.upsert_completed_row(row=payload)
+    assert written.reviewer_version == "v3-lite"
+
+    latest = await backend.select_latest_completed_round(repo="org/repo-lite", pr_number=10)
+    assert latest is not None
+    assert latest.id == written.id
+    assert latest.reviewer_version == "v3-lite"
+    assert latest.verdict == "approve"
+    assert latest.sha == "deadbeef123"
+    assert latest.result_json == {"review_round": 2, "preflight_reason": "test-only diff"}
+    assert latest.prior_count == 1
+
+
+async def test_lite_round_becomes_latest_completed_round(
+    backend: HistoryBackend,
+) -> None:
+    """When a lite review follows a full review on the same PR, the lite
+    round becomes the latest completed round and preserves its version.
+    """
+    first_full = await backend.upsert_completed_row(
+        row=CodeReviewRoundIn(
+            flow_run_id="fr-seq-1",
+            repo="org/repo-seq",
+            pr_number=20,
+            verdict="block",
+            reviewer_version="v3",
+            sha="sha-round-1",
+        )
+    )
+    second_lite = await backend.upsert_completed_row(
+        row=CodeReviewRoundIn(
+            flow_run_id="fr-seq-2",
+            repo="org/repo-seq",
+            pr_number=20,
+            verdict="approve",
+            reviewer_version="v3-lite",
+            sha="sha-round-2",
+            result_json={"review_round": 2, "preflight_reason": "catchup on green CI"},
+        )
+    )
+
+    latest = await backend.select_latest_completed_round(repo="org/repo-seq", pr_number=20)
+    assert latest is not None
+    assert latest.id == second_lite.id
+    assert latest.id != first_full.id
+    assert latest.reviewer_version == "v3-lite"
+    assert latest.verdict == "approve"
+    assert latest.sha == "sha-round-2"
+    assert latest.prior_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +553,7 @@ async def test_completed_upsert_same_flow_run_id_preserves_sha_via_coalesce(
 # ---------------------------------------------------------------------------
 
 
-async def test_insert_agent_runs_batch(backend: SqliteHistoryBackend) -> None:
+async def test_insert_agent_runs_batch(backend: HistoryBackend) -> None:
     review = await backend.upsert_completed_row(
         row=CodeReviewRoundIn(repo="org/repo6", pr_number=2, verdict="approve")
     )
