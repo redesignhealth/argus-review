@@ -40,7 +40,7 @@ the model requests each turn (there can be more than one), chaining the
 conversation state forward via ``previous_response_id`` and feeding back
 all tool outputs as ``function_call_output`` items -- until the model stops
 requesting function calls, calls ``finish_review``, or the turn budget
-(``argus.runners._MAX_TURNS``) is exhausted. Findings arrive via
+(``_MAX_TURNS_OPENAI = 30``) is exhausted. Findings arrive via
 ``report_finding`` tool calls into ``review_tools``' per-session sink,
 not as a JSON blob embedded in the model's own text -- so, to keep this
 task's blast radius contained, the final ``SessionResult.result_text`` is
@@ -110,7 +110,6 @@ from argus.bench import BenchEntry
 from argus.llm.models import estimate_cost_usd
 from argus.llm.models import resolve as resolve_model_alias
 from argus.runners import (
-    _MAX_TURNS,
     _MID_BUDGET_NUDGE,
     _NUDGE_TURNS_BEFORE_BUDGET,
     _SUBPROCESS_TIMEOUT_S,
@@ -122,6 +121,8 @@ from argus.runners import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MAX_TURNS_OPENAI = 30
 
 _DEFAULT_READ_LIMIT = 2000  # mirrors argus.review_tools._DEFAULT_READ_LIMIT
 
@@ -417,7 +418,7 @@ async def _run_turns(
     whatever those completed turns actually produced and billed.
     """
     system_prompt = (
-        system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS)
+        system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS_OPENAI)
     )
     api_key = getattr(settings, "OPENAI_API_KEY", None)
     base_url = getattr(settings, "OPENAI_BASE_URL", None)
@@ -504,13 +505,13 @@ async def _run_turns(
         )
 
     exhausted = False
-    _mid_budget_nudge_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS)
+    _mid_budget_nudge_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_OPENAI)
     try:
         async with asyncio.timeout(timeout_s):
             with review_tools.review_session(repo_root) as findings_sink:
                 previous_response_id: str | None = None
                 tool_outputs: list[dict[str, Any]] = []
-                for _turn in range(_MAX_TURNS):
+                for _turn in range(_MAX_TURNS_OPENAI):
                     create_kwargs: dict[str, Any] = {
                         "model": model,
                         "instructions": system_prompt,
@@ -625,7 +626,7 @@ async def _run_turns(
                     if finished:
                         break
 
-                    if _turn + 1 == _MAX_TURNS - _NUDGE_TURNS_BEFORE_BUDGET:
+                    if _turn + 1 == _MAX_TURNS_OPENAI - _NUDGE_TURNS_BEFORE_BUDGET:
                         tool_outputs.append({"role": "user", "content": _TURN_BUDGET_NUDGE})
 
                     # Not an `elif` -- these are two independent checkpoints
@@ -643,7 +644,7 @@ async def _run_turns(
                     logger.warning(
                         "OpenAI session [%s] exhausted its %d-turn budget without a finish_review call",
                         label or "unlabeled",
-                        _MAX_TURNS,
+                        _MAX_TURNS_OPENAI,
                     )
                     exhausted = True
 

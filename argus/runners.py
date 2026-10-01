@@ -141,9 +141,10 @@ if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
         _CROSS_CUTTING_MODEL,
     )
 
-# Shared by every Claude-path session (system/specialist/cross-cutting/tests-and-docs
-# reviewers, feedback verifier, blocking validator).
-_MAX_TURNS = 30
+# Turn budget for Claude-path sessions (system/specialist/cross-cutting/tests-and-docs
+# reviewers, feedback verifier, blocking validator) -- raised from 30 to 50
+# in TECH-7093.
+_MAX_TURNS_CLAUDE = 50
 
 # Nudges the Gemini/OpenAI turn loops (see their own _run_turns) to call
 # finish_review a few turns before the budget runs out.
@@ -155,8 +156,8 @@ _TURN_BUDGET_NUDGE = (
 )
 
 # One-sentence turn-budget disclosure appended to the Gemini/OpenAI reviewer
-# system prompts. Not used on the Claude path (_run_claude_session), which
-# has no mid-stream nudge for the sentence to work with.
+# system prompts. See _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE below for the
+# Claude path equivalent.
 _TURN_BUDGET_SYSTEM_PROMPT_LINE = (
     "You have at most {max_turns} turns. Call `finish_review` before you run out -- "
     "a review that never calls it is discarded entirely."
@@ -175,6 +176,24 @@ _MID_BUDGET_NUDGE = (
     "rather than continuing to explore -- you do not need to use your full budget."
 )
 
+# Claude-path equivalents of the disclosure line and nudges above. Claude-path
+# reviewers do not have a `finish_review` tool; they finish by emitting their
+# role's final JSON output block.
+_TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
+    "You have at most {max_turns} turns. Emit your final JSON output block before you "
+    "run out -- a review that never emits it is discarded entirely."
+)
+_MID_BUDGET_NUDGE_CLAUDE = (
+    "You are roughly 75% through your turn budget. If you have gathered enough "
+    "context to identify findings, begin converging toward your final JSON output block "
+    "now rather than continuing to explore -- you do not need to use your full budget."
+)
+_TURN_BUDGET_NUDGE_CLAUDE = (
+    f"You have {_NUDGE_TURNS_BEFORE_BUDGET} turns left. Emit your final JSON output "
+    "block now with whatever you have found so far. Do not read or search any further. "
+    "If you have found nothing, emit your final JSON output block with an empty findings list."
+)
+
 
 def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
     """Return the turn at which to fire the 75%-of-budget checkpoint nudge
@@ -186,9 +205,9 @@ def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
     ``_NUDGE_TURNS_BEFORE_BUDGET``, or a runner's own ``max_turns`` silently
     colliding the two nudges onto the same turn -- which would either
     double-post one message, or silently drop the mid-budget one. Not
-    reachable at today's values (75 vs. 97 for Gemini's 100-turn budget, 22
-    vs. 27 for the shared 30-turn budget) -- only with a much smaller
-    ``max_turns``.
+    reachable at today's values (75 vs. 97 for Gemini's 100-turn budget, 37
+    vs. 47 for Claude's 50-turn budget, 22 vs. 27 for OpenAI's 30-turn
+    budget) -- only with a much smaller ``max_turns``.
     """
     checkpoint_turn = int(max_turns * _MID_BUDGET_NUDGE_FRACTION)
     emergency_nudge_turn = max_turns - _NUDGE_TURNS_BEFORE_BUDGET
@@ -1697,6 +1716,11 @@ async def _run_claude_session(
     betas: list[Literal["context-1m-2025-08-07"]] = (
         ["context-1m-2025-08-07"] if _attach_1m_context_beta else []
     )
+    system_prompt = (
+        system_prompt
+        + "\n\n"
+        + _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE.format(max_turns=_MAX_TURNS_CLAUDE)
+    )
     options = ClaudeAgentOptions(
         cwd=effective_root,
         allowed_tools=["Read", "Glob", "Grep"] + context7_tools,
@@ -1705,7 +1729,7 @@ async def _run_claude_session(
         permission_mode="default",
         model=model,
         system_prompt=system_prompt,
-        max_turns=_MAX_TURNS,
+        max_turns=_MAX_TURNS_CLAUDE,
         env=dict([settings.anthropic_credential]),
         stderr=_stderr_handler,
         betas=betas,
@@ -1738,6 +1762,10 @@ async def _run_claude_session(
     # Never content -- see module docstring on why (untrusted diff/PR data).
     usage_records: list[dict[str, Any]] = []
     tool_result_sizes: list[dict[str, Any]] = []
+    _mid_budget_nudge_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_CLAUDE)
+    _final_nudge_turn = _MAX_TURNS_CLAUDE - _NUDGE_TURNS_BEFORE_BUDGET
+    mid_nudge_sent = False
+    final_nudge_sent = False
     async with ClaudeSDKClient(options=options) as client:
         await client.query(user_message)
         result_text = ""
@@ -1750,8 +1778,10 @@ async def _run_claude_session(
                 logger.info("Agent session started: %s model=%s", label or "unlabeled", model)
             elif isinstance(message, AssistantMessage):
                 message_index += 1
+                has_tool_use = False
                 for block in message.content:
                     if isinstance(block, ToolUseBlock):
+                        has_tool_use = True
                         tool_calls.append(f"{block.name}({json.dumps(block.input)[:100]})")
                         tool_use_names[block.id] = block.name
                     elif isinstance(block, ThinkingBlock):
@@ -1804,6 +1834,48 @@ async def _run_claude_session(
                 # margin silently disappears the moment anything else (a
                 # heartbeat, a timeout watchdog) shares this loop.
                 await asyncio.to_thread(_append_context_ledger, usage_record)
+                if has_tool_use:
+                    # In-band nudge injection: client.query(str) writes a user
+                    # message that the SDK drains at the next tool-result boundary
+                    # of this same loop. Only inject when the turn contains at least
+                    # one ToolUseBlock; text-only turns can terminate without
+                    # draining the query.
+                    if (
+                        not mid_nudge_sent
+                        and _mid_budget_nudge_turn is not None
+                        and message_index == _mid_budget_nudge_turn
+                    ):
+                        try:
+                            await client.query(_MID_BUDGET_NUDGE_CLAUDE)
+                            mid_nudge_sent = True
+                            logger.info(
+                                "Injected Claude mid-budget nudge [%s] at turn %d",
+                                label or "unlabeled",
+                                message_index,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to inject Claude mid-budget nudge [%s] at turn %d",
+                                label or "unlabeled",
+                                message_index,
+                                exc_info=True,
+                            )
+                    if not final_nudge_sent and message_index == _final_nudge_turn:
+                        try:
+                            await client.query(_TURN_BUDGET_NUDGE_CLAUDE)
+                            final_nudge_sent = True
+                            logger.info(
+                                "Injected Claude near-budget nudge [%s] at turn %d",
+                                label or "unlabeled",
+                                message_index,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to inject Claude near-budget nudge [%s] at turn %d",
+                                label or "unlabeled",
+                                message_index,
+                                exc_info=True,
+                            )
             elif isinstance(message, UserMessage):
                 content = message.content
                 if isinstance(content, list):
@@ -1842,7 +1914,7 @@ async def _run_claude_session(
                     logger.warning(
                         "Agent [%s] exhausted its %d-turn budget (subtype=%s)",
                         label or "unlabeled",
-                        _MAX_TURNS,
+                        _MAX_TURNS_CLAUDE,
                         message.subtype,
                     )
                     failure_reason = "turn_budget_exhausted"

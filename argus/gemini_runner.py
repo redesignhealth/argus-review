@@ -41,8 +41,9 @@ function call the model requests each turn (there can be more than
 one), feeding all of their results back as a single follow-up turn --
 until the model stops requesting function calls, calls
 ``finish_review``, or the turn budget (``_MAX_TURNS_GEMINI``, this
-module's own budget, independent of the Claude/OpenAI paths' shared
-``argus.runners._MAX_TURNS``) is exhausted. Findings arrive via
+module's own budget, independent of the Claude path's
+``argus.runners._MAX_TURNS_CLAUDE`` and the OpenAI path's
+``_MAX_TURNS_OPENAI``) is exhausted. Findings arrive via
 ``report_finding`` tool calls into ``review_tools``' per-session sink,
 not as a JSON blob embedded in the model's own text -- so, to keep this
 task's blast radius contained to this file plus ``argus.bench``'s
