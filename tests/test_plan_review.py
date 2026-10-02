@@ -1,12 +1,20 @@
-"""Unit tests for plan_review — streaming tool-use + GPT-5.4-mini fallback parse.
+"""Unit tests for plan_review — streamed native structured output + GPT-5.4-mini fallback parse.
 
 Opus occasionally emits invalid JSON escape sequences (e.g.
-``\\s``, ``\\p``) inside tool-use string fields. The standard
+``\\s``, ``\\p``) inside structured-output string fields. The standard
 ``with_structured_output`` path crashes because the Anthropic SDK strict-parses
-the wire response before we see anything usable. ``plan_review`` switched to
-streamed ``bind_tools`` so we own the raw JSON; if Pydantic can't parse it,
-GPT-5.4-mini re-emits it as valid JSON matching the schema (same pattern as
-the writer's phase-2 extraction).
+the wire response before we see anything usable. ``plan_review`` instead binds
+Anthropic native structured output (``output_config.format`` with a
+``json_schema`` derived from ``ReviewPlan``) and streams the raw JSON text;
+if Pydantic can't parse it, GPT-5.4-mini re-emits it as valid JSON matching
+the schema (same pattern as the writer's phase-2 extraction).
+
+Chunk-shape coverage: the stream collector accepts native text chunks
+(string ``content``, list text-content blocks in dict/object/bare-string
+forms, and chunk-level ``.text``), while retaining legacy
+``tool_call_chunks`` collection for chunks with no text (backwards/mock
+compatibility). A chunk exposing BOTH channels must contribute its JSON
+exactly once.
 """
 
 from __future__ import annotations
@@ -16,6 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anthropic import transform_schema
 from pydantic import ValidationError
 
 from argus.graph import PlannerTransientError, plan_review
@@ -37,20 +46,67 @@ _VALID_PLAN_DICT: dict[str, Any] = {
 }
 
 
+class _TextChunk:
+    """Minimal stand-in for a LangChain AIMessageChunk streaming native
+    structured output as plain string ``content``."""
+
+    def __init__(self, content: str | list[Any]) -> None:
+        self.content = content
+
+
+class _BareTextChunk:
+    """Stand-in for a chunk with no ``content`` at all, only a chunk-level
+    ``.text`` (the collector's last-resort text source)."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _TextBlockObj:
+    """Object form of a text content block (LangChain TextBlock-like)."""
+
+    def __init__(self, text: str, block_type: str | None = "text") -> None:
+        self.text = text
+        self.type = block_type
+
+
 class _ToolCallChunk:
-    """Minimal stand-in for a LangChain AIMessageChunk with tool_call_chunks."""
+    """Minimal stand-in for a legacy LangChain AIMessageChunk with
+    tool_call_chunks (dict entries) and no text content."""
 
     def __init__(self, args: str, *, index: int = 0) -> None:
         self.tool_call_chunks = [{"name": "ReviewPlan", "args": args, "id": "tc_1", "index": index}]
 
 
-def _stream_factory(
-    args_parts: list[str], *, extra_chunks: list[_ToolCallChunk] | None = None
-) -> Any:
-    """Return a mock matching the real call chain:
-    init_chat_model(...).bind_tools(...).with_config(...).astream(messages)."""
+class _ToolCallEntryObj:
+    """Attribute (object) form of a single legacy tool_call_chunks entry."""
 
-    chunks = [_ToolCallChunk(p) for p in args_parts] + list(extra_chunks or [])
+    def __init__(self, args: str, *, index: int = 0) -> None:
+        self.name = "ReviewPlan"
+        self.args = args
+        self.id = "tc_1"
+        self.index = index
+
+
+class _ToolCallChunkObjEntries:
+    """Legacy chunk whose tool_call_chunks entries are attribute-form objects."""
+
+    def __init__(self, args: str, *, index: int = 0) -> None:
+        self.tool_call_chunks = [_ToolCallEntryObj(args, index=index)]
+
+
+class _DualChannelChunk:
+    """Stand-in for a chunk exposing BOTH native text content and legacy
+    ``tool_call_chunks`` — used to prove the anti-duplication guard."""
+
+    def __init__(self, text: str, tool_call_chunks: list[dict[str, Any]]) -> None:
+        self.content = text
+        self.tool_call_chunks = tool_call_chunks
+
+
+def _stream_factory(chunks: list[Any]) -> Any:
+    """Return a mock matching the real call chain:
+    init_chat_model(...).bind(output_config=...).with_config(...).astream(messages)."""
 
     async def _astream(_messages: Any) -> Any:
         for c in chunks:
@@ -63,8 +119,25 @@ def _stream_factory(
     bound.with_config = MagicMock(return_value=configured)
 
     base = MagicMock()
-    base.bind_tools = MagicMock(return_value=bound)
+    base.bind = MagicMock(return_value=bound)
     return base
+
+
+def _assert_native_structured_output_bind(factory: Any) -> None:
+    """Assert the planner binds Anthropic native structured output — an
+    ``output_config.format`` of ``type=json_schema`` with the schema derived
+    from ``ReviewPlan`` — and that no forced tool-choice API remains
+    (no ``bind_tools``, no ``tool_choice``/``tools`` kwargs)."""
+    factory.bind.assert_called_once()
+    bind_kwargs = factory.bind.call_args.kwargs
+    assert set(bind_kwargs) == {"output_config"}, bind_kwargs
+    factory.bind_tools.assert_not_called()
+
+    fmt = bind_kwargs["output_config"]["format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["schema"] == transform_schema(ReviewPlan)
+    # Readable sanity check that the schema really is ReviewPlan's.
+    assert "system_groups" in fmt["schema"]["properties"]
 
 
 @pytest.fixture(autouse=True)
@@ -93,13 +166,15 @@ def _fake_prompt() -> Any:
 
 
 @pytest.mark.asyncio
-async def test_plan_review_parses_clean_streamed_tool_args() -> None:
-    """Happy path: valid JSON streamed in chunks parses to ReviewPlan directly;
-    the GPT-5.4-mini fallback is not invoked. Also verifies bind_tools is
-    called with the expected tool and tool_choice."""
+async def test_plan_review_parses_clean_streamed_native_text() -> None:
+    """Happy path: valid JSON streamed as native text chunks (string
+    ``content``) parses to ReviewPlan directly; the GPT-5.4-mini fallback is
+    not invoked. Also verifies the planner binds native structured output
+    (json_schema derived from ReviewPlan) with no forced tool-choice API,
+    and keeps the planner stream run naming/tags."""
     raw = json.dumps(_VALID_PLAN_DICT)
     parts = [raw[:20], raw[20:50], raw[50:]]
-    factory = _stream_factory(parts)
+    factory = _stream_factory([_TextChunk(p) for p in parts])
 
     with (
         patch("argus.graph.init_chat_model", return_value=factory),
@@ -108,11 +183,101 @@ async def test_plan_review_parses_clean_streamed_tool_args() -> None:
         plan = await plan_review(diff="diff", description="desc")
 
     assert fallback.call_count == 0, "fallback should not fire on valid JSON"
-    factory.bind_tools.assert_called_once_with([ReviewPlan], tool_choice="ReviewPlan")
+    _assert_native_structured_output_bind(factory)
+    # Observability: the stream keeps its planner run name and carries the
+    # native_structured_output tag (not the retired bind_tools one).
+    with_config_kwargs = factory.bind.return_value.with_config.call_args.kwargs
+    assert with_config_kwargs["run_name"] == "planner-phase1-stream"
+    assert "native_structured_output" in with_config_kwargs["tags"]
+    assert "bind_tools" not in with_config_kwargs["tags"]
     assert len(plan.system_groups) == 1
     assert plan.system_groups[0].name == "api-endpoints"
     assert plan.cross_cutting_concerns == ["migration ordering"]
     assert plan.file_manifest[0].path == "app/api.py"
+
+
+@pytest.mark.asyncio
+async def test_plan_review_collects_text_from_list_content_blocks() -> None:
+    """Native structured output can also arrive as ``content`` lists — text
+    blocks in dict form (with and without an explicit ``type``), bare strings
+    inside the list, and object-form blocks (.text/.type) — plus a chunk-level
+    ``.text`` when a chunk has no ``content`` at all. Every text-bearing form
+    must contribute its slice, and non-text blocks (e.g. tool_use) must be
+    ignored."""
+    raw = json.dumps(_VALID_PLAN_DICT)
+    chunks = [
+        _TextChunk([{"type": "text", "text": raw[:12]}]),  # dict block, typed
+        _TextChunk([{"text": raw[12:25]}]),  # dict block, typeless (accepted)
+        _TextChunk([{"type": "tool_use", "input": {}}]),  # non-text dict block: ignored
+        _TextChunk([raw[25:40]]),  # bare string inside a content list
+        _TextChunk([_TextBlockObj(raw[40:55])]),  # object-form text block
+        _TextChunk([_TextBlockObj("IGNORE-ME", block_type="tool_use")]),  # ignored
+        _BareTextChunk(raw[55:]),  # chunk-level .text fallback
+    ]
+    factory = _stream_factory(chunks)
+
+    with (
+        patch("argus.graph.init_chat_model", return_value=factory),
+        patch("argus.graph._extract_plan_with_openai") as fallback,
+    ):
+        plan = await plan_review(diff="diff", description="desc")
+
+    assert fallback.call_count == 0
+    assert plan.system_groups[0].name == "api-endpoints"
+    assert "IGNORE-ME" not in json.dumps(plan.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_plan_review_collects_json_once_when_chunk_has_both_text_and_tool_chunks() -> None:
+    """Anti-duplication: a chunk exposing BOTH native text and legacy
+    ``tool_call_chunks`` must contribute its JSON exactly once — the text
+    channel wins and that same chunk's tool-call entries are skipped
+    entirely, including its non-zero-index entry, which must not even trip
+    the dropped-index warning. If both channels were collected, the raw JSON
+    would be the plan duplicated back-to-back and the strict parse would
+    fail over into the repair fallback."""
+    raw = json.dumps(_VALID_PLAN_DICT)
+    tool_chunks = [
+        {"name": "ReviewPlan", "args": raw, "id": "tc_1", "index": 0},
+        {"name": "ReviewPlan", "args": "!!!GARBAGE!!!", "id": "tc_2", "index": 1},
+    ]
+    factory = _stream_factory([_DualChannelChunk(raw, tool_chunks)])
+
+    with (
+        patch("argus.graph.init_chat_model", return_value=factory),
+        patch("argus.graph._extract_plan_with_openai") as fallback,
+        patch("argus.graph.logger") as mock_log,
+    ):
+        plan = await plan_review(diff="diff", description="desc")
+
+    assert fallback.call_count == 0, "dual-channel chunk must be collected exactly once"
+    assert plan.system_groups[0].name == "api-endpoints"
+    warn_calls = [str(c) for c in mock_log.warning.call_args_list]
+    assert not any("planner_multiple_tool_calls=true" in s for s in warn_calls), warn_calls
+
+
+@pytest.mark.asyncio
+async def test_plan_review_collects_legacy_tool_chunks_only_when_no_text() -> None:
+    """Backwards/mock compatibility: chunks with no text content still
+    contribute their JSON via legacy ``tool_call_chunks`` (dict and attribute
+    entry forms), interleaved with native text chunks in the same stream."""
+    raw = json.dumps(_VALID_PLAN_DICT)
+    chunks = [
+        _ToolCallChunk(raw[:20]),
+        _TextChunk(raw[20:40]),
+        _ToolCallChunkObjEntries(raw[40:60]),
+        _ToolCallChunk(raw[60:]),
+    ]
+    factory = _stream_factory(chunks)
+
+    with (
+        patch("argus.graph.init_chat_model", return_value=factory),
+        patch("argus.graph._extract_plan_with_openai") as fallback,
+    ):
+        plan = await plan_review(diff="diff", description="desc")
+
+    assert fallback.call_count == 0
+    assert plan.system_groups[0].name == "api-endpoints"
 
 
 @pytest.mark.asyncio
@@ -137,7 +302,10 @@ async def test_plan_review_falls_back_on_invalid_escape() -> None:
 
     expected = ReviewPlan.model_validate(_VALID_PLAN_DICT)
     with (
-        patch("argus.graph.init_chat_model", return_value=_stream_factory([raw])),
+        patch(
+            "argus.graph.init_chat_model",
+            return_value=_stream_factory([_TextChunk(raw)]),
+        ),
         patch("argus.graph._extract_plan_with_openai", return_value=expected) as fallback,
         patch("argus.graph.logger") as mock_log,
     ):
@@ -161,7 +329,7 @@ async def test_plan_review_falls_back_on_schema_validation_error() -> None:
     with (
         patch(
             "argus.graph.init_chat_model",
-            return_value=_stream_factory([bad_but_parseable]),
+            return_value=_stream_factory([_TextChunk(bad_but_parseable)]),
         ),
         patch("argus.graph._extract_plan_with_openai", return_value=expected) as fallback,
     ):
@@ -173,14 +341,14 @@ async def test_plan_review_falls_back_on_schema_validation_error() -> None:
 
 @pytest.mark.asyncio
 async def test_plan_review_ignores_non_zero_index_chunks() -> None:
-    """Defense-in-depth: if the model emits extra tool-call slots beyond
-    index 0, their args must not be concatenated into the primary plan
-    JSON, AND the observability warning must fire so operators see the
-    event in log aggregation."""
+    """Defense-in-depth on the legacy (text-less) collection path: if the
+    model emits extra tool-call slots beyond index 0, their args must not be
+    concatenated into the primary plan JSON, AND the observability warning
+    must fire so operators see the event in log aggregation."""
     raw = json.dumps(_VALID_PLAN_DICT)
     # Add a chunk at index=1 with garbage — must be ignored.
     extras = [_ToolCallChunk("!!!GARBAGE!!!", index=1)]
-    factory = _stream_factory([raw], extra_chunks=extras)
+    factory = _stream_factory([_ToolCallChunk(raw)] + extras)
 
     with (
         patch("argus.graph.init_chat_model", return_value=factory),
@@ -196,8 +364,8 @@ async def test_plan_review_ignores_non_zero_index_chunks() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_review_raises_when_no_tool_output() -> None:
-    """If the model streams no tool_call_chunks at all, surface that explicitly
+async def test_plan_review_raises_when_no_structured_output() -> None:
+    """If the model streams nothing collectible, surface that explicitly
     rather than silently invoking the fallback on an empty string. Asserts
     the error is logged before raising for observability."""
     with (
@@ -205,11 +373,11 @@ async def test_plan_review_raises_when_no_tool_output() -> None:
         patch("argus.graph._extract_plan_with_openai") as fallback,
         patch("argus.graph.logger") as mock_log,
     ):
-        with pytest.raises(ValueError, match="no tool-use output"):
+        with pytest.raises(ValueError, match="no structured output"):
             await plan_review(diff="diff", description="desc")
 
     assert fallback.call_count == 0
-    assert mock_log.error.called, "no-tool-output path must log before raising"
+    assert mock_log.error.called, "no-structured-output path must log before raising"
 
 
 @pytest.mark.asyncio
@@ -220,7 +388,7 @@ async def test_plan_review_raises_transient_on_truncated_output() -> None:
     plan. PlannerTransientError is a ValueError subclass so existing
     ValueError matchers still work, but the plan node's RetryPolicy
     scopes retry_on=(PlannerTransientError,) to this path only (not to
-    the permanent no-tool-output failure)."""
+    the permanent no-structured-output failure)."""
     truncated = '{"system_groups": [{"name": "x", "files"'  # cut off mid-field
 
     # Import fresh from sys.modules in case graph was reloaded by another test.
@@ -229,7 +397,7 @@ async def test_plan_review_raises_transient_on_truncated_output() -> None:
     with (
         patch(
             "argus.graph.init_chat_model",
-            return_value=_stream_factory([truncated]),
+            return_value=_stream_factory([_TextChunk(truncated)]),
         ),
         patch("argus.graph._extract_plan_with_openai") as fallback,
         patch("argus.graph.logger") as mock_log,
@@ -242,19 +410,19 @@ async def test_plan_review_raises_transient_on_truncated_output() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_review_raises_non_transient_on_no_tool_output() -> None:
-    """The no-tool-output path must raise plain ValueError (not
+async def test_plan_review_raises_non_transient_on_no_structured_output() -> None:
+    """The no-structured-output path must raise plain ValueError (not
     PlannerTransientError), so the plan node's RetryPolicy does not
     waste 2 additional Opus calls on a permanent behavioral failure."""
     with (
         patch("argus.graph.init_chat_model", return_value=_stream_factory([])),
         patch("argus.graph._extract_plan_with_openai") as fallback,
     ):
-        with pytest.raises(ValueError, match="no tool-use output") as excinfo:
+        with pytest.raises(ValueError, match="no structured output") as excinfo:
             await plan_review(diff="diff", description="desc")
 
     assert not isinstance(excinfo.value, PlannerTransientError), (
-        "no-tool-output must be non-transient so RetryPolicy doesn't burn extra Opus calls"
+        "no-structured-output must be non-transient so RetryPolicy doesn't burn extra Opus calls"
     )
     assert fallback.call_count == 0
 

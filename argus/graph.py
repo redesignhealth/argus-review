@@ -54,7 +54,7 @@ from argus.llm.usage import (
 )
 
 from langchain.chat_models import init_chat_model
-from anthropic import APIConnectionError, APITimeoutError
+from anthropic import APIConnectionError, APITimeoutError, transform_schema
 from langgraph.graph import END, START, StateGraph
 from sqlalchemy.exc import ProgrammingError
 from langgraph.types import RetryPolicy, Send
@@ -1080,9 +1080,9 @@ async def plan_review(diff: str, description: str) -> ReviewPlan:
 
     Two-phase pattern mirroring the writer at ``write_review``:
 
-    1. Phase 1 — Opus emits the plan via streamed ``bind_tools`` tool-use so
-       we receive the raw JSON text of the tool-call args directly, rather
-       than routing through ``with_structured_output`` (which strict-parses
+    1. Phase 1 — Opus emits the plan via streamed native structured output
+       (``output_config.format``) so we receive the raw JSON text directly,
+       rather than routing through ``with_structured_output`` (which strict-parses
        the wire body via the Anthropic SDK and dies on invalid escape
        sequences Opus occasionally emits, e.g. ``\\s`` inside a string).
     2. Phase 2 — attempt a strict Pydantic parse; if it fails (invalid
@@ -1093,29 +1093,73 @@ async def plan_review(diff: str, description: str) -> ReviewPlan:
     """
     prompt = await fetch_prompt("pr-review-planner")
     messages = _build_planner_messages(prompt, diff, description)
+    # Anthropic native structured output config for ReviewPlan.
+    # Note: langchain-anthropic's `with_structured_output` chains a non-streaming
+    # PydanticOutputParser, preventing raw JSON stream capture needed for
+    # truncation detection and OpenAI JSON-escape repair fallback. Rather than
+    # importing langchain-anthropic's private `_convert_to_anthropic_output_config_format`,
+    # we use the public `anthropic.transform_schema` to construct native `output_config.format`.
     model = (
         _get_llm(_PLANNER_MODEL, "planner")
-        .bind_tools([ReviewPlan], tool_choice="ReviewPlan")
+        .bind(
+            output_config={
+                "format": {
+                    "type": "json_schema",
+                    "schema": transform_schema(ReviewPlan),
+                }
+            }
+        )
         .with_config(
             run_name="planner-phase1-stream",
-            tags=["planner", "bind_tools", "json-escape-repair"],
+            tags=["planner", "native_structured_output", "json-escape-repair"],
         )
     )
 
-    # Only collect args from the first tool-call slot (index 0). tool_choice
-    # pins the model to a single tool, but guarding by index is cheap
-    # defense against the model ever emitting multiple tool calls.
+    # Native output streams JSON as text content. Collect string text and
+    # text content blocks, while preserving legacy tool_call_chunks handling
+    # for backwards/mock compatibility. If a chunk exposes text content,
+    # tool_call_chunks are skipped for that chunk to avoid double-counting.
     raw_json_parts: list[str] = []
     dropped_nonzero_indices: set[int] = set()
     async for chunk in model.astream(messages):
-        for tc_chunk in getattr(chunk, "tool_call_chunks", []):
-            idx = tc_chunk.get("index", 0)
-            if idx != 0:
-                dropped_nonzero_indices.add(idx)
-                continue
-            args = tc_chunk.get("args")
-            if args:
-                raw_json_parts.append(args)
+        text_piece = ""
+        content = getattr(chunk, "content", None)
+        if isinstance(content, str):
+            text_piece = content
+        elif isinstance(content, list):
+            pieces: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    pieces.append(block)
+                elif isinstance(block, dict):
+                    block_type = block.get("type")
+                    if (block_type is None or block_type == "text") and isinstance(
+                        block.get("text"), str
+                    ):
+                        pieces.append(block["text"])
+                elif hasattr(block, "text") and isinstance(getattr(block, "text"), str):
+                    block_type = getattr(block, "type", None)
+                    if block_type is None or block_type == "text":
+                        pieces.append(block.text)
+            text_piece = "".join(pieces)
+        elif hasattr(chunk, "text") and isinstance(getattr(chunk, "text"), str):
+            text_piece = chunk.text
+
+        if text_piece:
+            raw_json_parts.append(text_piece)
+        else:
+            for tc_chunk in getattr(chunk, "tool_call_chunks", []) or []:
+                if isinstance(tc_chunk, dict):
+                    idx = tc_chunk.get("index", 0)
+                    args = tc_chunk.get("args")
+                else:
+                    idx = getattr(tc_chunk, "index", 0)
+                    args = getattr(tc_chunk, "args", None)
+                if idx != 0:
+                    dropped_nonzero_indices.add(idx)
+                    continue
+                if args:
+                    raw_json_parts.append(args)
 
     if dropped_nonzero_indices:
         logger.warning(
@@ -1127,29 +1171,29 @@ async def plan_review(diff: str, description: str) -> ReviewPlan:
     raw_json = "".join(raw_json_parts)
     if not raw_json:
         logger.error(
-            "Planner produced no tool-use output; model=%s tool=ReviewPlan",
+            "Planner produced no structured output; model=%s schema=ReviewPlan",
             _PLANNER_MODEL,
         )
         raise ValueError(
-            "Planner produced no tool-use output — model may have returned a "
-            "plain text response instead of calling the ReviewPlan tool."
+            "Planner produced no structured output — model returned no JSON "
+            "content matching the ReviewPlan schema."
         )
 
     # Truncation guard: a mid-stream failure can leave raw_json syntactically
     # parseable at the top level but missing tail content. A complete
-    # tool-use JSON object must start with `{` and end with `}` after
+    # structured output JSON object must start with `{` and end with `}` after
     # whitespace trim. If it doesn't, the stream was cut off — fail loud
     # rather than feed partial JSON to the fallback repair step.
     stripped = raw_json.strip()
     if not (stripped.startswith("{") and stripped.endswith("}")):
         logger.error(
-            "Planner tool-use output appears truncated; length=%d starts_with=%r ends_with=%r",
+            "Planner structured output appears truncated; length=%d starts_with=%r ends_with=%r",
             len(raw_json),
             stripped[:1],
             stripped[-1:] if stripped else "",
         )
         raise PlannerTransientError(
-            "Planner tool-use output appears truncated (does not start with "
+            "Planner structured output appears truncated (does not start with "
             "'{' and end with '}') — stream likely terminated mid-response."
         )
 
@@ -1339,7 +1383,9 @@ async def check_coverage(
     )
 
     prompt = await fetch_prompt("pr-review-coverage-check")
-    model = _get_llm(_COVERAGE_MODEL, "coverage").with_structured_output(CoverageResult)
+    model = _get_llm(_COVERAGE_MODEL, "coverage").with_structured_output(
+        CoverageResult, method="json_schema"
+    )
     messages = [
         {"role": "system", "content": prompt},
         *_build_coverage_messages(plan, findings, sorted(uncovered)),
@@ -1445,7 +1491,7 @@ async def run_preflight_check(
     prompt = await fetch_prompt("pr-review-preflight-router")
     llm = _get_llm(
         f"anthropic:{CLAUDE_DEFAULT}", "preflight", max_tokens=256, temperature=0
-    ).with_structured_output(PreflightResult)
+    ).with_structured_output(PreflightResult, method="json_schema")
     prior_context = (
         f"Prior round verdict: {prior_verdict}" if prior_verdict else "No prior review (round 1)"
     )
