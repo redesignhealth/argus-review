@@ -121,26 +121,18 @@ Lite path: a single Sonnet call, no tools, no agent sessions — roughly
 
 ### Step 1: Planner
 
-**Model**: a large-context, high-reasoning Claude model (streamed
-`bind_tools` tool-use; a GPT-family model as a JSON-repair fallback parser).
+**Model**: a large-context, high-reasoning Claude model (Anthropic native
+structured output via `output_config.format` with the `ReviewPlan` JSON
+schema; an OpenAI GPT-family model is used for JSON repair when needed).
 **Prompt**: `pr-review-planner`.
 
-The planner uses streamed tool-use rather than a single structured-output
-call so the pipeline owns the raw JSON parse. When the model emits an
-invalid JSON escape sequence inside a tool-use string — which a strict
-schema-validating parser would otherwise crash on before any usable dict is
-produced — the pipeline catches the validation/parse error and hands the
-raw text to a GPT-family model with the plan schema as the target format.
-The planning content itself is preserved verbatim; only the JSON encoding
-is repaired.
-
-This is a deliberate, scoped exception to the pipeline's general preference
-for single-pass structured output: of the other steps, only the coverage
-check still uses a single structured-output call; the writer is a
-pre-existing two-phase design (Claude raw text → GPT-family extraction, for
-schema-complexity reasons — see Step 4b) and the cross-cutting reviewer is
-an Agent SDK session. Each of those is its own pattern with its own
-justification, not an instance of the planner's exception.
+The planner streams the native structured-output JSON as text and collects
+the complete response before strict Pydantic validation as `ReviewPlan`. If
+the JSON is malformed, the pipeline sends the raw JSON text to an OpenAI
+GPT-family model for schema-constrained repair, preserving the plan content
+while fixing its encoding. If the stream is truncated, the planner detects
+the incomplete JSON and retries the transient planner operation rather than
+attempting repair on partial output.
 
 **Why the larger model (not the smaller one used for reviewers)**: planner
 quality directly gates every downstream reviewer — a mis-grouped file
@@ -242,7 +234,7 @@ large PRs.
 
 | Step | Model tier | Estimated cost | Time |
 |------|-------|---------------|------|
-| Planner | Large/high-reasoning (streamed tool-use) | $0.25 | 5s |
+| Planner | Large/high-reasoning (streamed native structured output) | $0.25 | 5s |
 | Planner fallback (rare) | GPT-family, small | ~$0.01 | +2s |
 | System reviewers (3 avg) | 3× mid-tier | $0.60 | 40-60s (parallel) |
 | Cross-cutting | Large/high-reasoning | $1.50 | 60s (parallel with above) |
