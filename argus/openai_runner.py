@@ -40,7 +40,7 @@ the model requests each turn (there can be more than one), chaining the
 conversation state forward via ``previous_response_id`` and feeding back
 all tool outputs as ``function_call_output`` items -- until the model stops
 requesting function calls, calls ``finish_review``, or the turn budget
-(``_MAX_TURNS_OPENAI = 30``) is exhausted. Findings arrive via
+(``_MAX_TURNS_OPENAI``) is exhausted. Findings arrive via
 ``report_finding`` tool calls into ``review_tools``' per-session sink,
 not as a JSON blob embedded in the model's own text -- so, to keep this
 task's blast radius contained, the final ``SessionResult.result_text`` is

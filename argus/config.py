@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # ``argus.runners._SUBPROCESS_TIMEOUT_S`` (the fallback used when no Settings
 # instance is available, mostly tests) imports this same constant rather than
 # hardcoding its own copy, so the two can never drift out of sync.
-DEFAULT_ARGUS_SESSION_TIMEOUT_S = 900
+DEFAULT_ARGUS_SESSION_TIMEOUT_S = 1500
 
 
 class Settings(BaseSettings):
@@ -117,14 +117,19 @@ class Settings(BaseSettings):
             Context7 call.
         ARGUS_SESSION_TIMEOUT: Wall-clock seconds a reviewer subprocess is
             allowed to run before it is killed and reported as a failure.
-            Defaults to 900 (15 minutes) — first raised from 300 to 420 after
+            Defaults to 1500 (25 minutes) — first raised from 300 to 420 after
             production logs showed legitimate (non-runaway) specialist
             reviewers finishing as late as 294s, right at the old timeout's
             edge; raised again to 600 to match rh-data-platform's
             production-proven value ahead of this package taking over as the
             actual production reviewer (rh-data-platform's review_service is
-            being retired in its favor); raised once more to 900 for
-            additional headroom across all three reviewer platforms.
+            being retired in its favor); raised to 900 for additional headroom
+            across all three reviewer platforms; raised to 1500 in TECH-7093
+            after raising the Claude turn budget from 30 to 50. In production,
+            an observed cross-cutting session ran 533.8s under the 30-turn cap;
+            linear scaling 30→50 projects ~890s, meaning 900s leaves virtually
+            zero headroom. 1500s preserves roughly 1.69x margin, critical
+            because a timeout kill discards all reviewer output.
         GOOGLE_API_KEY: Gemini platform credential, consumed via the
             ``google_credential`` property by ``argus.gemini_runner``
             whenever a role's bench entry resolves to

@@ -967,8 +967,8 @@ class TestOpenAIRunnerTimeoutsAndFailures:
         mock_init.assert_called_once()
         assert mock_init.call_args.kwargs["timeout"] == 42.0
 
-    async def test_default_timeout_is_900_seconds(self, tmp_path: Any) -> None:
-        """When neither timeout_s nor ARGUS_SESSION_TIMEOUT is passed, defaults to 900s."""
+    async def test_default_timeout_is_1500_seconds(self, tmp_path: Any) -> None:
+        """When neither timeout_s nor ARGUS_SESSION_TIMEOUT is passed, defaults to 1500s."""
         settings = MagicMock(spec=[])
         settings.OPENAI_API_KEY = "key"
         client = _make_fake_client([_make_response(calls=[])])
@@ -984,7 +984,7 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         mock_init.assert_called_once()
-        assert mock_init.call_args.kwargs["timeout"] == 900
+        assert mock_init.call_args.kwargs["timeout"] == 1500
 
     async def test_client_closed_on_normal_completion(self, tmp_path: Any) -> None:
         """client.close is called when session completes normally."""
