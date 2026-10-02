@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.9] - 2026-10-02
+
+### Changed
+
+- Upgraded frontier and default model aliases in `argus.llm.models` (TECH-7124, #31):
+  - `claude-frontier` and `claude-opus` upgraded to `claude-opus-5-5` (previously `claude-fable-5` and `claude-opus-5`).
+  - `claude-default` upgraded to `claude-sonnet-5-5` (previously `claude-sonnet-4-6`).
+  - `gpt-frontier` upgraded to `gpt-6.1-sol` (previously `gpt-5.6-sol`).
+- Updated model pricing rates in `argus.llm.models` for `claude-sonnet-5-5`, `claude-opus-5-5`, and `gpt-6.1-sol` (TECH-7124, #31).
+- Re-verified the Anthropic 1M context beta (`context-1m-2025-08-07`) against `claude-sonnet-5-5` via the Redesign Health Anthropic proxy (TECH-7124, #31).
+- Updated approved model policies in `pr-review-specialist-llm-patterns.md`, runner warning logs, bench defaults, and CLI help text for the new model aliases (TECH-7124, #31).
+
 ## [0.2.8] - 2026-10-02
 
 ### Changed
@@ -368,7 +380,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.8...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.9...HEAD
+[0.2.9]: https://github.com/redesignhealth/argus-review/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/redesignhealth/argus-review/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/redesignhealth/argus-review/compare/v0.2.6...v0.2.7
 [0.2.6]: https://github.com/redesignhealth/argus-review/compare/v0.2.5...v0.2.6
