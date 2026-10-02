@@ -7,8 +7,8 @@ Only approved model families. Check model strings in code against this table:
 
 | Provider | Approved | Default |
 |----------|----------|---------|
-| Anthropic | claude-opus-4, claude-sonnet-4, claude-haiku-4 (use `CLAUDE_MINI`), claude-fable-5, claude-opus-5, claude-sonnet-4-6, claude-sonnet-5, claude-opus-5-5 (use `CLAUDE_FRONTIER` / `CLAUDE_OPUS`), claude-sonnet-5-5 (use `CLAUDE_DEFAULT`) families | claude-sonnet-5-5 |
-| OpenAI | gpt-5.4 family (gpt-5.4, gpt-5.4-mini), gpt-5.6 family, and gpt-6 / gpt-6.1 family (use `GPT_FRONTIER` for `gpt-6.1-sol`) | gpt-5.6-luna |
+| Anthropic | claude-opus-4, claude-sonnet-4, claude-haiku-4 (use `CLAUDE_MINI`), claude-opus-5-5 (use `CLAUDE_FRONTIER` / `CLAUDE_OPUS`), claude-sonnet-5-5 (use `CLAUDE_DEFAULT`) families; legacy Claude models (claude-fable-5, claude-opus-5, claude-sonnet-4-6, claude-sonnet-5) remain valid only as explicit CLI/env runtime overrides (`ARGUS_SPECIALIST_MODEL`/`ARGUS_FRONTIER_MODEL` or `--specialist-model`/`--frontier-model`) for backward compatibility, not as new hardcoded defaults | claude-sonnet-5-5 |
+| OpenAI | gpt-5.4 family (gpt-5.4, gpt-5.4-mini), gpt-5.6 family, and gpt-6.1-sol (use `GPT_FRONTIER`) | gpt-5.6-luna |
 | Google | gemini-3 family | gemini-3.8-flash |
 
 Flag any use of: o3, o1, gpt-4 family, gpt-5-mini, claude-3/3.5 family, gemini-1.5/2.5 family.

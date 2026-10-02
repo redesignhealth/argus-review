@@ -85,8 +85,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SYSTEM_REVIEWER_MODEL = CLAUDE_DEFAULT
-# Opus, not frontier (Fable): evals showed no measurable quality gain from
-# frontier on this stage, at ~2x the per-token cost.
+# Matches argus.bench_default.toml (resolves to claude-opus-5-5).
 _CROSS_CUTTING_MODEL = CLAUDE_OPUS
 # Whether the system reviewer's current model (following any
 # --specialist-model/ARGUS_SPECIALIST_MODEL override) still matches
@@ -97,19 +96,21 @@ _CROSS_CUTTING_MODEL = CLAUDE_OPUS
 # for why a string-equality gate can't be made sound once overrides exist.
 #
 # Caveat shared with argus/graph.py's _TEMPERATURE_UNSUPPORTED_MODELS
-# comment: the empirical verification below was run against whatever
-# ALIAS_MAP["claude-default"] resolved to on 2026-07-31 (claude-sonnet-5 at
-# the time), NOT specifically against claude-sonnet-4-6 (the pin as of this
-# comment, after this same diff's default bump). Gating on the alias means
-# the beta keeps applying across future pin bumps automatically, without a
-# fresh re-verification each time -- the alternative (pinning this gate to
-# the literal claude-sonnet-5 string instead) would have silently withheld
-# the beta from the system reviewer's new default entirely, reinstating the
-# TECH-4734 autocompact-thrashing problem for the common no-override case.
-# Tracking the alias was the deliberate tradeoff; re-verify the beta
-# empirically against the current pin whenever ALIAS_MAP["claude-default"]
-# moves, and correct this comment if a future pin ever fails the probe
-# described below.
+# comment: the empirical verification below was initially run against
+# ALIAS_MAP["claude-default"] on 2026-07-31 (claude-sonnet-5 at the time)
+# and was live re-verified for claude-sonnet-5-5 on 2026-10-02 via the RH
+# Anthropic proxy: POST /v1/messages with model claude-sonnet-5-5, header
+# `anthropic-beta: context-1m-2025-08-07`, max_tokens=16 returned HTTP 200,
+# message model claude-sonnet-5-5, stop_reason=end_turn, no error. Gating
+# on the alias means the beta keeps applying across future pin bumps
+# automatically, without a fresh re-verification each time -- the
+# alternative (pinning this gate to a literal model string instead)
+# would have silently withheld the beta from the system reviewer's new
+# default entirely, reinstating the TECH-4734 autocompact-thrashing problem
+# for the common no-override case. Tracking the alias was the deliberate
+# tradeoff; re-verify the beta empirically against the current pin whenever
+# ALIAS_MAP["claude-default"] moves, and correct this comment if a future
+# pin ever fails the probe described below.
 _SYSTEM_REVIEWER_UNOVERRIDDEN = _SYSTEM_REVIEWER_MODEL == ALIAS_MAP["claude-default"]
 
 # Logged once at import time, not per-session (an earlier per-call version
@@ -1780,6 +1781,11 @@ async def _run_claude_session(
     # bearer-token auth specifically -- a live probe, not a read of the
     # proxy's own header-allowlist (which lives in a different repo, rh-mcp's
     # main.py, and could drift independently of this comment).
+    #
+    # Live re-verification on 2026-10-02 via RH Anthropic proxy: POST /v1/messages
+    # with model claude-sonnet-5-5, header `anthropic-beta: context-1m-2025-08-07`,
+    # max_tokens=16 returned HTTP 200, message model claude-sonnet-5-5,
+    # stop_reason=end_turn, no error.
     #
     # Only applied for _SYSTEM_REVIEWER_MODEL (sonnet), not
     # _CROSS_CUTTING_MODEL (opus): sonnet reviewer sessions are the ones

@@ -48,11 +48,15 @@ Per-token model pricing is sourced centrally from ``argus.llm.pricing``
 
 Tier semantics:
     *frontier* -- best reasoning available in the family; slow / expensive.
-    *opus*     -- next tier down from frontier -- strong reasoning at roughly
-                  half frontier's per-token cost. Introduced for call sites
-                  (e.g. the cross-cutting reviewer) where evals showed no
-                  measurable quality gain from frontier, so the cost isn't
-                  justified.
+                  Under Claude 5.5, ``claude-frontier`` and ``claude-opus``
+                  intentionally share ``claude-opus-5-5``.
+    *opus*     -- historically the next tier down from frontier -- strong reasoning
+                  at roughly half frontier's per-token cost (e.g. Opus 5 vs Fable 5).
+                  Under Claude 5.5, ``claude-frontier`` and ``claude-opus``
+                  intentionally share ``claude-opus-5-5``, so the prior cost
+                  differentiation rationale no longer applies while preserving
+                  the distinct alias keys for call sites (e.g. the cross-cutting
+                  reviewer) and override compatibility.
     *default*  -- workhorse balance of cost and capability.
     *mini*     -- fast and cheap; suitable for high-volume, low-stakes calls.
 
@@ -63,9 +67,10 @@ Runtime overrides:
 
     ``ARGUS_FRONTIER_MODEL`` (``--frontier-model``) overrides both
     ``CLAUDE_FRONTIER`` (planner, coverage) and ``CLAUDE_OPUS``
-    (cross-cutting) -- there is a single frontier-tier knob at the CLI, even
-    though the two aliases keep independent defaults so cross-cutting still
-    runs on the cheaper Opus tier when no override is given.
+    (cross-cutting) -- there is a single frontier-tier knob at the CLI.
+    Under Claude 5.5, both aliases intentionally share the same default
+    (``claude-opus-5-5``), and setting ``ARGUS_FRONTIER_MODEL`` overrides both
+    onto the specified model.
 
     Both env vars must be set before this module is first imported --
     ``cli.py`` sets them from the CLI flags ahead of any deferred import of

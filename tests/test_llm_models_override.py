@@ -50,6 +50,18 @@ def test_claude_default_is_sonnet_5_5_when_unset(monkeypatch: pytest.MonkeyPatch
     assert models.CLAUDE_DEFAULT == "claude-sonnet-5-5"
 
 
+def test_claude_frontier_is_opus_5_5_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ARGUS_FRONTIER_MODEL", raising=False)
+    importlib.reload(models)
+    assert models.CLAUDE_FRONTIER == "claude-opus-5-5"
+
+
+def test_claude_opus_is_opus_5_5_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ARGUS_FRONTIER_MODEL", raising=False)
+    importlib.reload(models)
+    assert models.CLAUDE_OPUS == "claude-opus-5-5"
+
+
 def test_specialist_override_only_affects_claude_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ARGUS_SPECIALIST_MODEL", "claude-sonnet-5")
     monkeypatch.delenv("ARGUS_FRONTIER_MODEL", raising=False)

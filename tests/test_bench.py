@@ -107,6 +107,7 @@ class TestPackagedDefaultResolutions:
     def test_cross_cutting_matches_packaged_default(self) -> None:
         entry = bench.resolve("cross-cutting")
         assert entry.platform == "claude-sdk"
+        assert entry.model == "claude-opus"
         assert resolve_alias(entry.model) == runners_module._CROSS_CUTTING_MODEL
         assert entry.prompt_name == "pr-review-cross-cutting"
 
