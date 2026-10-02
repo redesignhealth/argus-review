@@ -137,7 +137,7 @@ else:
 # this override mechanism can cause: --frontier-model/ARGUS_FRONTIER_MODEL
 # repoints both CLAUDE_FRONTIER and CLAUDE_OPUS (see argus/llm/models.py),
 # so a frontier override picked for planning/coverage purposes also moves
-# the cross-cutting reviewer off its independently configured claude-opus
+# the cross-cutting reviewer off its separately named claude-opus
 # default with no other runtime signal that happened.
 if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
     logger.warning(
@@ -145,7 +145,7 @@ if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
         "ARGUS_FRONTIER_MODEL -- this env var/--frontier-model repoints both "
         "the frontier tier and the cross-cutting model together, so a "
         "frontier override for planning purposes also moves cross-cutting "
-        "off its independently configured claude-opus alias.",
+        "off its separately named claude-opus alias.",
         ALIAS_MAP["claude-opus"],
         _CROSS_CUTTING_MODEL,
     )

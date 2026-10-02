@@ -724,7 +724,7 @@ class TestOneTimeImportLogs:
                 importlib.reload(runners_module)
             assert any(
                 "Cross-cutting reviewer moved off its default model" in record.message
-                and "off its independently configured claude-opus alias" in record.message
+                and "off its separately named claude-opus alias" in record.message
                 for record in caplog.records
             )
             assert not any("cheaper Opus default" in record.message for record in caplog.records)
