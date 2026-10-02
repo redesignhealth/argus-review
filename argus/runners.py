@@ -133,19 +133,19 @@ else:
         _SYSTEM_REVIEWER_MODEL,
     )
 
-# Same one-time-at-import treatment for the other silent-cost-shift this
-# override mechanism can cause: --frontier-model/ARGUS_FRONTIER_MODEL
+# Same one-time-at-import treatment for the model/default identity change
+# this override mechanism can cause: --frontier-model/ARGUS_FRONTIER_MODEL
 # repoints both CLAUDE_FRONTIER and CLAUDE_OPUS (see argus/llm/models.py),
 # so a frontier override picked for planning/coverage purposes also moves
-# the cross-cutting reviewer off its cheaper Opus default with no other
-# runtime signal that happened.
+# the cross-cutting reviewer off its independently configured claude-opus
+# default with no other runtime signal that happened.
 if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
     logger.warning(
         "Cross-cutting reviewer moved off its default model %r onto %r due to "
         "ARGUS_FRONTIER_MODEL -- this env var/--frontier-model repoints both "
         "the frontier tier and the cross-cutting model together, so a "
         "frontier override for planning purposes also moves cross-cutting "
-        "off its cheaper Opus default.",
+        "off its independently configured claude-opus alias.",
         ALIAS_MAP["claude-opus"],
         _CROSS_CUTTING_MODEL,
     )
