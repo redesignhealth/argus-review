@@ -201,8 +201,16 @@ _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
 # Claude Code, but is untyped and unsupported in this SDK version.
 # We attach to PostToolUse and PostToolUseFailure to track combined tool
 # invocations and inject non-blocking convergence/stop nudges.
-_TOOL_BUDGET_MID_THRESHOLD = 60
-_TOOL_BUDGET_FINAL_THRESHOLD = 100
+#
+# Thresholds 37 and 47 correspond to the 75% mid-checkpoint (floor(50 * 0.75) = 37)
+# and final checkpoint (50 - 3 = 47) under max_turns=50. Because every continuing
+# agent turn has at least one tool call, these thresholds are reachable no later
+# than the corresponding 37th/47th tool-using turns under max_turns=50. Multiple
+# or parallel tool calls per turn can make the truthful tool-count advisory fire
+# earlier. The copy makes no turns-left claim, stating only the exact number of
+# tool calls made so far.
+_TOOL_BUDGET_MID_THRESHOLD = 37
+_TOOL_BUDGET_FINAL_THRESHOLD = 47
 
 _TOOL_BUDGET_MID_NUDGE = (
     "You have now made {n} tool calls. If you have gathered enough "
@@ -256,14 +264,10 @@ def _make_tool_budget_nudge_hooks(
             if tool_call_count >= final_threshold and not final_nudge_sent:
                 final_nudge_sent = True
                 mid_nudge_sent = True
-                nudge_message = _TOOL_BUDGET_FINAL_NUDGE.format(
-                    n=tool_call_count, count=tool_call_count
-                )
+                nudge_message = _TOOL_BUDGET_FINAL_NUDGE.format(n=tool_call_count)
             elif tool_call_count >= mid_threshold and not mid_nudge_sent:
                 mid_nudge_sent = True
-                nudge_message = _TOOL_BUDGET_MID_NUDGE.format(
-                    n=tool_call_count, count=tool_call_count
-                )
+                nudge_message = _TOOL_BUDGET_MID_NUDGE.format(n=tool_call_count)
 
             if nudge_message is None:
                 return {}

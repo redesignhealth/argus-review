@@ -10,10 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Raised the Claude-path turn budget from 30 to 50 and the default reviewer session
-  timeout from 900 to 1500 seconds (TECH-7093), preserving headroom for longer sessions.
+  timeout from 900 to 1500 seconds globally across all runner platforms through
+  `ARGUS_SESSION_TIMEOUT` (TECH-7093), preserving headroom for longer sessions.
 - Added Claude's budget disclosure and supported `PostToolUse`/`PostToolUseFailure`
-  hook-based convergence warnings, using truthful top-level tool-call counts,
-  including failed calls.
+  hook-based convergence warnings at 37 and 47 tool calls, using truthful top-level
+  tool-call counts, including failed calls.
 - Decoupled the Claude and OpenAI turn-budget constants; OpenAI remains at 30 turns.
 
 ## [0.2.7] - 2026-09-26

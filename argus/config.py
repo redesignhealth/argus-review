@@ -2,7 +2,7 @@
 
 A slim ``pydantic-settings`` implementation. All configuration comes from
 environment variables (or a local ``.env`` file loaded via
-``argus.dotenv_utils``) — no AWS, no SSM.
+``argus.dotenv_utils``) -- no AWS, no SSM.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
             ``argus.precheck``.
         ARGUS_STOCK_SEMGREP_PACKS: Comma-separated semgrep registry pack IDs
             (e.g. ``"p/secrets"``) to run alongside (or instead of) a custom
-            ``ARGUS_RULES_DIR`` — unlike a local rules directory, each pack
+            ``ARGUS_RULES_DIR`` -- unlike a local rules directory, each pack
             is fetched over the network by semgrep itself on first use
             (cached locally after). Unset by default: this is an opt-in
             addition of vetted, community-maintained rules, not a silent
@@ -74,8 +74,8 @@ class Settings(BaseSettings):
             (``PrecheckResult.failed_scanners``/``missing_scanners``
             non-empty) instead of the default fail-open
             behavior (surface it in the review comment's degraded-coverage
-            section — see ``argus.helpers.build_degraded_coverage_labels``
-            — but let the review's own verdict stand on its own merits).
+            section -- see ``argus.helpers.build_degraded_coverage_labels``
+            -- but let the review's own verdict stand on its own merits).
             False by default: every other part of this module's design is
             deliberately fail-open (a broken scanner should never be the
             reason a review can't complete), and this flag exists for
@@ -117,19 +117,23 @@ class Settings(BaseSettings):
             Context7 call.
         ARGUS_SESSION_TIMEOUT: Wall-clock seconds a reviewer subprocess is
             allowed to run before it is killed and reported as a failure.
-            Defaults to 1500 (25 minutes) — first raised from 300 to 420 after
+            Defaults to 1500 (25 minutes) -- first raised from 300 to 420 after
             production logs showed legitimate (non-runaway) specialist
             reviewers finishing as late as 294s, right at the old timeout's
             edge; raised again to 600 to match rh-data-platform's
             production-proven value ahead of this package taking over as the
             actual production reviewer (rh-data-platform's review_service is
             being retired in its favor); raised to 900 for additional headroom
-            across all three reviewer platforms; raised to 1500 in TECH-7093
-            after raising the Claude turn budget from 30 to 50. In production,
-            an observed cross-cutting session ran 533.8s under the 30-turn cap;
-            linear scaling 30→50 projects ~890s, meaning 900s leaves virtually
-            zero headroom. 1500s preserves roughly 1.69x margin, critical
-            because a timeout kill discards all reviewer output.
+            across all three reviewer platforms; raised to 1500 in TECH-7093.
+            This timeout is deliberately global to all runner platforms through
+            ARGUS_SESSION_TIMEOUT, rather than scoped only to Claude, to preserve
+            one operator control and provide headroom for Gemini's 100-turn
+            path too (while acknowledging OpenAI remains at 30 turns). In
+            production, an observed cross-cutting session ran 533.8s under the
+            30-turn cap; linear scaling 30 to 50 projects ~890s, meaning 900s
+            leaves virtually zero headroom. 1500s preserves roughly 1.69x
+            margin, critical because a timeout kill discards all reviewer
+            output.
         GOOGLE_API_KEY: Gemini platform credential, consumed via the
             ``google_credential`` property by ``argus.gemini_runner``
             whenever a role's bench entry resolves to
@@ -211,7 +215,7 @@ class Settings(BaseSettings):
 
         Callers that need to hand this credential to something that itself
         reads an env var (the spawned ``claude`` CLI subprocess) must set
-        the SAME variable name the caller configured — forcing everything
+        the SAME variable name the caller configured -- forcing everything
         to ``ANTHROPIC_API_KEY`` would send a proxy/gateway bearer token as
         an ``x-api-key``, which not every gateway accepts. ``ANTHROPIC_API_KEY``
         wins when both are set, matching the Anthropic SDK's own precedence.

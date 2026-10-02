@@ -8,16 +8,18 @@ Covers:
 - Early completion and session exhaustion do not perform unexpected mid-stream query calls.
 - Pure _compute_mid_budget_nudge_turn logic remains verified for runners that use it.
 - Tool-budget hooks (_make_tool_budget_nudge_hooks):
-  - no nudge below 60 calls;
-  - mid nudge fires at >= 60 calls exactly once;
-  - final nudge fires at >= 100 calls exactly once;
+  - no nudge below 37 calls;
+  - mid nudge fires at >= 37 calls exactly once;
+  - final nudge fires at >= 47 calls exactly once;
   - tracks combined PostToolUse and PostToolUseFailure counts;
   - subagent (agent_id) calls are skipped without advancing counter;
   - malformed inputs return {} and cannot raise;
   - hookEventName is properly mirrored in hookSpecificOutput;
   - nudge copy contains tool-call counts, mentions final JSON output block,
     and makes no claim about turns left;
-  - thresholds ordered (60 < 100).
+  - thresholds ordered (37 < 47);
+  - integrated 50-turn fake dispatches PostToolUse hooks through ClaudeAgentOptions
+    and proves both nudges delivered before error_max_turns / session end.
 - Claude Agent SDK contracts:
   - ClaudeAgentOptions accepts hooks parameter;
   - HookEvent includes PostToolUse and PostToolUseFailure;
@@ -43,6 +45,9 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
+
+# Pinned internal import: the exact SDK pin (0.1.81) is load-bearing;
+# this test and internal import must be revisited whenever claude-agent-sdk is bumped.
 from claude_agent_sdk._internal.query import _convert_hook_output_for_cli
 from claude_agent_sdk.types import (
     HookContext,
@@ -84,22 +89,53 @@ def _settings() -> MagicMock:
 
 
 class _FakeClient:
-    """Stand-in for ClaudeSDKClient tracking options and client.query calls."""
+    """Stand-in for ClaudeSDKClient tracking options, client.query calls, and hook dispatches."""
 
     def __init__(
         self,
         messages: list[Any],
         options: ClaudeAgentOptions | None = None,
+        dispatch_hooks: bool = False,
     ) -> None:
         self.options = options
         self._messages = messages
         self.query_calls: list[str] = []
+        self.dispatch_hooks = dispatch_hooks
+        self.captured_additional_contexts: list[tuple[int, str]] = []
 
     async def query(self, message: str) -> None:
         self.query_calls.append(message)
 
     async def receive_response(self) -> AsyncIterator[Any]:
+        tool_turn_count = 0
         for message in self._messages:
+            if self.dispatch_hooks and isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        tool_turn_count += 1
+                        if (
+                            self.options
+                            and self.options.hooks
+                            and "PostToolUse" in self.options.hooks
+                        ):
+                            for matcher in self.options.hooks["PostToolUse"]:
+                                for callback in matcher.hooks:
+                                    out = await callback(
+                                        {
+                                            "hook_event_name": "PostToolUse",
+                                            "tool_name": block.name,
+                                            "tool_input": block.input,
+                                        },
+                                        block.id,
+                                        cast(HookContext, {"signal": None}),
+                                    )
+                                    if isinstance(out, dict):
+                                        hso = out.get("hookSpecificOutput")
+                                        if isinstance(hso, dict) and "additionalContext" in hso:
+                                            ctx_val = str(hso["additionalContext"])
+                                            self.captured_additional_contexts.append(
+                                                (tool_turn_count, ctx_val)
+                                            )
             yield message
 
     async def __aenter__(self) -> _FakeClient:
@@ -113,6 +149,7 @@ async def _run_session_with_fake(
     messages: list[Any],
     system_prompt: str = "You are a code reviewer.",
     user_message: str = "Please review this diff.",
+    dispatch_hooks: bool = False,
 ) -> tuple[argus.runners.SessionResult, _FakeClient]:
     captured_clients: list[_FakeClient] = []
 
@@ -120,6 +157,7 @@ async def _run_session_with_fake(
         client = _FakeClient(
             messages=messages,
             options=kwargs.get("options"),
+            dispatch_hooks=dispatch_hooks,
         )
         captured_clients.append(client)
         return client
@@ -214,8 +252,8 @@ class TestTurnBudgetConstants:
 
     def test_thresholds_ordered(self) -> None:
         assert _TOOL_BUDGET_MID_THRESHOLD < _TOOL_BUDGET_FINAL_THRESHOLD
-        assert _TOOL_BUDGET_MID_THRESHOLD == 60
-        assert _TOOL_BUDGET_FINAL_THRESHOLD == 100
+        assert _TOOL_BUDGET_MID_THRESHOLD == 37
+        assert _TOOL_BUDGET_FINAL_THRESHOLD == 47
 
 
 class TestClaudeSystemPromptDisclosure:
@@ -272,6 +310,40 @@ class TestClaudeSessionExecution:
         assert result.failure_reason == "turn_budget_exhausted"
         assert client.query_calls == [user_msg]
 
+    @pytest.mark.asyncio
+    async def test_integrated_50_turn_session_delivers_both_nudges_before_exhaustion(self) -> None:
+        """A realistic 50-turn session dispatches PostToolUse hooks through
+        ClaudeAgentOptions.hooks, capturing additionalContext at thresholds 37 and 47,
+        proving both nudges are delivered before error_max_turns / session end.
+        """
+        messages: list[Any] = []
+        for turn_idx in range(1, 51):
+            messages.extend(_make_tool_turn(turn_idx))
+        messages.append(_make_result_message(subtype="error_max_turns"))
+
+        user_msg = "Exhaust budget with hooks."
+        result, client = await _run_session_with_fake(
+            messages, user_message=user_msg, dispatch_hooks=True
+        )
+
+        assert result.failure_reason == "turn_budget_exhausted"
+        assert len(client.captured_additional_contexts) == 2
+
+        # Check turn 37 mid nudge
+        turn_37, context_37 = client.captured_additional_contexts[0]
+        assert turn_37 == 37
+        assert "37 tool calls" in context_37
+        assert "converging toward your final JSON output block" in context_37
+        assert "turns left" not in context_37
+
+        # Check turn 47 final nudge
+        turn_47, context_47 = client.captured_additional_contexts[1]
+        assert turn_47 == 47
+        assert "47 tool calls" in context_47
+        assert "Stop reading and searching now" in context_47
+        assert "final JSON output block" in context_47
+        assert "turns left" not in context_47
+
 
 class TestComputeMidBudgetNudgeTurn:
     """Verify pure logic of _compute_mid_budget_nudge_turn for runners that use it (OpenAI/Gemini)."""
@@ -306,56 +378,56 @@ class TestToolBudgetNudgeHooks:
     """Directly exercise _make_tool_budget_nudge_hooks callbacks with synthetic inputs."""
 
     @pytest.mark.asyncio
-    async def test_no_nudge_below_60_calls(self) -> None:
-        hooks = _make_tool_budget_nudge_hooks(label="test-below-60")
+    async def test_no_nudge_below_37_calls(self) -> None:
+        hooks = _make_tool_budget_nudge_hooks(label="test-below-37")
         callback = hooks["PostToolUse"][0].hooks[0]
 
-        for i in range(1, 60):
+        for i in range(1, 37):
             input_data = {"hook_event_name": "PostToolUse", "tool_name": "Read"}
             res = await _call_hook(callback, input_data, f"tu-{i}")
             assert res == {}
 
     @pytest.mark.asyncio
-    async def test_mid_nudge_at_60_exactly_once(self) -> None:
-        hooks = _make_tool_budget_nudge_hooks(label="test-mid-60")
+    async def test_mid_nudge_at_37_exactly_once(self) -> None:
+        hooks = _make_tool_budget_nudge_hooks(label="test-mid-37")
         callback = hooks["PostToolUse"][0].hooks[0]
 
-        for i in range(1, 60):
+        for i in range(1, 37):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-{i}")
             assert res == {}
 
-        # Call 60: fires mid nudge
-        res60 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-60")
-        assert "hookSpecificOutput" in res60
-        hso60 = res60["hookSpecificOutput"]
-        assert hso60["hookEventName"] == "PostToolUse"
-        assert "60 tool calls" in hso60["additionalContext"]
-        assert "final JSON output block" in hso60["additionalContext"]
+        # Call 37: fires mid nudge
+        res37 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-37")
+        assert "hookSpecificOutput" in res37
+        hso37 = res37["hookSpecificOutput"]
+        assert hso37["hookEventName"] == "PostToolUse"
+        assert "37 tool calls" in hso37["additionalContext"]
+        assert "final JSON output block" in hso37["additionalContext"]
 
-        # Calls 61 to 99: no additional nudge
-        for i in range(61, 100):
+        # Calls 38 to 46: no additional nudge
+        for i in range(38, 47):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-{i}")
             assert res == {}
 
     @pytest.mark.asyncio
-    async def test_final_nudge_at_100_exactly_once(self) -> None:
-        hooks = _make_tool_budget_nudge_hooks(label="test-final-100")
+    async def test_final_nudge_at_47_exactly_once(self) -> None:
+        hooks = _make_tool_budget_nudge_hooks(label="test-final-47")
         callback = hooks["PostToolUse"][0].hooks[0]
 
-        for i in range(1, 100):
+        for i in range(1, 47):
             await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-{i}")
 
-        # Call 100: fires final nudge
-        res100 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-100")
-        assert "hookSpecificOutput" in res100
-        hso100 = res100["hookSpecificOutput"]
-        assert hso100["hookEventName"] == "PostToolUse"
-        assert "100 tool calls" in hso100["additionalContext"]
-        assert "final JSON output block" in hso100["additionalContext"]
-        assert "Stop reading and searching" in hso100["additionalContext"]
+        # Call 47: fires final nudge
+        res47 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-47")
+        assert "hookSpecificOutput" in res47
+        hso47 = res47["hookSpecificOutput"]
+        assert hso47["hookEventName"] == "PostToolUse"
+        assert "47 tool calls" in hso47["additionalContext"]
+        assert "final JSON output block" in hso47["additionalContext"]
+        assert "Stop reading and searching" in hso47["additionalContext"]
 
-        # Calls 101 to 110: no additional nudge
-        for i in range(101, 111):
+        # Calls 48 to 60: no additional nudge
+        for i in range(48, 61):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-{i}")
             assert res == {}
 
@@ -364,41 +436,41 @@ class TestToolBudgetNudgeHooks:
         hooks = _make_tool_budget_nudge_hooks(label="test-combined")
         callback = hooks["PostToolUse"][0].hooks[0]
 
-        # 35 successes + 24 failures = 59 calls
-        for i in range(1, 36):
+        # 20 successes + 16 failures = 36 calls
+        for i in range(1, 21):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-s-{i}")
             assert res == {}
-        for i in range(1, 25):
+        for i in range(1, 17):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUseFailure"}, f"tu-f-{i}")
             assert res == {}
 
-        # 60th call is a failure: mid nudge fires with PostToolUseFailure mirrored
-        res60 = await _call_hook(callback, {"hook_event_name": "PostToolUseFailure"}, "tu-f-25")
-        assert "hookSpecificOutput" in res60
-        assert res60["hookSpecificOutput"]["hookEventName"] == "PostToolUseFailure"
-        assert "60 tool calls" in res60["hookSpecificOutput"]["additionalContext"]
+        # 37th call is a failure: mid nudge fires with PostToolUseFailure mirrored
+        res37 = await _call_hook(callback, {"hook_event_name": "PostToolUseFailure"}, "tu-f-17")
+        assert "hookSpecificOutput" in res37
+        assert res37["hookSpecificOutput"]["hookEventName"] == "PostToolUseFailure"
+        assert "37 tool calls" in res37["hookSpecificOutput"]["additionalContext"]
 
-        # 20 successes + 19 failures = 39 more calls (total 99)
-        for i in range(36, 56):
+        # 5 successes + 4 failures = 9 more calls (total 46)
+        for i in range(21, 26):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-s-{i}")
             assert res == {}
-        for i in range(26, 45):
+        for i in range(17, 21):
             res = await _call_hook(callback, {"hook_event_name": "PostToolUseFailure"}, f"tu-f-{i}")
             assert res == {}
 
-        # 100th call is a success: final nudge fires with PostToolUse mirrored
-        res100 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-s-56")
-        assert "hookSpecificOutput" in res100
-        assert res100["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
-        assert "100 tool calls" in res100["hookSpecificOutput"]["additionalContext"]
+        # 47th call is a success: final nudge fires with PostToolUse mirrored
+        res47 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-s-26")
+        assert "hookSpecificOutput" in res47
+        assert res47["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+        assert "47 tool calls" in res47["hookSpecificOutput"]["additionalContext"]
 
     @pytest.mark.asyncio
     async def test_agent_id_subagent_inputs_skipped_without_advancing(self) -> None:
         hooks = _make_tool_budget_nudge_hooks(label="test-subagent")
         callback = hooks["PostToolUse"][0].hooks[0]
 
-        # 59 top-level calls
-        for i in range(1, 60):
+        # 36 top-level calls
+        for i in range(1, 37):
             await _call_hook(callback, {"hook_event_name": "PostToolUse"}, f"tu-{i}")
 
         # 20 subagent calls with agent_id set: all return {}
@@ -410,10 +482,10 @@ class TestToolBudgetNudgeHooks:
             )
             assert sub_res == {}
 
-        # 60th top-level call fires mid nudge with n=60, proving subagents did NOT advance count
-        res60 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-60")
-        assert "hookSpecificOutput" in res60
-        assert "60 tool calls" in res60["hookSpecificOutput"]["additionalContext"]
+        # 37th top-level call fires mid nudge with n=37, proving subagents did NOT advance count
+        res37 = await _call_hook(callback, {"hook_event_name": "PostToolUse"}, "tu-37")
+        assert "hookSpecificOutput" in res37
+        assert "37 tool calls" in res37["hookSpecificOutput"]["additionalContext"]
 
     @pytest.mark.asyncio
     async def test_malformed_input_cannot_raise(self) -> None:
@@ -448,8 +520,8 @@ class TestToolBudgetNudgeHooks:
 
     def test_nudge_copy_contains_counts_and_makes_no_claim_about_turns_left(self) -> None:
         # Mid nudge copy
-        mid_text = _TOOL_BUDGET_MID_NUDGE.format(n=60, count=60)
-        assert "60 tool calls" in mid_text
+        mid_text = _TOOL_BUDGET_MID_NUDGE.format(n=37)
+        assert "37 tool calls" in mid_text
         assert "final JSON output block" in mid_text
         assert "turns left" not in mid_text
         assert "turn budget" not in mid_text
@@ -457,8 +529,8 @@ class TestToolBudgetNudgeHooks:
         assert "finish_review" not in mid_text
 
         # Final nudge copy
-        final_text = _TOOL_BUDGET_FINAL_NUDGE.format(n=100, count=100)
-        assert "100 tool calls" in final_text
+        final_text = _TOOL_BUDGET_FINAL_NUDGE.format(n=47)
+        assert "47 tool calls" in final_text
         assert "final JSON output block" in final_text
         assert "turns left" not in final_text
         assert "turn budget" not in final_text
