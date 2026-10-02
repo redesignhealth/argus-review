@@ -13,9 +13,9 @@ gpt-5.5 was NOT on the approved model list (see
 gpt-5.4, with a regression-guard test
 (``test_gpt_frontier_pinned_to_approved_model`` in
 ``tests/test_llm_models.py``) added specifically to catch a repeat. The
-alias has since been bumped again, this time to ``gpt-5.6-sol`` -- unlike
-the gpt-5.5 attempt, the ``gpt-5.6`` family genuinely IS on the approved
-model list (the entire family is approved in
+alias has since been bumped again, this time to ``gpt-6.1-sol`` (TECH-7124) -- unlike
+the gpt-5.5 attempt, the ``gpt-6.1-sol`` model genuinely IS on the approved
+model list (the model is approved in
 ``pr-review-specialist-llm-patterns.md`` alongside this change), so this is
 not a repeat of that mistake. Any future bump of this alias must likewise
 confirm the target model is on the approved list -- and update the policy
@@ -82,21 +82,18 @@ from argus.llm.pricing import estimate_cost_usd
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
-    # OpenAI -- gpt-5.4 / gpt-5.6 families
-    # gpt-frontier is bumped to gpt-5.6-sol, and gpt-mini is bumped to
-    # gpt-5.6-luna, as the gpt-5.6 family is now on the approved model list
-    # (see pr-review-specialist-llm-patterns.md), whose Default column was
-    # updated to gpt-5.6-luna in the same change. gpt-5.5/gpt-5.5-mini
-    # remain NOT on the approved list -- do not bump either alias to them
-    # until the policy table is updated (see the module docstring above).
+    # OpenAI -- gpt-5.4 / gpt-5.6 / gpt-6 families
+    # gpt-frontier is bumped to gpt-6.1-sol (TECH-7124), and gpt-mini is bumped to
+    # gpt-5.6-luna, as both are on the approved model list
+    # (see pr-review-specialist-llm-patterns.md).
     # test_llm_models.py pins both of these exact values as a regression
     # guard.
-    "gpt-frontier": "gpt-5.6-sol",
+    "gpt-frontier": "gpt-6.1-sol",
     "gpt-mini": "gpt-5.6-luna",
     # Anthropic
-    "claude-frontier": "claude-fable-5",
-    "claude-opus": "claude-opus-5",
-    "claude-default": "claude-sonnet-4-6",
+    "claude-frontier": "claude-opus-5-5",
+    "claude-opus": "claude-opus-5-5",
+    "claude-default": "claude-sonnet-5-5",
     "claude-mini": "claude-haiku-4-5",
     # Google -- gemini-3 family. Real call site: argus.gemini_runner
     # (Track 3), dispatched via argus.bench's "gemini" platform.

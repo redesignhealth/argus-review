@@ -153,8 +153,7 @@ argus review owner/repo --pr 123 --dismiss "B2 -- pre-existing, not from this PR
 
 # Override the reviewer models (or set ARGUS_SPECIALIST_MODEL/ARGUS_FRONTIER_MODEL instead).
 # --frontier-model controls both the planner/coverage tier AND the cross-cutting
-# reviewer -- claude-fable-5 here is already the planner/coverage default, but
-# it also moves cross-cutting OFF its cheaper claude-opus-5 default onto fable-5.
+# reviewer (defaults to claude-opus-5-5).
 # Cost note: --specialist-model here overrides the bulk reviewer path (system
 # reviewer, specialists, tests-and-docs) from its low-cost Gemini default onto
 # claude-sdk with the specified model, and also updates the writer and lite-review
@@ -163,7 +162,7 @@ argus review owner/repo --pr 123 --dismiss "B2 -- pre-existing, not from this PR
 # the 1M-context beta from that same highest-volume path, since the beta is
 # only verified against the unoverridden default (autocompact may thrash on
 # long reviews under this override -- see argus/runners.py for the tradeoff).
-argus review owner/repo --pr 123 --specialist-model claude-opus-5 --frontier-model claude-fable-5
+argus review owner/repo --pr 123 --specialist-model claude-opus-5-5 --frontier-model claude-opus-5-5
 
 # Clear an already-set ARGUS_SPECIALIST_MODEL/ARGUS_FRONTIER_MODEL for just this
 # run by passing an empty string -- useful when the env var is set globally
