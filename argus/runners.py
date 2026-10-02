@@ -30,6 +30,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     TaskStartedMessage,
     TextBlock,
@@ -37,6 +38,13 @@ from claude_agent_sdk import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
+)
+from claude_agent_sdk.types import (
+    HookContext,
+    HookEvent,
+    PostToolUseFailureHookSpecificOutput,
+    PostToolUseHookSpecificOutput,
+    SyncHookJSONOutput,
 )
 from langsmith import traceable
 from langsmith.run_helpers import LangSmithExtra, get_current_run_tree
@@ -141,9 +149,10 @@ if _CROSS_CUTTING_MODEL != ALIAS_MAP["claude-opus"]:
         _CROSS_CUTTING_MODEL,
     )
 
-# Shared by every Claude-path session (system/specialist/cross-cutting/tests-and-docs
-# reviewers, feedback verifier, blocking validator).
-_MAX_TURNS = 30
+# Turn budget for Claude-path sessions (system/specialist/cross-cutting/tests-and-docs
+# reviewers, feedback verifier, blocking validator) -- raised from 30 to 50
+# in TECH-7093.
+_MAX_TURNS_CLAUDE = 50
 
 # Nudges the Gemini/OpenAI turn loops (see their own _run_turns) to call
 # finish_review a few turns before the budget runs out.
@@ -155,8 +164,8 @@ _TURN_BUDGET_NUDGE = (
 )
 
 # One-sentence turn-budget disclosure appended to the Gemini/OpenAI reviewer
-# system prompts. Not used on the Claude path (_run_claude_session), which
-# has no mid-stream nudge for the sentence to work with.
+# system prompts. See _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE below for the
+# Claude path equivalent.
 _TURN_BUDGET_SYSTEM_PROMPT_LINE = (
     "You have at most {max_turns} turns. Call `finish_review` before you run out -- "
     "a review that never calls it is discarded entirely."
@@ -187,7 +196,7 @@ def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
     colliding the two nudges onto the same turn -- which would either
     double-post one message, or silently drop the mid-budget one. Not
     reachable at today's values (75 vs. 97 for Gemini's 100-turn budget, 22
-    vs. 27 for the shared 30-turn budget) -- only with a much smaller
+    vs. 27 for OpenAI's 30-turn budget) -- only with a much smaller
     ``max_turns``.
     """
     checkpoint_turn = int(max_turns * _MID_BUDGET_NUDGE_FRACTION)
@@ -195,6 +204,159 @@ def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
     if checkpoint_turn >= emergency_nudge_turn:
         return None
     return checkpoint_turn
+
+
+# Claude-path equivalent of the disclosure line above. Claude-path reviewers do
+# not have a `finish_review` tool; they finish by emitting their role's final
+# JSON output block.
+_TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
+    "You have at most {max_turns} turns. Emit your final JSON output block before you "
+    "run out -- a review that never emits it is discarded entirely."
+)
+
+
+# Tool-call budget warning thresholds and truthful messages for Claude-path
+# sessions.
+#
+# In claude-agent-sdk 0.1.81, supported tool-lifecycle hooks that can inject
+# feedback via hookSpecificOutput.additionalContext are PostToolUse and
+# PostToolUseFailure. PostToolBatch is the exact-per-turn future option in
+# Claude Code, but is untyped and unsupported in this SDK version.
+# We attach to PostToolUse and PostToolUseFailure to track combined tool
+# invocations and inject non-blocking convergence/stop nudges.
+#
+# Thresholds are derived from the turn budget constants: the final threshold
+# fires at the emergency checkpoint (_MAX_TURNS_CLAUDE - _NUDGE_TURNS_BEFORE_BUDGET,
+# or 47 under max_turns=50), and the mid threshold fires at the 75% checkpoint
+# (_compute_mid_budget_nudge_turn(_MAX_TURNS_CLAUDE), or 37 under max_turns=50).
+# Because every continuing agent turn has at least one tool call, these thresholds
+# are reachable no later than the corresponding tool-using turns under max_turns.
+# Multiple or parallel tool calls per turn can make the truthful tool-count advisory
+# fire earlier. The copy makes no turns-left claim, stating only the exact number of
+# tool calls made so far.
+def _compute_claude_tool_budget_thresholds(max_turns: int) -> tuple[int, int]:
+    """Compute and validate Claude tool-budget nudge thresholds (mid, final).
+
+    Returns:
+        tuple[int, int]: (mid_threshold, final_threshold) where mid_threshold
+        strictly precedes final_threshold.
+
+    Raises:
+        ValueError: If max_turns produces a mid-budget checkpoint that does not
+            strictly precede the final threshold (e.g. colliding or inverted thresholds
+            from a small budget).
+    """
+    final_threshold = max_turns - _NUDGE_TURNS_BEFORE_BUDGET
+    mid_threshold = _compute_mid_budget_nudge_turn(max_turns)
+    if mid_threshold is None:
+        raise ValueError(
+            f"Invalid max_turns={max_turns}: mid-budget checkpoint must precede "
+            f"the final budget nudge threshold ({final_threshold})"
+        )
+    return mid_threshold, final_threshold
+
+
+_TOOL_BUDGET_MID_THRESHOLD: int
+_TOOL_BUDGET_FINAL_THRESHOLD: int
+_TOOL_BUDGET_MID_THRESHOLD, _TOOL_BUDGET_FINAL_THRESHOLD = _compute_claude_tool_budget_thresholds(
+    _MAX_TURNS_CLAUDE
+)
+
+_TOOL_BUDGET_MID_NUDGE = (
+    "You have now made {n} tool calls. If you have gathered enough "
+    "context to identify findings, begin converging toward your final JSON output block "
+    "now rather than continuing to explore."
+)
+_TOOL_BUDGET_FINAL_NUDGE = (
+    "You have now made {n} tool calls. Stop reading and searching now, and emit "
+    "your final JSON output block with whatever you have found so far. If you have "
+    "found nothing, emit your final JSON output block with an empty findings list."
+)
+
+
+def _make_tool_budget_nudge_hooks(
+    label: str | None = None,
+    *,
+    mid_threshold: int = _TOOL_BUDGET_MID_THRESHOLD,
+    final_threshold: int = _TOOL_BUDGET_FINAL_THRESHOLD,
+) -> dict[HookEvent, list[HookMatcher]]:
+    """Create PostToolUse and PostToolUseFailure hooks that inject non-blocking
+    nudge warnings into Claude-path sessions when tool-call counts cross budget thresholds.
+
+    In claude-agent-sdk 0.1.81, supported tool-lifecycle hooks that can inject
+    feedback via hookSpecificOutput.additionalContext are PostToolUse and
+    PostToolUseFailure. PostToolBatch is the exact-per-turn future option in
+    Claude Code, but is untyped and unsupported in this SDK version.
+
+    One callback is shared by both events, closing over combined tool-call count
+    and one-shot flags. Subagent tool calls (bearing agent_id) are skipped.
+    """
+    tool_call_count = 0
+    mid_nudge_sent = False
+    final_nudge_sent = False
+
+    async def _hook_callback(
+        input_data: Any,
+        tool_use_id: str | None,
+        context: HookContext,
+    ) -> SyncHookJSONOutput:
+        nonlocal tool_call_count, mid_nudge_sent, final_nudge_sent
+        try:
+            if not isinstance(input_data, dict):
+                return {}
+            # Sub-agent attribution: skip Task-spawned subagents
+            if input_data.get("agent_id"):
+                return {}
+
+            tool_call_count += 1
+            nudge_message: str | None = None
+
+            if tool_call_count >= final_threshold and not final_nudge_sent:
+                final_nudge_sent = True
+                mid_nudge_sent = True
+                nudge_message = _TOOL_BUDGET_FINAL_NUDGE.format(n=tool_call_count)
+            elif tool_call_count >= mid_threshold and not mid_nudge_sent:
+                mid_nudge_sent = True
+                nudge_message = _TOOL_BUDGET_MID_NUDGE.format(n=tool_call_count)
+
+            if nudge_message is None:
+                return {}
+
+            event_name = input_data.get("hook_event_name")
+            logger.info(
+                "Injected Claude tool-budget nudge [%s] at tool call %d (event=%s)",
+                label or "unlabeled",
+                tool_call_count,
+                event_name,
+            )
+
+            # Mirror hook_event_name in hookSpecificOutput
+            if event_name == "PostToolUseFailure":
+                failure_output: PostToolUseFailureHookSpecificOutput = {
+                    "hookEventName": "PostToolUseFailure",
+                    "additionalContext": nudge_message,
+                }
+                return {"hookSpecificOutput": failure_output}
+            else:
+                success_output: PostToolUseHookSpecificOutput = {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": nudge_message,
+                }
+                return {"hookSpecificOutput": success_output}
+
+        except Exception:
+            logger.warning(
+                "Tool budget hook callback failed for [%s]",
+                label or "unlabeled",
+                exc_info=True,
+            )
+            return {}
+
+    matcher = HookMatcher(hooks=[_hook_callback])
+    return {
+        "PostToolUse": [matcher],
+        "PostToolUseFailure": [matcher],
+    }
 
 
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned
@@ -1697,15 +1859,22 @@ async def _run_claude_session(
     betas: list[Literal["context-1m-2025-08-07"]] = (
         ["context-1m-2025-08-07"] if _attach_1m_context_beta else []
     )
+    system_prompt = (
+        system_prompt
+        + "\n\n"
+        + _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE.format(max_turns=_MAX_TURNS_CLAUDE)
+    )
+    hooks = _make_tool_budget_nudge_hooks(label)
     options = ClaudeAgentOptions(
         cwd=effective_root,
         allowed_tools=["Read", "Glob", "Grep"] + context7_tools,
         mcp_servers=mcp_servers,
         strict_mcp_config=True,
         permission_mode="default",
+        hooks=hooks,
         model=model,
         system_prompt=system_prompt,
-        max_turns=_MAX_TURNS,
+        max_turns=_MAX_TURNS_CLAUDE,
         env=dict([settings.anthropic_credential]),
         stderr=_stderr_handler,
         betas=betas,
@@ -1743,6 +1912,11 @@ async def _run_claude_session(
         result_text = ""
         cost_usd = 0.0
         tool_calls: list[str] = []
+        # Note: message_index counts AssistantMessage objects received from the SDK
+        # stream, NOT CLI turns. Multiple AssistantMessage objects can occur within
+        # a single turn or sub-step. It must never be used as a turn counter.
+        # Key and log names ('msg_index', 'msg=%d') are preserved for log
+        # compatibility.
         message_index = 0
         failure_reason: Literal["turn_budget_exhausted"] | None = None
         async for message in client.receive_response():
@@ -1842,7 +2016,7 @@ async def _run_claude_session(
                     logger.warning(
                         "Agent [%s] exhausted its %d-turn budget (subtype=%s)",
                         label or "unlabeled",
-                        _MAX_TURNS,
+                        _MAX_TURNS_CLAUDE,
                         message.subtype,
                     )
                     failure_reason = "turn_budget_exhausted"

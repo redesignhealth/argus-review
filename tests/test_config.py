@@ -214,11 +214,11 @@ def test_gemini_cache_ttl_override(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.ARGUS_GEMINI_CACHE_TTL == 60
 
 
-def test_session_timeout_defaults_to_900(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_session_timeout_defaults_to_1500(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_required(monkeypatch)
     monkeypatch.delenv("ARGUS_SESSION_TIMEOUT", raising=False)
     settings = get_settings()
-    assert settings.ARGUS_SESSION_TIMEOUT == 900
+    assert settings.ARGUS_SESSION_TIMEOUT == 1500
 
 
 def test_session_timeout_override(monkeypatch: pytest.MonkeyPatch) -> None:

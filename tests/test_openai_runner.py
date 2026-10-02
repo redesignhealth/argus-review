@@ -34,8 +34,12 @@ from openai.types.responses.response_usage import InputTokensDetails, OutputToke
 
 from argus.bench import BenchEntry
 from argus.llm.models import resolve as resolve_alias
-from argus.openai_runner import _redact_openai_inputs, run_session_openai
-from argus.runners import _MAX_TURNS, _TURN_BUDGET_SYSTEM_PROMPT_LINE
+from argus.openai_runner import (
+    _MAX_TURNS_OPENAI,
+    _redact_openai_inputs,
+    run_session_openai,
+)
+from argus.runners import _TURN_BUDGET_SYSTEM_PROMPT_LINE
 
 pytestmark = pytest.mark.asyncio
 
@@ -44,7 +48,9 @@ def _with_turn_budget_line(system_prompt: str) -> str:
     """The runner appends the shared turn-budget disclosure to every system
     prompt it's given -- tests that assert on the exact `instructions` sent
     to the API must account for it."""
-    return system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS)
+    return (
+        system_prompt + "\n\n" + _TURN_BUDGET_SYSTEM_PROMPT_LINE.format(max_turns=_MAX_TURNS_OPENAI)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,15 +298,16 @@ class TestOpenAIRunnerBasicLoop:
         assert outputs[1]["call_id"] == "call_2"
 
     async def test_exhausting_max_turns_still_returns_a_result(self, tmp_path: Any) -> None:
-        """Exhausting _MAX_TURNS stops and builds whatever findings were
+        """Exhausting _MAX_TURNS_OPENAI stops and builds whatever findings were
         reported, with failure_reason="turn_budget_exhausted" -- not None,
         which would be indistinguishable from a clean 0-finding completion.
         """
-        from argus.runners import _MAX_TURNS
+        from argus.openai_runner import _MAX_TURNS_OPENAI
 
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [
-            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS + 5)
+            _make_response(calls=[finding_call], resp_id=f"r_{i}")
+            for i in range(_MAX_TURNS_OPENAI + 5)
         ]
         client = _make_fake_client(responses)
         entry = _make_entry()
@@ -315,29 +322,30 @@ class TestOpenAIRunnerBasicLoop:
             )
 
         assert result.failure_reason == "turn_budget_exhausted"
-        assert client.responses.create.call_count == _MAX_TURNS
+        assert client.responses.create.call_count == _MAX_TURNS_OPENAI
         from argus.helpers import parse_review_result
 
         parsed = parse_review_result(result.result_text, "test-group")
-        assert len(parsed.findings) == _MAX_TURNS
+        assert len(parsed.findings) == _MAX_TURNS_OPENAI
 
     async def test_finish_review_on_final_turn_is_clean_completion_not_exhaustion(
         self, tmp_path: Any
     ) -> None:
-        """A successful finish_review on the LAST allowed turn (_MAX_TURNS) must
+        """A successful finish_review on the LAST allowed turn (_MAX_TURNS_OPENAI) must
         still be treated as a clean completion with files_explored populated.
         The turn loop's `for...else` only runs its exhaustion branch when the loop
         completes without `break`."""
-        from argus.runners import _MAX_TURNS
+        from argus.openai_runner import _MAX_TURNS_OPENAI
 
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [
-            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS - 1)
+            _make_response(calls=[finding_call], resp_id=f"r_{i}")
+            for i in range(_MAX_TURNS_OPENAI - 1)
         ]
         responses.append(
             _make_response(
                 calls=[("finish_review", {"files_explored": ["f.py"]})],
-                resp_id=f"r_{_MAX_TURNS - 1}",
+                resp_id=f"r_{_MAX_TURNS_OPENAI - 1}",
             )
         )
         client = _make_fake_client(responses)
@@ -353,18 +361,19 @@ class TestOpenAIRunnerBasicLoop:
             )
 
         assert result.failure_reason is None
-        assert client.responses.create.call_count == _MAX_TURNS
+        assert client.responses.create.call_count == _MAX_TURNS_OPENAI
         assert "finish_review" in result.tool_names
 
     async def test_nudge_injected_once_at_turn_budget_minus_three(self, tmp_path: Any) -> None:
         """A session that never calls finish_review gets nudged exactly once,
         _NUDGE_TURNS_BEFORE_BUDGET turns before exhaustion, and still preserves
         findings reported both before and after the nudge."""
-        from argus.runners import _MAX_TURNS, _NUDGE_TURNS_BEFORE_BUDGET, _TURN_BUDGET_NUDGE
+        from argus.openai_runner import _MAX_TURNS_OPENAI
+        from argus.runners import _NUDGE_TURNS_BEFORE_BUDGET, _TURN_BUDGET_NUDGE
 
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [
-            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS)
+            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS_OPENAI)
         ]
         client = _make_fake_client(responses)
         entry = _make_entry()
@@ -382,9 +391,9 @@ class TestOpenAIRunnerBasicLoop:
         from argus.helpers import parse_review_result
 
         parsed = parse_review_result(result.result_text, "test-group")
-        assert len(parsed.findings) == _MAX_TURNS
+        assert len(parsed.findings) == _MAX_TURNS_OPENAI
 
-        threshold = _MAX_TURNS - _NUDGE_TURNS_BEFORE_BUDGET
+        threshold = _MAX_TURNS_OPENAI - _NUDGE_TURNS_BEFORE_BUDGET
         nudge_item = {"role": "user", "content": _TURN_BUDGET_NUDGE}
         for i, call in enumerate(client.responses.create.call_args_list):
             call_input = call.kwargs["input"]
@@ -421,13 +430,14 @@ class TestOpenAIRunnerBasicLoop:
 
     async def test_mid_budget_nudge_injected_once_at_75_percent(self, tmp_path: Any) -> None:
         """A session that never calls finish_review gets the mid-budget
-        checkpoint nudge exactly once, at 75% of _MAX_TURNS -- in addition
+        checkpoint nudge exactly once, at 75% of _MAX_TURNS_OPENAI -- in addition
         to (not instead of) the end-of-budget _TURN_BUDGET_NUDGE."""
-        from argus.runners import _MAX_TURNS, _MID_BUDGET_NUDGE, _compute_mid_budget_nudge_turn
+        from argus.openai_runner import _MAX_TURNS_OPENAI
+        from argus.runners import _MID_BUDGET_NUDGE, _compute_mid_budget_nudge_turn
 
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [
-            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS)
+            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS_OPENAI)
         ]
         client = _make_fake_client(responses)
         entry = _make_entry()
@@ -443,7 +453,7 @@ class TestOpenAIRunnerBasicLoop:
 
         assert result.failure_reason == "turn_budget_exhausted"
 
-        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS)
+        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_OPENAI)
         assert mid_budget_turn is not None
         nudge_item = {"role": "user", "content": _MID_BUDGET_NUDGE}
         for i, call in enumerate(client.responses.create.call_args_list):
@@ -485,8 +495,8 @@ class TestOpenAIRunnerBasicLoop:
         """An exhausted session must receive BOTH the mid-budget checkpoint
         nudge and the end-of-budget emergency nudge, at their own distinct
         turns -- neither should suppress or overwrite the other."""
+        from argus.openai_runner import _MAX_TURNS_OPENAI
         from argus.runners import (
-            _MAX_TURNS,
             _MID_BUDGET_NUDGE,
             _NUDGE_TURNS_BEFORE_BUDGET,
             _TURN_BUDGET_NUDGE,
@@ -495,7 +505,7 @@ class TestOpenAIRunnerBasicLoop:
 
         finding_call = ("report_finding", {"file": "f.py", "line": 1, "description": "d"})
         responses = [
-            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS)
+            _make_response(calls=[finding_call], resp_id=f"r_{i}") for i in range(_MAX_TURNS_OPENAI)
         ]
         client = _make_fake_client(responses)
         entry = _make_entry()
@@ -511,8 +521,8 @@ class TestOpenAIRunnerBasicLoop:
 
         assert result.failure_reason == "turn_budget_exhausted"
 
-        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS)
-        emergency_turn = _MAX_TURNS - _NUDGE_TURNS_BEFORE_BUDGET
+        mid_budget_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_OPENAI)
+        emergency_turn = _MAX_TURNS_OPENAI - _NUDGE_TURNS_BEFORE_BUDGET
         assert mid_budget_turn is not None
         assert mid_budget_turn != emergency_turn
 
@@ -957,8 +967,8 @@ class TestOpenAIRunnerTimeoutsAndFailures:
         mock_init.assert_called_once()
         assert mock_init.call_args.kwargs["timeout"] == 42.0
 
-    async def test_default_timeout_is_900_seconds(self, tmp_path: Any) -> None:
-        """When neither timeout_s nor ARGUS_SESSION_TIMEOUT is passed, defaults to 900s."""
+    async def test_default_timeout_is_1500_seconds(self, tmp_path: Any) -> None:
+        """When neither timeout_s nor ARGUS_SESSION_TIMEOUT is passed, defaults to 1500s."""
         settings = MagicMock(spec=[])
         settings.OPENAI_API_KEY = "key"
         client = _make_fake_client([_make_response(calls=[])])
@@ -974,7 +984,7 @@ class TestOpenAIRunnerTimeoutsAndFailures:
             )
 
         mock_init.assert_called_once()
-        assert mock_init.call_args.kwargs["timeout"] == 900
+        assert mock_init.call_args.kwargs["timeout"] == 1500
 
     async def test_client_closed_on_normal_completion(self, tmp_path: Any) -> None:
         """client.close is called when session completes normally."""
