@@ -11,7 +11,6 @@ import pytest
 
 from argus.llm.models import (
     ALIAS_MAP,
-    CLAUDE_DEFAULT,
     EXPERIMENTAL_MODELS,
     GEMINI_FRONTIER,
     GEMINI_MINI,
@@ -49,13 +48,31 @@ class TestPricingLookup:
             )
 
     def test_claude_default_pricing_rates(self) -> None:
-        """Regression guard: claude-sonnet-4-6 rates in litellm must match
-        expected rates ($3/$15/$0.30 per Mtok)."""
-        cost = get_token_cost(CLAUDE_DEFAULT)
+        """Regression guard: claude-sonnet-5-5 rates in litellm must match
+        expected rates ($2/$10/$0.20 per Mtok)."""
+        cost = get_token_cost(ALIAS_MAP["claude-default"])
         assert cost is not None
-        assert cost.input_cost_per_token == pytest.approx(3e-6)
-        assert cost.output_cost_per_token == pytest.approx(15e-6)
-        assert cost.cache_read_cost_per_token == pytest.approx(0.3e-6)
+        assert cost.input_cost_per_token == pytest.approx(2e-6)
+        assert cost.output_cost_per_token == pytest.approx(10e-6)
+        assert cost.cache_read_cost_per_token == pytest.approx(0.2e-6)
+
+    def test_claude_opus_5_5_pricing_rates(self) -> None:
+        """Regression guard: claude-opus-5-5 rates in litellm must match
+        expected rates ($4/$20/$0.20 per Mtok)."""
+        cost = get_token_cost(ALIAS_MAP["claude-opus"])
+        assert cost is not None
+        assert cost.input_cost_per_token == pytest.approx(4e-6)
+        assert cost.output_cost_per_token == pytest.approx(20e-6)
+        assert cost.cache_read_cost_per_token == pytest.approx(0.2e-6)
+
+    def test_gpt_frontier_pricing_rates(self) -> None:
+        """Regression guard: gpt-6.1-sol rates in litellm must match
+        expected rates ($2/$10/$0.10 per Mtok)."""
+        cost = get_token_cost(ALIAS_MAP["gpt-frontier"])
+        assert cost is not None
+        assert cost.input_cost_per_token == pytest.approx(2e-6)
+        assert cost.output_cost_per_token == pytest.approx(10e-6)
+        assert cost.cache_read_cost_per_token == pytest.approx(0.1e-6)
 
     def test_gemini_pricing_is_real_not_a_placeholder(self) -> None:
         """Gemini has a real, reachable runner (argus.gemini_runner) -- its
@@ -70,19 +87,21 @@ class TestPricingLookup:
 
 class TestEstimateCostUsd:
     def test_computes_expected_cost_for_claude_default(self) -> None:
-        cost = estimate_cost_usd(CLAUDE_DEFAULT, input_tokens=1_000_000, output_tokens=1_000_000)
-        assert cost == pytest.approx(3.00 + 15.00)
+        cost = estimate_cost_usd(
+            ALIAS_MAP["claude-default"], input_tokens=1_000_000, output_tokens=1_000_000
+        )
+        assert cost == pytest.approx(2.00 + 10.00)
 
     def test_cached_input_tokens_billed_separately_at_cache_read_rate(self) -> None:
         """cached_input_tokens is additive (billed at the cache-read rate),
         not a subset subtracted from input_tokens."""
         cost = estimate_cost_usd(
-            CLAUDE_DEFAULT,
+            ALIAS_MAP["claude-default"],
             input_tokens=1_000_000,
             output_tokens=0,
             cached_input_tokens=1_000_000,
         )
-        assert cost == pytest.approx(3.00 + 0.30)
+        assert cost == pytest.approx(2.00 + 0.20)
 
     def test_cache_creation_tokens_billed(self) -> None:
         """cache_creation_tokens is billed at the cache-creation rate."""
@@ -92,7 +111,7 @@ class TestEstimateCostUsd:
             output_tokens=0,
             cache_creation_tokens=1_000_000,
         )
-        assert cost == pytest.approx(3.75)
+        assert cost == pytest.approx(2.50)
 
     def test_zero_tokens_is_zero_cost(self) -> None:
         assert (
@@ -136,13 +155,28 @@ class TestEstimateCostUsd:
         """Regression guard for a round-1 Argus BLOCKING finding on this
         PR: gpt-frontier previously resolved to gpt-5.5, which was not on
         the approved model list and may not have been shipped by OpenAI
-        yet. The alias has since been legitimately re-bumped to gpt-5.6-sol
-        (the entire gpt-5.6 family is now on the approved model list -- see
+        yet. The alias has since been legitimately re-bumped to gpt-6.1-sol
+        (the gpt-6.1-sol model is on the approved model list -- see
         pr-review-specialist-llm-patterns.md). Pin the alias to that
         approved value so a future accidental re-bump to an unapproved
         model string is caught here instead of at review time."""
-        assert ALIAS_MAP["gpt-frontier"] == "gpt-5.6-sol"
-        assert GPT_FRONTIER == "gpt-5.6-sol"
+        assert ALIAS_MAP["gpt-frontier"] == "gpt-6.1-sol"
+        assert GPT_FRONTIER == "gpt-6.1-sol"
+
+    def test_claude_frontier_pinned_to_approved_model(self) -> None:
+        """Regression guard: claude-frontier must pin to claude-opus-5-5
+        under Claude 5.5 per TECH-7124."""
+        assert ALIAS_MAP["claude-frontier"] == "claude-opus-5-5"
+
+    def test_claude_opus_pinned_to_approved_model(self) -> None:
+        """Regression guard: claude-opus must pin to claude-opus-5-5
+        under Claude 5.5 per TECH-7124."""
+        assert ALIAS_MAP["claude-opus"] == "claude-opus-5-5"
+
+    def test_claude_default_pinned_to_approved_model(self) -> None:
+        """Regression guard: claude-default must pin to claude-sonnet-5-5
+        per TECH-7124."""
+        assert ALIAS_MAP["claude-default"] == "claude-sonnet-5-5"
 
     def test_gpt_mini_pinned_to_approved_model(self) -> None:
         """Parallel regression guard for gpt-mini, alongside gpt-frontier's

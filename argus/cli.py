@@ -368,10 +368,7 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
         default=_MODEL_OVERRIDE_UNSET,
         help=(
             "Override the model used by the planner, coverage check, and "
-            "cross-cutting reviewer (defaults: claude-fable-5 for the first "
-            "two, claude-opus-5 for cross-cutting -- note this one flag "
-            "collapses both onto the SAME model when set, moving "
-            "cross-cutting off its cheaper default; or ARGUS_FRONTIER_MODEL "
+            "cross-cutting reviewer (default: claude-opus-5-5, or ARGUS_FRONTIER_MODEL "
             "if already set in the environment). Same effect as setting "
             "ARGUS_FRONTIER_MODEL. Pass an empty string to clear an "
             "already-set ARGUS_FRONTIER_MODEL for this run."

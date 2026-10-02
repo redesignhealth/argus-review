@@ -91,7 +91,7 @@ class Settings(BaseSettings):
         ARGUS_SPECIALIST_MODEL: Override the model used by the system
             reviewer, specialist reviewers, the writer, and the lite-review
             path (``argus.llm.models.CLAUDE_DEFAULT``, default
-            ``claude-sonnet-4-6``). Set via ``--specialist-model``; read
+            ``claude-sonnet-5-5``). Set via ``--specialist-model``; read
             directly from ``os.environ`` by ``argus.llm.models`` at import
             time and by ``argus.bench`` (where setting it forces bulk reviewers
             to claude-sdk with claude-default). Also read off a ``Settings``

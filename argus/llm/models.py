@@ -13,9 +13,9 @@ gpt-5.5 was NOT on the approved model list (see
 gpt-5.4, with a regression-guard test
 (``test_gpt_frontier_pinned_to_approved_model`` in
 ``tests/test_llm_models.py``) added specifically to catch a repeat. The
-alias has since been bumped again, this time to ``gpt-5.6-sol`` -- unlike
-the gpt-5.5 attempt, the ``gpt-5.6`` family genuinely IS on the approved
-model list (the entire family is approved in
+alias has since been bumped again, this time to ``gpt-6.1-sol`` (TECH-7124) -- unlike
+the gpt-5.5 attempt, the ``gpt-6.1-sol`` model genuinely IS on the approved
+model list (the model is approved in
 ``pr-review-specialist-llm-patterns.md`` alongside this change), so this is
 not a repeat of that mistake. Any future bump of this alias must likewise
 confirm the target model is on the approved list -- and update the policy
@@ -48,11 +48,15 @@ Per-token model pricing is sourced centrally from ``argus.llm.pricing``
 
 Tier semantics:
     *frontier* -- best reasoning available in the family; slow / expensive.
-    *opus*     -- next tier down from frontier -- strong reasoning at roughly
-                  half frontier's per-token cost. Introduced for call sites
-                  (e.g. the cross-cutting reviewer) where evals showed no
-                  measurable quality gain from frontier, so the cost isn't
-                  justified.
+                  Under Claude 5.5, ``claude-frontier`` and ``claude-opus``
+                  intentionally share ``claude-opus-5-5``.
+    *opus*     -- historically the next tier down from frontier -- strong reasoning
+                  at roughly half frontier's per-token cost (e.g. Opus 5 vs Fable 5).
+                  Under Claude 5.5, ``claude-frontier`` and ``claude-opus``
+                  intentionally share ``claude-opus-5-5``, so the prior cost
+                  differentiation rationale no longer applies while preserving
+                  the distinct alias keys for call sites (e.g. the cross-cutting
+                  reviewer) and override compatibility.
     *default*  -- workhorse balance of cost and capability.
     *mini*     -- fast and cheap; suitable for high-volume, low-stakes calls.
 
@@ -63,9 +67,10 @@ Runtime overrides:
 
     ``ARGUS_FRONTIER_MODEL`` (``--frontier-model``) overrides both
     ``CLAUDE_FRONTIER`` (planner, coverage) and ``CLAUDE_OPUS``
-    (cross-cutting) -- there is a single frontier-tier knob at the CLI, even
-    though the two aliases keep independent defaults so cross-cutting still
-    runs on the cheaper Opus tier when no override is given.
+    (cross-cutting) -- there is a single frontier-tier knob at the CLI.
+    Under Claude 5.5, both aliases intentionally share the same default
+    (``claude-opus-5-5``), and setting ``ARGUS_FRONTIER_MODEL`` overrides both
+    onto the specified model.
 
     Both env vars must be set before this module is first imported --
     ``cli.py`` sets them from the CLI flags ahead of any deferred import of
@@ -82,21 +87,18 @@ from argus.llm.pricing import estimate_cost_usd
 logger = logging.getLogger(__name__)
 
 ALIAS_MAP: Final[dict[str, str]] = {
-    # OpenAI -- gpt-5.4 / gpt-5.6 families
-    # gpt-frontier is bumped to gpt-5.6-sol, and gpt-mini is bumped to
-    # gpt-5.6-luna, as the gpt-5.6 family is now on the approved model list
-    # (see pr-review-specialist-llm-patterns.md), whose Default column was
-    # updated to gpt-5.6-luna in the same change. gpt-5.5/gpt-5.5-mini
-    # remain NOT on the approved list -- do not bump either alias to them
-    # until the policy table is updated (see the module docstring above).
+    # OpenAI -- gpt-5.4 / gpt-5.6 / gpt-6 families
+    # gpt-frontier is bumped to gpt-6.1-sol (TECH-7124), and gpt-mini is bumped to
+    # gpt-5.6-luna, as both are on the approved model list
+    # (see pr-review-specialist-llm-patterns.md).
     # test_llm_models.py pins both of these exact values as a regression
     # guard.
-    "gpt-frontier": "gpt-5.6-sol",
+    "gpt-frontier": "gpt-6.1-sol",
     "gpt-mini": "gpt-5.6-luna",
     # Anthropic
-    "claude-frontier": "claude-fable-5",
-    "claude-opus": "claude-opus-5",
-    "claude-default": "claude-sonnet-4-6",
+    "claude-frontier": "claude-opus-5-5",
+    "claude-opus": "claude-opus-5-5",
+    "claude-default": "claude-sonnet-5-5",
     "claude-mini": "claude-haiku-4-5",
     # Google -- gemini-3 family. Real call site: argus.gemini_runner
     # (Track 3), dispatched via argus.bench's "gemini" platform.
