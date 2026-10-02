@@ -127,13 +127,11 @@ class Settings(BaseSettings):
             across all three reviewer platforms; raised to 1500 in TECH-7093.
             This timeout is deliberately global to all runner platforms through
             ARGUS_SESSION_TIMEOUT, rather than scoped only to Claude, to preserve
-            one operator control and provide headroom for Gemini's 100-turn
-            path too (while acknowledging OpenAI remains at 30 turns). In
-            production, an observed cross-cutting session ran 533.8s under the
-            30-turn cap; linear scaling 30 to 50 projects ~890s, meaning 900s
-            leaves virtually zero headroom. 1500s preserves roughly 1.69x
-            margin, critical because a timeout kill discards all reviewer
-            output.
+            a single operator control across runners. In production, an observed
+            cross-cutting session ran 533.8s under the 30-turn cap; linear
+            scaling 30 to 50 projects ~890s, meaning 900s leaves virtually zero
+            headroom. 1500s preserves roughly 1.69x margin, critical because a
+            timeout kill discards all reviewer output.
         GOOGLE_API_KEY: Gemini platform credential, consumed via the
             ``google_credential`` property by ``argus.gemini_runner``
             whenever a role's bench entry resolves to

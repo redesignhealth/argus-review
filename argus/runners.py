@@ -184,6 +184,28 @@ _MID_BUDGET_NUDGE = (
     "rather than continuing to explore -- you do not need to use your full budget."
 )
 
+
+def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
+    """Return the turn at which to fire the 75%-of-budget checkpoint nudge
+    for a given ``max_turns`` budget, or ``None`` if that turn would land at
+    or after the existing end-of-budget nudge turn (``max_turns -
+    _NUDGE_TURNS_BEFORE_BUDGET``).
+
+    This guards against a future change to ``_MID_BUDGET_NUDGE_FRACTION``,
+    ``_NUDGE_TURNS_BEFORE_BUDGET``, or a runner's own ``max_turns`` silently
+    colliding the two nudges onto the same turn -- which would either
+    double-post one message, or silently drop the mid-budget one. Not
+    reachable at today's values (75 vs. 97 for Gemini's 100-turn budget, 22
+    vs. 27 for OpenAI's 30-turn budget) -- only with a much smaller
+    ``max_turns``.
+    """
+    checkpoint_turn = int(max_turns * _MID_BUDGET_NUDGE_FRACTION)
+    emergency_nudge_turn = max_turns - _NUDGE_TURNS_BEFORE_BUDGET
+    if checkpoint_turn >= emergency_nudge_turn:
+        return None
+    return checkpoint_turn
+
+
 # Claude-path equivalent of the disclosure line above. Claude-path reviewers do
 # not have a `finish_review` tool; they finish by emitting their role's final
 # JSON output block.
@@ -191,6 +213,7 @@ _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
     "You have at most {max_turns} turns. Emit your final JSON output block before you "
     "run out -- a review that never emits it is discarded entirely."
 )
+
 
 # Tool-call budget warning thresholds and truthful messages for Claude-path
 # sessions.
@@ -202,15 +225,42 @@ _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
 # We attach to PostToolUse and PostToolUseFailure to track combined tool
 # invocations and inject non-blocking convergence/stop nudges.
 #
-# Thresholds 37 and 47 correspond to the 75% mid-checkpoint (floor(50 * 0.75) = 37)
-# and final checkpoint (50 - 3 = 47) under max_turns=50. Because every continuing
-# agent turn has at least one tool call, these thresholds are reachable no later
-# than the corresponding 37th/47th tool-using turns under max_turns=50. Multiple
-# or parallel tool calls per turn can make the truthful tool-count advisory fire
-# earlier. The copy makes no turns-left claim, stating only the exact number of
+# Thresholds are derived from the turn budget constants: the final threshold
+# fires at the emergency checkpoint (_MAX_TURNS_CLAUDE - _NUDGE_TURNS_BEFORE_BUDGET,
+# or 47 under max_turns=50), and the mid threshold fires at the 75% checkpoint
+# (_compute_mid_budget_nudge_turn(_MAX_TURNS_CLAUDE), or 37 under max_turns=50).
+# Because every continuing agent turn has at least one tool call, these thresholds
+# are reachable no later than the corresponding tool-using turns under max_turns.
+# Multiple or parallel tool calls per turn can make the truthful tool-count advisory
+# fire earlier. The copy makes no turns-left claim, stating only the exact number of
 # tool calls made so far.
-_TOOL_BUDGET_MID_THRESHOLD = 37
-_TOOL_BUDGET_FINAL_THRESHOLD = 47
+def _compute_claude_tool_budget_thresholds(max_turns: int) -> tuple[int, int]:
+    """Compute and validate Claude tool-budget nudge thresholds (mid, final).
+
+    Returns:
+        tuple[int, int]: (mid_threshold, final_threshold) where mid_threshold
+        strictly precedes final_threshold.
+
+    Raises:
+        ValueError: If max_turns produces a mid-budget checkpoint that does not
+            strictly precede the final threshold (e.g. colliding or inverted thresholds
+            from a small budget).
+    """
+    final_threshold = max_turns - _NUDGE_TURNS_BEFORE_BUDGET
+    mid_threshold = _compute_mid_budget_nudge_turn(max_turns)
+    if mid_threshold is None:
+        raise ValueError(
+            f"Invalid max_turns={max_turns}: mid-budget checkpoint must precede "
+            f"the final budget nudge threshold ({final_threshold})"
+        )
+    return mid_threshold, final_threshold
+
+
+_TOOL_BUDGET_MID_THRESHOLD: int
+_TOOL_BUDGET_FINAL_THRESHOLD: int
+_TOOL_BUDGET_MID_THRESHOLD, _TOOL_BUDGET_FINAL_THRESHOLD = _compute_claude_tool_budget_thresholds(
+    _MAX_TURNS_CLAUDE
+)
 
 _TOOL_BUDGET_MID_NUDGE = (
     "You have now made {n} tool calls. If you have gathered enough "
@@ -307,27 +357,6 @@ def _make_tool_budget_nudge_hooks(
         "PostToolUse": [matcher],
         "PostToolUseFailure": [matcher],
     }
-
-
-def _compute_mid_budget_nudge_turn(max_turns: int) -> int | None:
-    """Return the turn at which to fire the 75%-of-budget checkpoint nudge
-    for a given ``max_turns`` budget, or ``None`` if that turn would land at
-    or after the existing end-of-budget nudge turn (``max_turns -
-    _NUDGE_TURNS_BEFORE_BUDGET``).
-
-    This guards against a future change to ``_MID_BUDGET_NUDGE_FRACTION``,
-    ``_NUDGE_TURNS_BEFORE_BUDGET``, or a runner's own ``max_turns`` silently
-    colliding the two nudges onto the same turn -- which would either
-    double-post one message, or silently drop the mid-budget one. Not
-    reachable at today's values (75 vs. 97 for Gemini's 100-turn budget, 22
-    vs. 27 for OpenAI's 30-turn budget) -- only with a much smaller
-    ``max_turns``.
-    """
-    checkpoint_turn = int(max_turns * _MID_BUDGET_NUDGE_FRACTION)
-    emergency_nudge_turn = max_turns - _NUDGE_TURNS_BEFORE_BUDGET
-    if checkpoint_turn >= emergency_nudge_turn:
-        return None
-    return checkpoint_turn
 
 
 # Fallback repo root for ClaudeSDKClient cwd — used when no SHA-pinned

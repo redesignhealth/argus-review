@@ -13,8 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout from 900 to 1500 seconds globally across all runner platforms through
   `ARGUS_SESSION_TIMEOUT` (TECH-7093), preserving headroom for longer sessions.
 - Added Claude's budget disclosure and supported `PostToolUse`/`PostToolUseFailure`
-  hook-based convergence warnings at 37 and 47 tool calls, using truthful top-level
-  tool-call counts, including failed calls.
+  hook-based convergence warnings (derived from budget constants; 37 and 47 tool calls
+  by default), using truthful top-level tool-call counts, including failed calls.
 - Decoupled the Claude and OpenAI turn-budget constants; OpenAI remains at 30 turns.
 
 ## [0.2.7] - 2026-09-26
