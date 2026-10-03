@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.10] - 2026-10-03
+
+### Fixed
+
+- Fixed structured output generation on Claude 5.5 (`claude-opus-5-5`, `claude-sonnet-5-5`) across the planner, preflight, and coverage stages (TECH-7156, #33):
+  - Migrated `plan_review`, `run_preflight_check`, and `check_coverage` to Anthropic native JSON-schema output (`output_config.format` with `type="json_schema"`) instead of unsupported forced tool choice (`tool_choice`).
+  - Preserved planner raw streaming, strict validation, repair fallback via OpenAI, truncation detection with transient retry (`PlannerTransientError`), and stage usage accounting.
+  - Added targeted regression coverage for streamed native structured output chunk shapes and non-streaming native JSON-schema stage bindings (`tests/test_plan_review.py`, `tests/test_structured_output_methods.py`).
+  - Updated architecture documentation (`docs/ARCHITECTURE.md`) to reflect native structured output for the planner.
+  - End-to-end evidence: verified via a full Argus branch review through the Redesign Health Anthropic proxy with model overrides unset (the RH proxy itself was unchanged).
+
 ## [0.2.9] - 2026-10-02
 
 ### Changed
@@ -380,7 +391,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.9...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.10...HEAD
+[0.2.10]: https://github.com/redesignhealth/argus-review/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/redesignhealth/argus-review/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/redesignhealth/argus-review/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/redesignhealth/argus-review/compare/v0.2.6...v0.2.7
