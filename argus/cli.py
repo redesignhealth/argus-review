@@ -225,13 +225,22 @@ def _check_settings(settings: "Settings") -> None:
         sys.exit(1)
 
 
-async def run(request: "ReviewRequest") -> "ReviewResponse":
+async def run(
+    request: "ReviewRequest",
+    review_override_sha: str | None = None,
+    review_override_reason: str | None = None,
+) -> "ReviewResponse":
     """Run the review pipeline (storage backend resolved automatically:
     Postgres if ``ARGUS_DB_URL`` is set, HTTP shim if the storage URLs are
     set, else local SQLite)."""
     from argus.graph import run_review
 
-    return await run_review(request, flow_run_id=None)
+    return await run_review(
+        request,
+        flow_run_id=None,
+        review_override_sha=review_override_sha,
+        review_override_reason=review_override_reason,
+    )
 
 
 # Sentinel distinguishing "--specialist-model/--frontier-model not passed at
@@ -336,6 +345,23 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
             "Set a commit status on the head SHA (context 'argus/review', "
             "success iff verdict is APPROVE). Same token rules as --post."
         ),
+    )
+    parser.add_argument(
+        "--review-override-sha",
+        dest="review_override_sha",
+        default=None,
+        help=(
+            "Human exception: allow a multi-behavior PR or a reviewer plan over the dispatch "
+            "budget (up to the hard ceiling of 50) to proceed. Must equal the 40-character "
+            "lowercase HEAD SHA being reviewed, and needs --review-override-reason. Never "
+            "overrides an unverified scope or the gap-fill cap."
+        ),
+    )
+    parser.add_argument(
+        "--review-override-reason",
+        dest="review_override_reason",
+        default=None,
+        help="Reason for --review-override-sha (1-500 characters); recorded in the scope receipt.",
     )
     parser.add_argument(
         "--no-prompt-overrides",
@@ -457,6 +483,12 @@ def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namesp
     """Cross-flag validation that argparse's own declarative options can't express."""
     if args.post and args.sha and not args.pr:
         parser.error("--post requires --pr (a PR to comment on); --sha alone has nowhere to post")
+    from argus.scope import validate_override
+
+    try:
+        validate_override(args.review_override_sha, args.review_override_reason)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def _check_prerequisites() -> None:
@@ -545,7 +577,8 @@ def _post_review(repo: str, args: argparse.Namespace, response: "ReviewResponse"
             sys.exit(1)
 
     if args.commit_status:
-        sha = args.sha
+        # A halt targets the head it was computed for, never a re-read (possibly newer) head.
+        sha = response.halt.head_sha if response.halt else args.sha
         if not sha and args.pr:
             pr = client.get_pull_request(repo, args.pr)
             sha = pr["head_sha"]
@@ -553,7 +586,11 @@ def _post_review(repo: str, args: argparse.Namespace, response: "ReviewResponse"
             logger.error("--commit-status could not resolve a head SHA (need --pr or --sha)")
             sys.exit(1)
         state = "success" if response.verdict.value == "APPROVE" else "failure"
-        description = f"Argus: {response.verdict.value} ({response.risk_level.value} risk)"
+        description = (
+            f"Argus: HALT {response.halt.code}"
+            if response.halt
+            else f"Argus: {response.verdict.value} ({response.risk_level.value} risk)"
+        )
         try:
             client.set_commit_status(repo, sha, state, description)
         except Exception as exc:  # noqa: BLE001 — surface any GitHub API error clearly
@@ -633,7 +670,13 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 
     start = time.monotonic()
     try:
-        response = asyncio.run(run(request))
+        response = asyncio.run(
+            run(
+                request,
+                review_override_sha=args.review_override_sha,
+                review_override_reason=args.review_override_reason,
+            )
+        )
     except HistoryBackendConnectivityError as exc:
         # Same clean-exit treatment as _check_settings' missing-secrets
         # case -- a bad ARGUS_DB_URL/ARGUS_HISTORY_DB_PATH is a config

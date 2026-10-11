@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 _PACKAGE = "argus.prompts"
 
-# The 20 prompt names actually referenced at runtime: 11 fetched via a
+# The 21 prompt names actually referenced at runtime: 12 fetched via a
 # literal `fetch_prompt("...")` call (see argus/graph.py, argus/runners.py)
 # plus 9 specialist prompts reached indirectly through
 # `runners._SPECIALIST_PROMPT_MAP`. Deliberately excludes
@@ -50,7 +50,7 @@ _PACKAGE = "argus.prompts"
 # not part of the per-PR pipeline this package runs.
 REQUIRED_PROMPTS: frozenset[str] = frozenset(
     {
-        # Static call sites (11)
+        # Static call sites (12)
         "pr-review-subagent",
         "pr-review-prior-art",
         "pr-review-cross-cutting",
@@ -61,6 +61,7 @@ REQUIRED_PROMPTS: frozenset[str] = frozenset(
         "pr-review-coverage-check",
         "pr-review-writer",
         "pr-review-preflight-router",
+        "pr-review-scope",
         "pr-review-lite",
         # Specialist prompts (9), reached via _SPECIALIST_PROMPT_MAP
         "pr-review-specialist-security",

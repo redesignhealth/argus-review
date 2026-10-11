@@ -125,10 +125,13 @@ class HttpStorageClient:
             raise HttpStorageError(f"GET {url} failed: {type(exc).__name__}: {exc}") from exc
         payload: dict[str, Any] = response.json()
         parsed = ListReviewRoundsResponse.model_validate(payload)
-        if not parsed.rounds:
+        # A halted round is stored with verdict=NULL; like the SQL backends, never count
+        # or return it as a completed round.
+        rounds = [r for r in parsed.rounds if r.verdict is not None]
+        if not rounds:
             return None, 0
         # Contract requires DESC ordering, so rounds[0] is the latest.
-        return parsed.rounds[0], len(parsed.rounds)
+        return rounds[0], len(rounds)
 
     async def write_round(
         self,

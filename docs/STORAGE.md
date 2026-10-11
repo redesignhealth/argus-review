@@ -67,6 +67,12 @@ The canonical schema is in `schema/*.sql` in this repo. Apply them in order:
   on. **Must be applied before deploying code that does the initial
   running-state INSERT** — it's a hard ordering dependency, not just a
   convenience migration.
+- **Halted rounds.** A scope or workload halt is stored with
+  `verdict = NULL` and `current_stage = 'completed'`; `result_json` holds
+  the full response including `halt`. Every read that finds the prior round
+  filters on `verdict IS NOT NULL` (Postgres, SQLite, and the HTTP client),
+  so a halt never moves the last reviewed SHA or the round count. This needs
+  no schema change: migration 011 already made `verdict` nullable.
 - `schema/015_create_agent_runs.sql` — creates `agent_runs`, one row per
   sub-agent per review round, foreign-keyed to `code_reviews.id` with
   `ON DELETE CASCADE`.
@@ -157,6 +163,10 @@ operations the pipeline needs, nothing more.
   `blocking_count`, `suggestion_count`, `review_comment`, `result_json`,
   `cost_usd`, `duration_seconds`, `reviewer_version`, `orchestrator_model`,
   `subagent_model`, `sha`, `base_ref`, `current_stage`.
+- `verdict` is `null` for a halted round. Your backend must accept it, and
+  the client drops `verdict: null` rounds from the GET response before it
+  picks the latest round and the count. This is verified against mocked
+  responses only, not a live backend.
 - The client validates that the payload's `repo`/`pr_number` match the URL
   path before sending — a mismatch is rejected client-side rather than
   waiting for your server to 400 on it.

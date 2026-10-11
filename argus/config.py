@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of truth for the reviewer-subprocess wall-clock budget.
@@ -60,6 +61,10 @@ class Settings(BaseSettings):
             name the way prompts are, so there's nothing to merge. Only
             consulted when the ``prechecks`` extra is installed; see
             ``argus.precheck``.
+        ARGUS_REVIEWER_DISPATCH_BUDGET: Maximum reviewers one round may dispatch
+            (system groups, their specialists, plus 2 always-on). Default 16,
+            allowed 3-50. A plan over the budget halts with
+            ``dispatch_budget_exceeded``; the hard ceiling of 50 never moves.
         ARGUS_STOCK_SEMGREP_PACKS: Comma-separated semgrep registry pack IDs
             (e.g. ``"p/secrets"``) to run alongside (or instead of) a custom
             ``ARGUS_RULES_DIR`` -- unlike a local rules directory, each pack
@@ -188,6 +193,8 @@ class Settings(BaseSettings):
     ARGUS_CONTEXT7_BASE_URL: str | None = None
 
     ARGUS_SESSION_TIMEOUT: int = DEFAULT_ARGUS_SESSION_TIMEOUT_S
+
+    ARGUS_REVIEWER_DISPATCH_BUDGET: int = Field(16, ge=3, le=50)
 
     ARGUS_BENCH_FILE: str | None = None
     ARGUS_NO_BENCH_OVERRIDES: bool = False

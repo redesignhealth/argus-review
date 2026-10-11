@@ -8,7 +8,7 @@ service implementation must agree on.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -162,6 +162,44 @@ class DroppedFinding(BaseModel):
     )
 
 
+class ScopeBehavior(BaseModel):
+    """One independently mergeable behavior within a PR."""
+
+    title: str = Field(description="Unique behavior title within the receipt")
+    files: list[str] = Field(default_factory=list)
+    depends_on: list[str] = Field(
+        default_factory=list, description="Titles of behaviors this one depends on"
+    )
+
+
+class ScopeReceipt(BaseModel):
+    """Pipeline-generated proof that the full PR was scope-checked at a pinned head."""
+
+    base_sha: str
+    head_sha: str
+    behaviors: list[ScopeBehavior] = Field(default_factory=list)
+    rationale: str = ""
+    override_reason: Optional[str] = Field(
+        None, description="Human override reason when the gate was explicitly overridden"
+    )
+
+
+HaltCode = Literal[
+    "scope_split", "scope_unverified", "dispatch_budget_exceeded", "gap_fill_cap_exceeded"
+]
+
+
+class ReviewHalt(BaseModel):
+    """Pipeline-generated stop: the review ended before a normal verdict (always BLOCKING)."""
+
+    code: HaltCode
+    detail: str
+    head_sha: str
+    split_suggestions: list[ScopeBehavior] = Field(default_factory=list)
+    dispatch_count: Optional[int] = None
+    dispatch_budget: Optional[int] = None
+
+
 class ReviewResponse(BaseModel):
     """POST /review response body."""
 
@@ -209,4 +247,11 @@ class ReviewResponse(BaseModel):
     stage_seconds: dict[str, float] = Field(
         default_factory=dict,
         description="Per-stage wall-clock seconds for this round, keyed like stage_costs",
+    )
+    scope: Optional[ScopeReceipt] = Field(
+        None, description="Scope receipt set by the pipeline; never LLM-generated"
+    )
+    halt: Optional[ReviewHalt] = Field(
+        None,
+        description="Set when the pipeline halted before a normal verdict; never LLM-generated",
     )

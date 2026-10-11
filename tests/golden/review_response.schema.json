@@ -22,14 +22,12 @@
     "Finding": {
       "description": "A single review finding.",
       "properties": {
+        "severity": {
+          "$ref": "#/$defs/Severity"
+        },
         "category": {
           "description": "Review category: code-correctness, security, cross-layer, test-adequacy, cross-cutting, deterministic-precheck (a candidate-rule hit from a deterministic scanner such as semgrep/zizmor), coverage-gap (a reviewer session or scanner that timed out or crashed, synthesized by helpers.build_degraded_coverage_findings -- not a real code-quality finding), argus-self-config (a modification to Argus's own reviewer bench configuration)",
           "title": "Category",
-          "type": "string"
-        },
-        "description": {
-          "description": "Human-readable description of the finding",
-          "title": "Description",
           "type": "string"
         },
         "file": {
@@ -58,8 +56,10 @@
           "description": "Line number, if applicable",
           "title": "Line"
         },
-        "severity": {
-          "$ref": "#/$defs/Severity"
+        "description": {
+          "description": "Human-readable description of the finding",
+          "title": "Description",
+          "type": "string"
         },
         "suggestion": {
           "anyOf": [
@@ -86,6 +86,11 @@
     "PriorFeedbackItem": {
       "description": "Status of a prior-round finding after verification.",
       "properties": {
+        "severity": {
+          "description": "Original severity: BLOCKING or SUGGESTION",
+          "title": "Severity",
+          "type": "string"
+        },
         "description": {
           "description": "Original finding description",
           "title": "Description",
@@ -103,20 +108,15 @@
           "default": null,
           "title": "File"
         },
+        "status": {
+          "description": "RESOLVED, UNRESOLVED, or REGRESSED",
+          "title": "Status",
+          "type": "string"
+        },
         "rationale": {
           "default": "",
           "description": "Why this status was assigned",
           "title": "Rationale",
-          "type": "string"
-        },
-        "severity": {
-          "description": "Original severity: BLOCKING or SUGGESTION",
-          "title": "Severity",
-          "type": "string"
-        },
-        "status": {
-          "description": "RESOLVED, UNRESOLVED, or REGRESSED",
-          "title": "Status",
           "type": "string"
         }
       },
@@ -126,6 +126,67 @@
         "status"
       ],
       "title": "PriorFeedbackItem",
+      "type": "object"
+    },
+    "ReviewHalt": {
+      "description": "Pipeline-generated stop: the review ended before a normal verdict (always BLOCKING).",
+      "properties": {
+        "code": {
+          "enum": [
+            "scope_split",
+            "scope_unverified",
+            "dispatch_budget_exceeded",
+            "gap_fill_cap_exceeded"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "head_sha": {
+          "title": "Head Sha",
+          "type": "string"
+        },
+        "split_suggestions": {
+          "items": {
+            "$ref": "#/$defs/ScopeBehavior"
+          },
+          "title": "Split Suggestions",
+          "type": "array"
+        },
+        "dispatch_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dispatch Count"
+        },
+        "dispatch_budget": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dispatch Budget"
+        }
+      },
+      "required": [
+        "code",
+        "detail",
+        "head_sha"
+      ],
+      "title": "ReviewHalt",
       "type": "object"
     },
     "RiskLevel": {
@@ -139,6 +200,80 @@
       "title": "RiskLevel",
       "type": "string"
     },
+    "ScopeBehavior": {
+      "description": "One independently mergeable behavior within a PR.",
+      "properties": {
+        "title": {
+          "description": "Unique behavior title within the receipt",
+          "title": "Title",
+          "type": "string"
+        },
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "depends_on": {
+          "description": "Titles of behaviors this one depends on",
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "ScopeBehavior",
+      "type": "object"
+    },
+    "ScopeReceipt": {
+      "description": "Pipeline-generated proof that the full PR was scope-checked at a pinned head.",
+      "properties": {
+        "base_sha": {
+          "title": "Base Sha",
+          "type": "string"
+        },
+        "head_sha": {
+          "title": "Head Sha",
+          "type": "string"
+        },
+        "behaviors": {
+          "items": {
+            "$ref": "#/$defs/ScopeBehavior"
+          },
+          "title": "Behaviors",
+          "type": "array"
+        },
+        "rationale": {
+          "default": "",
+          "title": "Rationale",
+          "type": "string"
+        },
+        "override_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human override reason when the gate was explicitly overridden",
+          "title": "Override Reason"
+        }
+      },
+      "required": [
+        "base_sha",
+        "head_sha"
+      ],
+      "title": "ScopeReceipt",
+      "type": "object"
+    },
     "Severity": {
       "description": "Finding severity \u2014 only two levels by design.\n\nBLOCKING = runtime failures and security vulnerabilities only.\nSUGGESTION = everything else.",
       "enum": [
@@ -151,13 +286,10 @@
     "SystemCoverage": {
       "description": "Coverage status for a reviewed system group.",
       "properties": {
-        "checks_performed": {
-          "description": "What conventions/patterns were checked",
-          "items": {
-            "type": "string"
-          },
-          "title": "Checks Performed",
-          "type": "array"
+        "system": {
+          "description": "System group name, e.g. 'Review service orchestrator'",
+          "title": "System",
+          "type": "string"
         },
         "files_explored": {
           "description": "Files the subagent read",
@@ -167,10 +299,13 @@
           "title": "Files Explored",
           "type": "array"
         },
-        "system": {
-          "description": "System group name, e.g. 'Review service orchestrator'",
-          "title": "System",
-          "type": "string"
+        "checks_performed": {
+          "description": "What conventions/patterns were checked",
+          "items": {
+            "type": "string"
+          },
+          "title": "Checks Performed",
+          "type": "array"
         }
       },
       "required": [
@@ -182,22 +317,6 @@
     "TokenUsage": {
       "description": "Aggregated token usage across orchestrator + all subagents.",
       "properties": {
-        "cache_creation_tokens": {
-          "default": 0,
-          "title": "Cache Creation Tokens",
-          "type": "integer"
-        },
-        "cache_read_tokens": {
-          "default": 0,
-          "title": "Cache Read Tokens",
-          "type": "integer"
-        },
-        "cost_usd": {
-          "default": 0.0,
-          "description": "Estimated total cost in USD",
-          "title": "Cost Usd",
-          "type": "number"
-        },
         "input_tokens": {
           "default": 0,
           "title": "Input Tokens",
@@ -207,6 +326,22 @@
           "default": 0,
           "title": "Output Tokens",
           "type": "integer"
+        },
+        "cache_read_tokens": {
+          "default": 0,
+          "title": "Cache Read Tokens",
+          "type": "integer"
+        },
+        "cache_creation_tokens": {
+          "default": 0,
+          "title": "Cache Creation Tokens",
+          "type": "integer"
+        },
+        "cost_usd": {
+          "default": 0.0,
+          "description": "Estimated total cost in USD",
+          "title": "Cost Usd",
+          "type": "number"
         }
       },
       "title": "TokenUsage",
@@ -224,11 +359,17 @@
   },
   "description": "POST /review response body.",
   "properties": {
-    "coverage_map": {
+    "verdict": {
+      "$ref": "#/$defs/Verdict"
+    },
+    "risk_level": {
+      "$ref": "#/$defs/RiskLevel"
+    },
+    "findings": {
       "items": {
-        "$ref": "#/$defs/SystemCoverage"
+        "$ref": "#/$defs/Finding"
       },
-      "title": "Coverage Map",
+      "title": "Findings",
       "type": "array"
     },
     "dropped_findings": {
@@ -239,18 +380,20 @@
       "title": "Dropped Findings",
       "type": "array"
     },
-    "findings": {
+    "prior_feedback": {
+      "description": "Verification status of prior-round findings (empty for round 1)",
       "items": {
-        "$ref": "#/$defs/Finding"
+        "$ref": "#/$defs/PriorFeedbackItem"
       },
-      "title": "Findings",
+      "title": "Prior Feedback",
       "type": "array"
     },
-    "lite_mode": {
-      "default": false,
-      "description": "True if this review was performed in lite mode (single-pass check)",
-      "title": "Lite Mode",
-      "type": "boolean"
+    "coverage_map": {
+      "items": {
+        "$ref": "#/$defs/SystemCoverage"
+      },
+      "title": "Coverage Map",
+      "type": "array"
     },
     "notes_for_next_round": {
       "anyOf": [
@@ -265,19 +408,16 @@
       "description": "Structured notes for the next review round (coverage map + findings with status)",
       "title": "Notes For Next Round"
     },
-    "preflight_reason": {
-      "default": "",
-      "description": "Preflight routing reason \u2014 stored in result_json for lite round history",
-      "title": "Preflight Reason",
+    "review_comment": {
+      "description": "Formatted markdown comment ready to post on the PR",
+      "title": "Review Comment",
       "type": "string"
     },
-    "prior_feedback": {
-      "description": "Verification status of prior-round findings (empty for round 1)",
-      "items": {
-        "$ref": "#/$defs/PriorFeedbackItem"
-      },
-      "title": "Prior Feedback",
-      "type": "array"
+    "review_round": {
+      "default": 1,
+      "description": "Which review round this is (1 = first review, 2+ = incremental)",
+      "title": "Review Round",
+      "type": "integer"
     },
     "prior_review_id": {
       "anyOf": [
@@ -292,19 +432,20 @@
       "description": "UUID of the prior review this round builds on (None for round 1)",
       "title": "Prior Review Id"
     },
-    "review_comment": {
-      "description": "Formatted markdown comment ready to post on the PR",
-      "title": "Review Comment",
+    "usage": {
+      "$ref": "#/$defs/TokenUsage"
+    },
+    "lite_mode": {
+      "default": false,
+      "description": "True if this review was performed in lite mode (single-pass check)",
+      "title": "Lite Mode",
+      "type": "boolean"
+    },
+    "preflight_reason": {
+      "default": "",
+      "description": "Preflight routing reason \u2014 stored in result_json for lite round history",
+      "title": "Preflight Reason",
       "type": "string"
-    },
-    "review_round": {
-      "default": 1,
-      "description": "Which review round this is (1 = first review, 2+ = incremental)",
-      "title": "Review Round",
-      "type": "integer"
-    },
-    "risk_level": {
-      "$ref": "#/$defs/RiskLevel"
     },
     "stage_costs": {
       "additionalProperties": {
@@ -322,11 +463,29 @@
       "title": "Stage Seconds",
       "type": "object"
     },
-    "usage": {
-      "$ref": "#/$defs/TokenUsage"
+    "scope": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScopeReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Scope receipt set by the pipeline; never LLM-generated"
     },
-    "verdict": {
-      "$ref": "#/$defs/Verdict"
+    "halt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReviewHalt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set when the pipeline halted before a normal verdict; never LLM-generated"
     }
   },
   "required": [

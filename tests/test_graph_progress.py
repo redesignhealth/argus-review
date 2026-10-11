@@ -19,6 +19,16 @@ _GH_CLIENT_CLASS = "argus.github_client.GitHubClient"
 _PROVISIONED_WORKTREE = f"{_GRAPH_MODULE}.provisioned_worktree"
 
 _FAKE_SHA = "a" * 40
+# What a successful pipeline always leaves in graph state: the pinned head and a receipt.
+_SCOPED_STATE = {
+    "head_sha": _FAKE_SHA,
+    "scope": {
+        "base_sha": "b" * 40,
+        "head_sha": _FAKE_SHA,
+        "behaviors": [{"title": "t", "files": ["x.py"], "depends_on": []}],
+        "rationale": "one behavior",
+    },
+}
 
 
 def _mock_gh_client() -> MagicMock:
@@ -71,6 +81,7 @@ class TestRunReviewThreadId:
         mock_graph.ainvoke.return_value = {
             "response": mock_response.model_dump(),
             "findings": [],
+            **_SCOPED_STATE,
         }
 
         mock_session = AsyncMock()
@@ -156,7 +167,7 @@ class TestRunReviewWorktreeThreading:
         mock_graph.ainvoke.return_value = {
             "response": mock_response.model_dump(),
             "findings": [],
-            "head_sha": _FAKE_SHA,
+            **_SCOPED_STATE,
         }
         mock_session = AsyncMock()
         mock_session_ctx = MagicMock()
@@ -264,6 +275,7 @@ class TestRunReviewFinalization:
         mock_graph.ainvoke.return_value = {
             "response": mock_response.model_dump(),
             "findings": [],
+            **_SCOPED_STATE,
         }
 
         mock_session = AsyncMock()
@@ -557,6 +569,7 @@ class TestRunReviewAgentRuns:
         graph_result: dict[str, Any] = {
             "response": mock_response.model_dump(),
             "findings": [],
+            **_SCOPED_STATE,
         }
         if include_agent_runs:
             graph_result["agent_runs"] = [self._make_agent_run_dict()]
@@ -892,6 +905,7 @@ class TestRunReviewMaxConcurrency:
         mock_graph.ainvoke.return_value = {
             "response": mock_response.model_dump(),
             "findings": [],
+            **_SCOPED_STATE,
         }
 
         mock_session = AsyncMock()
@@ -926,157 +940,160 @@ class TestRunReviewMaxConcurrency:
 
 
 # ---------------------------------------------------------------------------
-# _edge_fan_out_reviewers: agent-count ceiling
+# Dispatch budget / gap-fill cap: stop, never truncate
 # ---------------------------------------------------------------------------
 
+_HEAD = "c" * 40
 
-class TestEdgeFanOutReviewersCeiling:
-    """When the plan produces more than _MAX_REVIEWER_FANOUT system groups,
-    the fan-out list must be truncated to exactly _MAX_REVIEWER_FANOUT."""
 
-    def _make_state_with_n_groups(self, n: int) -> Any:
-        """Build a minimal ReviewState dict with n system groups (no specialists)."""
-        from argus.pipeline_models import FileEntry, ReviewPlan, SystemGroup
+def _plan_with(n_groups: int, specialists: int = 0) -> Any:
+    from argus.pipeline_models import FileEntry, ReviewPlan, SystemGroup
 
-        groups = [
+    return ReviewPlan(
+        system_groups=[
             SystemGroup(
                 name=f"group-{i}",
                 files=[f"file_{i}.py"],
                 conventions="",
                 review_focus="check it",
-                specialists_needed=[],
+                specialists_needed=["security"] * specialists,
             )
-            for i in range(n)
-        ]
-        plan = ReviewPlan(
-            system_groups=groups,
-            cross_cutting_concerns=[],
-            file_manifest=[
-                FileEntry(path=f"file_{i}.py", change_type="modified") for i in range(n)
-            ],
-        )
-        from argus.models import ReviewRequest
+            for i in range(n_groups)
+        ],
+        cross_cutting_concerns=[],
+        file_manifest=[
+            FileEntry(path=f"file_{i}.py", change_type="modified") for i in range(n_groups)
+        ],
+    )
 
-        return {
-            "plan": plan.model_dump(),
-            "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new",
-            "request": ReviewRequest(repo="org/repo", pr_number=1).model_dump(),
-            "prior_review": {},
+
+def _plan_state() -> Any:
+    from argus.models import ReviewRequest
+
+    return {
+        "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new",
+        "description": "d",
+        "head_sha": _HEAD,
+        "request": ReviewRequest(repo="org/repo", pr_number=1).model_dump(),
+        "prior_review": {},
+        "scope": {"base_sha": "b" * 40, "head_sha": _HEAD, "behaviors": [], "rationale": ""},
+    }
+
+
+async def _run_plan(plan: Any, *, budget: int = 16, override: bool = False) -> tuple[Any, Any]:
+    """Run _node_plan then the fan-out edge exactly as the graph would."""
+    from types import SimpleNamespace
+
+    from argus.graph import _edge_fan_out_reviewers, _node_plan
+
+    config: Any = {
+        "configurable": {
+            "review_override_sha": _HEAD if override else None,
+            "review_override_reason": "approved by human" if override else None,
         }
+    }
+    with (
+        patch(f"{_GRAPH_MODULE}.plan_review", AsyncMock(return_value=plan)),
+        patch(
+            f"{_GRAPH_MODULE}.get_settings",
+            return_value=SimpleNamespace(ARGUS_REVIEWER_DISPATCH_BUDGET=budget),
+        ),
+    ):
+        update = await _node_plan(_plan_state(), config)
+    merged: Any = {**_plan_state(), **update}
+    return update, _edge_fan_out_reviewers(merged)
 
-    def test_fanout_truncated_to_cap(self) -> None:
-        """With 60 system groups, _edge_fan_out_reviewers must return exactly
-        _MAX_REVIEWER_FANOUT Sends, not 60+2 (cross-cutting + tests-and-docs)."""
-        from argus.graph import _MAX_REVIEWER_FANOUT, _edge_fan_out_reviewers
 
-        state = self._make_state_with_n_groups(60)
-        result = _edge_fan_out_reviewers(state)
-        assert len(result) == _MAX_REVIEWER_FANOUT
-
-    def test_fanout_not_truncated_when_under_cap(self) -> None:
-        """With fewer groups than the cap, all Sends are returned unchanged."""
-        from argus.graph import _MAX_REVIEWER_FANOUT, _edge_fan_out_reviewers
-
-        # 3 groups -> 3 system + 1 cross-cutting + 1 tests-and-docs = 5 sends
-        state = self._make_state_with_n_groups(3)
-        result = _edge_fan_out_reviewers(state)
-        assert len(result) == 5
-        assert len(result) <= _MAX_REVIEWER_FANOUT
-
-    def test_fanout_always_preserves_protected_reviewers(self) -> None:
-        """BLOCKING regression: with 60 groups (exceeding the cap), the cap must
-        never drop the always-on cross_cutting and tests_and_docs reviewers.
-
-        Old sends[:50] logic would truncate from the end and silently remove
-        cross_cutting and tests_and_docs (appended last). The fix uses an explicit
-        cappable set (_CAPPABLE_REVIEWER_TYPES) so only plan-driven reviewers are
-        subject to the ceiling, and always-on singletons are preserved by default.
-        """
-        from argus.graph import _MAX_REVIEWER_FANOUT, _edge_fan_out_reviewers
-
-        state = self._make_state_with_n_groups(60)
-        result = _edge_fan_out_reviewers(state)
-
-        # Total must still respect the cap
-        assert len(result) <= _MAX_REVIEWER_FANOUT
-
-        # Always-on reviewers must be present regardless of group count
-        reviewer_types = [s.arg.get("reviewer_type") for s in result]
-        assert "cross_cutting" in reviewer_types, (
-            "cross_cutting reviewer was dropped by fan-out cap - security review missing"
+class TestPlanNodeDispatchHalt:
+    @pytest.mark.asyncio
+    async def test_over_budget_halts_and_emits_no_reviewer(self) -> None:
+        update, routed = await _run_plan(_plan_with(15))  # 15 + 2 = 17 > 16
+        halt = update["response"]["halt"]
+        assert (halt["code"], halt["dispatch_count"], halt["dispatch_budget"]) == (
+            "dispatch_budget_exceeded",
+            17,
+            16,
         )
-        assert "tests_and_docs" in reviewer_types, (
-            "tests_and_docs reviewer was dropped by fan-out cap - test-coverage review missing"
-        )
+        assert halt["head_sha"] == _HEAD
+        assert update["response"]["verdict"] == "BLOCKING"
+        assert update["response"]["risk_level"] == "HIGH"
+        assert update["response"]["findings"] == []
+        assert routed == "__end__"
 
-    def test_cappable_set_excludes_feedback_verifier_style_sends(self) -> None:
-        """Sends with no reviewer_type key (feedback-verifier style) must be
-        classified as protected (not cappable) under the explicit cappable-set logic.
+    @pytest.mark.asyncio
+    async def test_at_budget_dispatches_everything(self) -> None:
+        update, routed = await _run_plan(_plan_with(14))  # 16 == budget
+        assert "response" not in update
+        assert len(routed) == 16
 
-        This guards against the allow-list regression: if the protection logic
-        were an allow-list of known protected types, a Send without any
-        reviewer_type would become cap-eligible and could be dropped silently.
-        The cappable set must be an explicit deny-list so unknown or future
-        always-on reviewer types default to protected.
-        """
-        from argus.graph import _CAPPABLE_REVIEWER_TYPES
-        from langgraph.types import Send
+    @pytest.mark.asyncio
+    async def test_specialists_count_toward_budget(self) -> None:
+        update, _ = await _run_plan(_plan_with(5, specialists=2))  # 15 + 2 = 17
+        assert update["response"]["halt"]["dispatch_count"] == 17
 
-        # Feedback-verifier sends carry no reviewer_type key at all
-        fv_send = Send("run_reviewer", {"diff": "x", "findings": []})
-        assert fv_send.arg.get("reviewer_type") not in _CAPPABLE_REVIEWER_TYPES, (
-            "A Send with no reviewer_type must not be in the cappable set - "
-            "it would be silently dropped under the fan-out cap"
-        )
+    @pytest.mark.asyncio
+    async def test_configured_budget_is_used(self) -> None:
+        update, _ = await _run_plan(_plan_with(2), budget=3)  # 4 > 3
+        assert update["response"]["halt"]["dispatch_budget"] == 3
 
-        # Explicitly verify the known always-on types are also not cappable
-        for always_on_type in ("cross_cutting", "tests_and_docs"):
-            assert always_on_type not in _CAPPABLE_REVIEWER_TYPES, (
-                f"{always_on_type} must not be cappable"
-            )
+    @pytest.mark.asyncio
+    async def test_override_allows_up_to_hard_ceiling_without_truncation(self) -> None:
+        update, routed = await _run_plan(_plan_with(48), override=True)  # exactly 50
+        assert "response" not in update
+        assert len(routed) == 50
+        assert update["scope"]["override_reason"] == "approved by human"
 
-        # And verify the plan-driven types ARE cappable
-        for plan_driven_type in ("system", "specialist"):
-            assert plan_driven_type in _CAPPABLE_REVIEWER_TYPES, (
-                f"{plan_driven_type} must be cappable (plan-driven, potentially unbounded)"
-            )
+    @pytest.mark.asyncio
+    async def test_over_hard_ceiling_halts_even_with_override(self) -> None:
+        for n_groups in (49, 60):
+            update, routed = await _run_plan(_plan_with(n_groups), override=True)
+            assert update["response"]["halt"]["code"] == "dispatch_budget_exceeded"
+            assert routed == "__end__"
+
+    @pytest.mark.asyncio
+    async def test_override_pinned_to_other_head_is_ignored(self) -> None:
+        from argus.graph import _node_plan
+
+        config: Any = {
+            "configurable": {"review_override_sha": "d" * 40, "review_override_reason": "stale"}
+        }
+        with patch(f"{_GRAPH_MODULE}.plan_review", AsyncMock(return_value=_plan_with(20))):
+            update = await _node_plan(_plan_state(), config)
+        assert update["response"]["halt"]["code"] == "dispatch_budget_exceeded"
 
 
-# ---------------------------------------------------------------------------
-# _edge_fan_out_gap_fills: agent-count ceiling
-# ---------------------------------------------------------------------------
-
-
-class TestEdgeFanOutGapFillsCeiling:
-    """When there are more coverage gaps than _MAX_REVIEWER_FANOUT, the
-    gap-fill fan-out list must be truncated to exactly _MAX_REVIEWER_FANOUT."""
-
-    def _make_gap_fill_state(self, n_gaps: int) -> Any:
-        """Build a minimal ReviewState dict with n coverage gaps."""
+class TestCoverageGapHalt:
+    async def _coverage(self, n_gaps: int) -> tuple[Any, Any]:
+        from argus.graph import _edge_coverage_decision, _node_check_coverage
         from argus.pipeline_models import CoverageGap, CoverageResult
 
-        gaps = [
-            CoverageGap(files=[f"file_{i}.py"], reason=f"not reviewed ({i})") for i in range(n_gaps)
-        ]
-        coverage = CoverageResult(is_covered=False, gaps=gaps)
-        return {
-            "coverage": coverage.model_dump(),
-            "diff": "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new",
-        }
+        coverage = CoverageResult(
+            is_covered=False,
+            gaps=[CoverageGap(files=[f"f{i}.py"], reason="missed") for i in range(n_gaps)],
+        )
+        state = {**_plan_state(), "plan": _plan_with(1).model_dump(), "findings": []}
+        with patch(f"{_GRAPH_MODULE}.check_coverage", AsyncMock(return_value=coverage)):
+            update = await _node_check_coverage(state)
+        merged: Any = {**state, **update}
+        return update, _edge_coverage_decision(merged)
 
-    def test_gap_fill_truncated_to_cap(self) -> None:
-        """With more gaps than _MAX_REVIEWER_FANOUT, the result is capped."""
-        from argus.graph import _MAX_REVIEWER_FANOUT, _edge_fan_out_gap_fills
+    @pytest.mark.asyncio
+    async def test_over_50_gaps_halts_before_dispatch(self) -> None:
+        update, route = await self._coverage(51)
+        halt = update["response"]["halt"]
+        assert (halt["code"], halt["dispatch_count"], halt["dispatch_budget"]) == (
+            "gap_fill_cap_exceeded",
+            51,
+            50,
+        )
+        assert route == "__end__"
 
-        state = self._make_gap_fill_state(60)
-        result = _edge_fan_out_gap_fills(state)
-        assert len(result) == _MAX_REVIEWER_FANOUT
+    @pytest.mark.asyncio
+    async def test_exactly_50_gaps_dispatches_all(self) -> None:
+        from argus.graph import _edge_fan_out_gap_fills
 
-    def test_gap_fill_not_truncated_when_under_cap(self) -> None:
-        """With fewer gaps than the cap, all gap-fill Sends are returned."""
-        from argus.graph import _MAX_REVIEWER_FANOUT, _edge_fan_out_gap_fills
-
-        state = self._make_gap_fill_state(3)
-        result = _edge_fan_out_gap_fills(state)
-        assert len(result) == 3
-        assert len(result) <= _MAX_REVIEWER_FANOUT
+        update, route = await self._coverage(50)
+        assert "response" not in update
+        assert route == "fill_gaps"
+        sends = _edge_fan_out_gap_fills({"coverage": update["coverage"], "diff": "d"})
+        assert len(sends) == 50
