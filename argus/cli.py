@@ -577,8 +577,9 @@ def _post_review(repo: str, args: argparse.Namespace, response: "ReviewResponse"
             sys.exit(1)
 
     if args.commit_status:
-        # A halt targets the head it was computed for, never a re-read (possibly newer) head.
-        sha = response.halt.head_sha if response.halt else args.sha
+        # Post to the head that was reviewed; a re-read head could approve an unreviewed commit.
+        pinned = response.halt or response.scope
+        sha = pinned.head_sha if pinned else args.sha
         if not sha and args.pr:
             pr = client.get_pull_request(repo, args.pr)
             sha = pr["head_sha"]

@@ -239,6 +239,7 @@ class ReviewState(TypedDict, total=False):
     response: dict[str, Any]
     validation: dict[str, Any]  # FindingValidationResult (empty if no BLOCKINGs)
     base_branch: str  # PR base branch (or SHA-mode base_ref) used for the scope gate
+    scope_base_sha: str | None  # merge base pinned once in fetch_diff; None if unresolvable
     scope: dict[str, Any]  # ScopeReceipt dict, set by scope_gate
     is_lite: bool  # True when preflight routed to lite review
     is_catchup_merge: bool  # True when _is_catchup_merge_only confirmed a structural catch-up
@@ -721,8 +722,9 @@ async def _fetch_full_pr_changed_files(
     head_sha: str,
     round_diff: str,
     prior_sha: str | None = None,
+    base_sha: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Return the set of changed files across the full PR (base_branch...head_sha)
+    """Return the set of changed files across the full PR (``base_sha`` if pinned, else base_branch...head_sha)
     along with statuses and patches, and an unconfirmed reason string if completeness
     could not be guaranteed.
 
@@ -740,7 +742,7 @@ async def _fetch_full_pr_changed_files(
 
         settings = get_settings()
         gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
-        base = base_branch
+        base = base_sha or base_branch
         head = head_sha
 
         last_error: Exception | None = None
@@ -1848,24 +1850,30 @@ def _override_reason(state: ReviewState, config: RunnableConfig | None) -> str |
     )
 
 
-def _fetch_scope_manifest(
-    repo: str, base_branch: str, head_sha: str
-) -> tuple[str, list[dict[str, Any]]]:
-    """Pinned full-PR manifest: ``merge_base..head_sha``, never an unpinned fallback.
+def _pin_scope_base(repo: str, base_branch: str, head_sha: str) -> str | None:
+    """Resolve the merge base once per run; ``None`` (never a guess) if it cannot be pinned."""
+    from argus.github_client import GitHubClient
 
-    The bench guard fetches ``base_branch...head_sha`` separately; both resolve to the same
-    merge base unless the base branch moves between the two calls.
-    """
+    try:
+        gh = GitHubClient(token=get_settings().GITHUB_TOKEN_RO)
+        merge_base = gh.get_compare_metadata(repo, base_branch, head_sha)["merge_base_sha"]
+    except Exception:  # noqa: BLE001 -- the scope gate halts on None
+        logger.warning("Could not pin merge base for %s", repo, exc_info=True)
+        return None
+    return merge_base if isinstance(merge_base, str) and _SHA40_RE.fullmatch(merge_base) else None
+
+
+def _fetch_scope_manifest(
+    repo: str, base_sha: str, head_sha: str
+) -> tuple[str, list[dict[str, Any]]]:
+    """Full-PR manifest ``base_sha..head_sha`` for the already-pinned base (no refetch)."""
     from argus.github_client import GitHubClient
 
     gh = GitHubClient(token=get_settings().GITHUB_TOKEN_RO)
-    merge_base = gh.get_compare_metadata(repo, base_branch, head_sha)["merge_base_sha"]
-    if not _SHA40_RE.fullmatch(merge_base or ""):
-        raise ScopeUnverified("GitHub returned no valid merge base for the PR")
-    files, truncated = gh.get_compare_files(repo, merge_base, head_sha)
+    files, truncated = gh.get_compare_files(repo, base_sha, head_sha)
     if truncated:
         raise ScopeUnverified("GitHub file list hit the 300-file cap; PR scope cannot be verified")
-    return merge_base, files
+    return base_sha, files
 
 
 async def _assess_scope(payload: str) -> ScopeAssessment:
@@ -1887,10 +1895,15 @@ async def _node_scope_gate(state: ReviewState, config: RunnableConfig) -> dict[s
     req = ReviewRequest.model_validate(state["request"])
     head_sha = state["head_sha"]
     try:
+        pinned_base = state.get("scope_base_sha")
+        if not _SHA40_RE.fullmatch(pinned_base or ""):
+            raise ScopeUnverified("could not pin the PR merge base")
         base_sha, files = await asyncio.to_thread(
-            _fetch_scope_manifest, req.repo, state["base_branch"], head_sha
+            _fetch_scope_manifest, req.repo, pinned_base, head_sha
         )
         manifest = {f.get("filename", "") for f in files}
+        if not manifest and state.get("diff", "").strip():
+            raise ScopeUnverified("GitHub returned no changed files for a non-empty diff")
         if manifest:
             assessment = await _assess_scope(build_scope_input(files, state.get("description", "")))
         else:
@@ -2460,8 +2473,9 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
     settings = get_settings()
 
+    scope_base_sha = await asyncio.to_thread(_pin_scope_base, req.repo, base_branch, head_sha)
     full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
-        req, base_branch, head_sha, diff, prior_sha=prior_sha
+        req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
     )
 
     bench_config_changes: list[str] = []
@@ -2501,6 +2515,7 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         "description": description,
         "head_sha": head_sha,
         "base_branch": base_branch,
+        "scope_base_sha": scope_base_sha,
         "bench_config_changes": bench_config_changes,
         "bench_config_unconfirmed": unconfirmed_reason,
     }

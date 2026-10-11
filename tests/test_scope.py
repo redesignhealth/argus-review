@@ -79,6 +79,10 @@ class TestValidateAssessment:
             (_a(_b("x", ["a.py"], ["y"]), _b("y", ["b.py"], ["x"])), {"a.py", "b.py"}),  # cycle
             (_a(_b("x", ["a.py"]), _b("x", ["b.py"])), {"a.py", "b.py"}),  # dup title
             (_a(_b(" ", ["a.py"])), {"a.py"}),
+            (_a(_b("A ", ["a.py"], ["A "])), {"a.py"}),  # self dep, raw whitespace
+            (_a(_b("A ", ["a.py"], ["B "]), _b("B ", ["b.py"], ["A "])), {"a.py", "b.py"}),
+            (_a(_b("A", ["a.py"], ["B "]), _b("B", ["b.py"])), {"a.py", "b.py"}),
+            (_a(_b("A", ["a.py", "b.py"]), _b("B", [])), {"a.py", "b.py"}),  # phantom slice
             (_a(_b("x", ["a.py", "a.py"])), {"a.py"}),  # dup within behavior
         ],
     )

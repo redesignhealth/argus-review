@@ -112,9 +112,13 @@ def validate_assessment(assessment: ScopeAssessment, manifest: set[str]) -> None
         raise ScopeUnverified(
             f"scope model returned {len(behaviors)} behaviors (max {MAX_BEHAVIORS})"
         )
-    titles = [b.title.strip() for b in behaviors]
-    if not all(titles) or len(set(titles)) != len(titles):
-        raise ScopeUnverified("behavior titles must be non-empty and unique")
+    titles = [b.title for b in behaviors]
+    if any(t != t.strip() or not t for t in titles + [d for b in behaviors for d in b.depends_on]):
+        raise ScopeUnverified("behavior titles and dependencies must be non-empty and trimmed")
+    if len(set(titles)) != len(titles):
+        raise ScopeUnverified("behavior titles must be unique")
+    if any(not b.files for b in behaviors):
+        raise ScopeUnverified("a behavior has no files")
     assigned = [f for b in behaviors for f in b.files]
     if len(assigned) != len(set(assigned)):
         raise ScopeUnverified("a file is assigned to more than one behavior")

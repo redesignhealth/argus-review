@@ -16,6 +16,7 @@ from argus.graph import (
     _PIPELINE_ONLY_RESPONSE_FIELDS,
     _edge_scope_decision,
     _fetch_scope_manifest,
+    _pin_scope_base,
     _node_scope_gate,
     run_review,
 )
@@ -35,6 +36,7 @@ def _state(**over: Any) -> Any:
         "request": ReviewRequest(repo="org/repo", pr_number=7).model_dump(),
         "head_sha": HEAD,
         "base_branch": "main",
+        "scope_base_sha": BASE,
         "description": "desc",
         "diff": "round-diff-only",
         "prior_review": {},
@@ -81,7 +83,7 @@ class TestScopeGateNode:
         assert out["scope"]["base_sha"] == BASE
         assert len(out["scope"]["behaviors"]) == 1
         assert out["scope"]["override_reason"] is None
-        fetch.assert_called_once_with("org/repo", "main", HEAD)
+        fetch.assert_called_once_with("org/repo", BASE, HEAD)
         assert _edge_scope_decision(_state(**out)) == "early_verifier"
 
     async def test_scope_input_is_full_manifest_not_round_diff(self) -> None:
@@ -95,8 +97,20 @@ class TestScopeGateNode:
         assert "round-diff-only" not in payload
         assert out["scope"]["head_sha"] == HEAD
 
-    async def test_empty_pr_skips_model_and_yields_empty_receipt(self) -> None:
+    async def test_empty_manifest_with_nonempty_diff_is_unverified(self) -> None:
         out, _, assess = await _run_gate(_state(), assessment=None, files=[])
+        assert out["response"]["halt"]["code"] == "scope_unverified"
+        assert "scope" not in out
+        assess.assert_not_called()
+
+    @pytest.mark.parametrize("base", [None, "", "main", "B" * 40])
+    async def test_unpinned_base_halts_unverified(self, base: Any) -> None:
+        out, fetch, _ = await _run_gate(_state(scope_base_sha=base), assessment=None)
+        assert out["response"]["halt"]["code"] == "scope_unverified"
+        fetch.assert_not_called()
+
+    async def test_empty_pr_skips_model_and_yields_empty_receipt(self) -> None:
+        out, _, assess = await _run_gate(_state(diff=""), assessment=None, files=[])
         assess.assert_not_called()
         assert out["scope"]["behaviors"] == []
 
@@ -175,28 +189,19 @@ class TestScopeGateNode:
 
 
 class TestFetchScopeManifest:
-    def _gh(self, merge_base: str = BASE, truncated: bool = False) -> MagicMock:
+    def _gh(self, truncated: bool = False) -> MagicMock:
         gh = MagicMock()
-        gh.get_compare_metadata.return_value = {"merge_base_sha": merge_base, "status": "ahead"}
         gh.get_compare_files.return_value = (FILES, truncated)
         return gh
 
-    def test_pins_merge_base_then_lists_files_from_it(self) -> None:
+    def test_lists_files_from_pinned_base_without_second_metadata_call(self) -> None:
         gh = self._gh()
         with patch("argus.github_client.GitHubClient", return_value=gh):
-            base, files = _fetch_scope_manifest("org/repo", "main", HEAD)
+            base, files = _fetch_scope_manifest("org/repo", BASE, HEAD)
         assert (base, files) == (BASE, FILES)
-        gh.get_compare_metadata.assert_called_once_with("org/repo", "main", HEAD)
+        gh.get_compare_metadata.assert_not_called()
         gh.get_compare_files.assert_called_once_with("org/repo", BASE, HEAD)
         gh.get_pr_files.assert_not_called()
-
-    @pytest.mark.parametrize("bad", ["", "abc", "B" * 40, "g" * 40, "a" * 39])
-    def test_invalid_merge_base_is_unverified(self, bad: str) -> None:
-        with (
-            patch("argus.github_client.GitHubClient", return_value=self._gh(bad)),
-            pytest.raises(ScopeUnverified),
-        ):
-            _fetch_scope_manifest("org/repo", "main", HEAD)
 
     def test_300_file_truncation_halts_without_pr_files_fallback(self) -> None:
         gh = self._gh(truncated=True)
@@ -204,8 +209,28 @@ class TestFetchScopeManifest:
             patch("argus.github_client.GitHubClient", return_value=gh),
             pytest.raises(ScopeUnverified, match="300"),
         ):
-            _fetch_scope_manifest("org/repo", "main", HEAD)
+            _fetch_scope_manifest("org/repo", BASE, HEAD)
         gh.get_pr_files.assert_not_called()
+
+
+class TestPinScopeBase:
+    def _pin(self, meta: Any) -> Any:
+        gh = MagicMock()
+        if isinstance(meta, Exception):
+            gh.get_compare_metadata.side_effect = meta
+        else:
+            gh.get_compare_metadata.return_value = meta
+        with patch("argus.github_client.GitHubClient", return_value=gh):
+            return _pin_scope_base("org/repo", "main", HEAD)
+
+    def test_returns_merge_base(self) -> None:
+        assert self._pin({"merge_base_sha": BASE}) == BASE
+
+    @pytest.mark.parametrize(
+        "meta", [{"merge_base_sha": ""}, {"merge_base_sha": "abc"}, {}, RuntimeError("api")]
+    )
+    def test_failure_or_invalid_fails_closed_to_none(self, meta: Any) -> None:
+        assert self._pin(meta) is None
 
 
 class TestGraphWiring:

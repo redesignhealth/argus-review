@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The fan-out ceiling of 50 reviewers no longer truncates the plan or the gap-fill list; exceeding it halts the review.
 - A halted round is stored with `verdict = NULL` and `current_stage = completed`, so it never becomes the prior round: the last reviewed SHA and round count do not advance. The HTTP storage client now skips `verdict = null` rounds like the SQL backends. No schema migration.
-- `--commit-status` on a halt sets a `failure` status on `halt.head_sha` instead of re-reading the live head.
+- `--commit-status` posts every outcome to the reviewed head (`halt.head_sha` or `scope.head_sha`) instead of re-reading the live head. The scope gate and bench guard share one merge base pinned in `fetch_diff`; an unpinnable base, an empty manifest for a non-empty diff, an empty-file behavior, or untrimmed titles halt `scope_unverified`.
 - `ReviewResponse` JSON schema gains `scope` and `halt` (golden snapshot updated). The stderr summary block is unchanged.
 
 ## [0.2.10] - 2026-10-03
