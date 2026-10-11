@@ -560,10 +560,12 @@ async def _fetch_pr_diff_and_description(
     request: ReviewRequest,
     prior_sha: str | None = None,
     pre_resolved_head_sha: str | None = None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str | None]:
     """Fetch PR diff and description from GitHub.
 
-    Returns (diff, description, head_sha, base_branch). When ``prior_sha`` is provided
+    Returns (diff, description, head_sha, base_branch, pinned_base). ``pinned_base`` is the
+    merge base resolved once here and used for the round-1/SHA diff, the bench guard and
+    the scope gate; ``None`` if it cannot be pinned (the scope gate then halts). When ``prior_sha`` is provided
     (round 2+), the diff is scoped to ``prior_sha..head_sha`` instead of the
     full PR diff.
     """
@@ -576,7 +578,7 @@ async def _fetch_pr_diff_and_description(
     settings = get_settings()
     gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
 
-    def _fetch() -> tuple[str, str, str, str]:
+    def _fetch() -> tuple[str, str, str, str, str | None]:
         if request.pr_number:
             pr_data = gh.get_pull_request(request.repo, request.pr_number)
             base_branch = pr_data["base_branch"]
@@ -667,17 +669,24 @@ async def _fetch_pr_diff_and_description(
                 diff = gh.get_compare_diff(
                     request.repo, base_sha_for_diff, head_sha, max_lines=5000
                 )
+                pinned_base = _pin_scope_base(request.repo, base_branch, head_sha)
             else:
-                # Round 1: full PR diff (base_branch...head_sha)
-                diff = gh.get_compare_diff(request.repo, base_branch, head_sha, max_lines=5000)
-            return diff, description, head_sha, base_branch
+                # Round 1: the full-scope pin is also the diff base
+                pinned_base = _pin_scope_base(request.repo, base_branch, head_sha)
+                diff = gh.get_compare_diff(
+                    request.repo, pinned_base or base_branch, head_sha, max_lines=5000
+                )
+            return diff, description, head_sha, base_branch, pinned_base
         elif request.sha and request.base_ref:
             if not _SHA_RE.fullmatch(request.sha):
                 raise ValueError(f"Invalid sha (must be 7-40 hex chars): {request.sha!r}")
             if not re.fullmatch(r"[A-Za-z0-9._/\-]+", request.base_ref) or ".." in request.base_ref:
                 raise ValueError(f"Invalid base_ref: {request.base_ref!r}")
-            diff = gh.get_compare_diff(request.repo, request.base_ref, request.sha, max_lines=5000)
-            return diff, "", request.sha, request.base_ref
+            pinned_base = _pin_scope_base(request.repo, request.base_ref, request.sha)
+            diff = gh.get_compare_diff(
+                request.repo, pinned_base or request.base_ref, request.sha, max_lines=5000
+            )
+            return diff, "", request.sha, request.base_ref, pinned_base
         else:
             raise ValueError("ReviewRequest must have pr_number or both sha and base_ref")
 
@@ -2450,7 +2459,7 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
 
     pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
 
-    diff, description, head_sha, base_branch = await _fetch_pr_diff_and_description(
+    diff, description, head_sha, base_branch, scope_base_sha = await _fetch_pr_diff_and_description(
         req, prior_sha=prior_sha, pre_resolved_head_sha=pre_resolved_head_sha
     )
 
@@ -2473,7 +2482,6 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
     settings = get_settings()
 
-    scope_base_sha = await asyncio.to_thread(_pin_scope_base, req.repo, base_branch, head_sha)
     full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
         req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
     )

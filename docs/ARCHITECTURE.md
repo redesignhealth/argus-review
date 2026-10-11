@@ -116,9 +116,9 @@ the full PR, not the round diff.
 1. It pins the base: `get_compare_metadata(base, head)` returns the merge
    base, which must be 40 lowercase hex characters. `get_compare_files(merge_base, head)`
    then lists the files. A listing of 300 files or more halts; the gate never
-   falls back to the unpinned PR files endpoint. The bench guard in
-   `fetch_diff` still fetches `base...head` itself, so the two can differ
-   only if the base branch moves between the calls.
+   falls back to the unpinned PR files endpoint. `fetch_diff` pins the base
+   once; the round-1 (or SHA-mode) diff, the bench guard, and this gate all use
+   that same SHA. Round 2+ diffs keep the `prior_sha` and rebase-clamp base.
 2. A Sonnet call (native JSON schema, prompt `pr-review-scope`) partitions
    the files into independently mergeable behaviors. The prompt treats the
    description and patches as data. Each patch is capped at 6000 characters

@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import sys
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -51,7 +51,7 @@ class TestFetchPrDiffPRMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            diff, description, head_sha, base_branch = await fn(_make_request(pr_number=42))
+            diff, description, head_sha, base_branch, _ = await fn(_make_request(pr_number=42))
 
         assert diff == "diff --git a/f.py b/f.py\n+new"
         assert description == "My PR description"
@@ -74,7 +74,7 @@ class TestFetchPrDiffPRMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            _, description, _, _ = await fn(_make_request(pr_number=42))
+            _, description, _, _, _ = await fn(_make_request(pr_number=42))
 
         assert description == "## Summary\nThis fixes a bug."
 
@@ -91,7 +91,7 @@ class TestFetchPrDiffPRMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            _, description, _, _ = await fn(_make_request(pr_number=42))
+            _, description, _, _, _ = await fn(_make_request(pr_number=42))
 
         assert description == ""
 
@@ -137,7 +137,7 @@ class TestFetchPrDiffSHAMode:
 
         with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
             fn = _reload_graph()
-            diff, description, head_sha, base_branch = await fn(
+            diff, description, head_sha, base_branch, _ = await fn(
                 _make_request(sha="abc123def456", base_ref="main")
             )
 
@@ -221,7 +221,7 @@ class TestNodeFetchDiffPreResolvedSha:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=("diff content", "description", pre_resolved_sha, "main"),
+                return_value=("diff content", "description", pre_resolved_sha, "main", None),
             ) as mock_fetch,
         ):
             await _node_fetch_diff(state, config)
@@ -370,7 +370,7 @@ class TestNodeFetchDiffBenchConfig:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "", "head1234", "main"),
+                return_value=(diff, "", "head1234", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -400,7 +400,7 @@ class TestNodeFetchDiffBenchConfig:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "", "head1234", "main"),
+                return_value=(diff, "", "head1234", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -431,7 +431,7 @@ class TestNodeFetchDiffBenchConfig:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "", "head1234", "main"),
+                return_value=(diff, "", "head1234", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -439,3 +439,77 @@ class TestNodeFetchDiffBenchConfig:
 
         assert result["bench_config_changes"] == []
         assert result["bench_config_unconfirmed"] is None
+
+
+class TestPinnedBaseMatchesReceipt:
+    """Round-1 and SHA-mode diffs use the merge base pinned once, even if the base branch moves."""
+
+    PIN1, PIN2 = "a" * 40, "b" * 40
+
+    @pytest.mark.asyncio
+    async def test_pr_mode_diff_uses_pinned_base_once(self) -> None:
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = {"base_branch": "main", "head_sha": "abc123def456"}
+        mock_gh.get_compare_metadata.side_effect = [
+            {"merge_base_sha": self.PIN1},
+            {"merge_base_sha": self.PIN2},  # base moved: a second pin would differ
+        ]
+        mock_gh.get_compare_diff.return_value = "d"
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            fn = _reload_graph()
+            *_, pinned = await fn(_make_request(pr_number=42))
+        assert pinned == self.PIN1
+        assert mock_gh.get_compare_metadata.call_count == 1
+        mock_gh.get_compare_diff.assert_called_once_with(
+            "org/repo", self.PIN1, "abc123def456", max_lines=5000
+        )
+
+    @pytest.mark.asyncio
+    async def test_sha_mode_diff_uses_pinned_base(self) -> None:
+        mock_gh = MagicMock()
+        mock_gh.get_compare_metadata.return_value = {"merge_base_sha": self.PIN1}
+        mock_gh.get_compare_diff.return_value = "d"
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            fn = _reload_graph()
+            *_, pinned = await fn(_make_request(sha="abc123def456", base_ref="main"))
+        assert pinned == self.PIN1
+        mock_gh.get_compare_diff.assert_called_once_with(
+            "org/repo", self.PIN1, "abc123def456", max_lines=5000
+        )
+
+    @pytest.mark.asyncio
+    async def test_pin_failure_returns_none(self) -> None:
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = {"base_branch": "main", "head_sha": "abc123def456"}
+        mock_gh.get_compare_metadata.side_effect = RuntimeError("boom")
+        mock_gh.get_compare_diff.return_value = "d"
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            fn = _reload_graph()
+            *_, pinned = await fn(_make_request(pr_number=42))
+        assert pinned is None  # scope gate halts on None
+
+    @pytest.mark.asyncio
+    async def test_node_passes_same_pinned_base_to_bench_guard(self) -> None:
+        from argus.graph import _node_fetch_diff
+
+        pin = self.PIN1
+        state = {"request": _make_request(pr_number=42).model_dump()}
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=("d", "", "head1234", "main", pin),
+            ),
+            patch("argus.graph._pin_scope_base") as node_pin,
+            patch(
+                "argus.graph._fetch_full_pr_changed_files",
+                new_callable=AsyncMock,
+                return_value=([], None),
+            ) as full,
+        ):
+            result = await _node_fetch_diff(state, {"configurable": {}})
+        node_pin.assert_not_called()
+        assert full.call_args.kwargs["base_sha"] == pin
+        assert result["scope_base_sha"] == pin
