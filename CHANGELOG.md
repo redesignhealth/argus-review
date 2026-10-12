@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The bench-config-change guard (TECH-6282) no longer fails closed on a file whose
+  patch GitHub's compare API omits (diff too large) when the repo has explicitly
+  declared that file generated/non-diffable via `.gitattributes`
+  (`linguist-generated=true` / `-diff`) — the same signal other AI review tools
+  (e.g. Cubic) already honor to skip generated files. Previously, any oversized
+  file anywhere in a PR's diff (e.g. a large Drizzle-generated migration snapshot,
+  unrelated to Argus's own bench config) forced every review round to BLOCKING
+  with no way out, since the guard treated "missing patch" as suspicious
+  regardless of whether the file was remotely bench-related. The real
+  bench-config-path check (`_is_bench_config_path`) is unaffected: a genuine
+  bench config file can't hide behind a `.gitattributes` declaration. (TECH-7402)
+
 ## [0.2.10] - 2026-10-03
 
 ### Fixed

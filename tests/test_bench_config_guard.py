@@ -13,6 +13,7 @@ Covers:
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,7 @@ import pytest
 from argus.graph import (
     _detect_bench_config_routing_lines,
     _is_bench_config_path,
+    _is_generated_nodiff_path,
     _node_fetch_diff,
     run_review,
 )
@@ -606,6 +608,130 @@ class TestMultiRoundBenchConfigGuardRegressions:
         )
         assert fired is False
         assert response.verdict == Verdict.APPROVE
+
+    @pytest.mark.asyncio
+    async def test_missing_patch_on_gitattributes_generated_file_does_not_fail_closed(
+        self, tmp_path: Any
+    ) -> None:
+        """A file the repo declares generated/non-diffable via .gitattributes must NOT fail
+        closed just because GitHub omitted its patch (e.g. a large Drizzle/ORM migration
+        snapshot)."""
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / ".gitattributes").write_text(
+            "migrations/meta/*.json linguist-generated=true -diff\n"
+        )
+        generated_path = tmp_path / "migrations" / "meta"
+        generated_path.mkdir(parents=True)
+        (generated_path / "0001_snapshot.json").write_text("{}")
+
+        req = ReviewRequest(repo="org/repo", pr_number=42)
+        diff = (
+            "diff --git a/migrations/meta/0001_snapshot.json b/migrations/meta/0001_snapshot.json\n"
+        )
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [
+                {
+                    "filename": "migrations/meta/0001_snapshot.json",
+                    "status": "modified",
+                    "patch": None,
+                }
+            ],
+            False,
+        )
+
+        state = {"request": req.model_dump()}
+        config: dict[str, Any] = {"configurable": {"worktree_path": str(tmp_path)}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "desc", "head12345678", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            node_result = await _node_fetch_diff(state, config)
+
+        assert node_result["bench_config_unconfirmed"] is None
+        assert node_result["bench_config_changes"] == []
+
+        response = _make_response(verdict=Verdict.APPROVE)
+        fired = apply_bench_config_change_gate(
+            response, node_result["bench_config_changes"], node_result["bench_config_unconfirmed"]
+        )
+        assert fired is False
+        assert response.verdict == Verdict.APPROVE
+
+    @pytest.mark.asyncio
+    async def test_missing_patch_without_worktree_still_fails_closed(self) -> None:
+        """No worktree_path (e.g. an older call path) means the gitattributes exemption
+        can't be checked, so the existing fail-closed behavior must still apply."""
+        req = ReviewRequest(repo="org/repo", pr_number=42)
+        diff = (
+            "diff --git a/migrations/meta/0001_snapshot.json b/migrations/meta/0001_snapshot.json\n"
+        )
+
+        mock_gh = MagicMock()
+        mock_gh.get_compare_files.return_value = (
+            [
+                {
+                    "filename": "migrations/meta/0001_snapshot.json",
+                    "status": "modified",
+                    "patch": None,
+                }
+            ],
+            False,
+        )
+
+        state = {"request": req.model_dump()}
+        config: dict[str, Any] = {"configurable": {}}
+
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=(diff, "desc", "head12345678", "main"),
+            ),
+            patch(_GH_CLIENT_CLASS, return_value=mock_gh),
+        ):
+            node_result = await _node_fetch_diff(state, config)
+
+        assert node_result["bench_config_unconfirmed"] is not None
+        assert "Diff patch content missing or empty" in node_result["bench_config_unconfirmed"]
+
+
+class TestIsGeneratedNodiffPath:
+    """Unit tests for _is_generated_nodiff_path."""
+
+    @pytest.mark.asyncio
+    async def test_no_worktree_path_returns_false(self) -> None:
+        assert await _is_generated_nodiff_path(None, "some/file.json") is False
+
+    @pytest.mark.asyncio
+    async def test_linguist_generated_true_returns_true(self, tmp_path: Any) -> None:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / ".gitattributes").write_text("big.json linguist-generated=true -diff\n")
+        (tmp_path / "big.json").write_text("{}")
+
+        assert await _is_generated_nodiff_path(str(tmp_path), "big.json") is True
+
+    @pytest.mark.asyncio
+    async def test_unrelated_file_returns_false(self, tmp_path: Any) -> None:
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / ".gitattributes").write_text("big.json linguist-generated=true -diff\n")
+        (tmp_path / "other.py").write_text("x = 1\n")
+
+        assert await _is_generated_nodiff_path(str(tmp_path), "other.py") is False
+
+    @pytest.mark.asyncio
+    async def test_non_git_directory_returns_false(self, tmp_path: Any) -> None:
+        assert await _is_generated_nodiff_path(str(tmp_path), "whatever.json") is False
 
 
 class TestRunReviewBenchGuardIntegration:
