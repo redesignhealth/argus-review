@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11] - 2026-10-12
+
 ### Fixed
 
 - The bench-config-change guard (TECH-6282) no longer fails closed on a file whose
@@ -405,7 +407,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/redesignhealth/argus-review/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/redesignhealth/argus-review/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/redesignhealth/argus-review/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/redesignhealth/argus-review/compare/v0.2.7...v0.2.8
