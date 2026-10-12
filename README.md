@@ -92,7 +92,7 @@ fetch_diff → scope_gate → plan → [system reviewers ‖ specialists ‖ cro
 
 ### Scope and workload halts
 
-Before it spends on a review, Argus checks the whole PR (merge base to
+Before dispatching reviewer sessions, Argus checks the whole PR (merge base to
 head, on every round, including incremental and lite rounds). If the PR
 contains more than one independently mergeable behavior, or Argus cannot
 verify its scope, the review halts with a `BLOCKING` verdict, `HIGH` risk,
@@ -104,17 +104,17 @@ object with one of these codes: `scope_split`, `scope_unverified`,
 carries a `scope` receipt pinned to the reviewed head SHA.
 
 A halted round is not a reviewed round: it is stored with a null verdict,
-so the next run still diffs from the last reviewed SHA. An older
-`APPROVE` status on an earlier exact SHA stays in place, because Argus
-cannot revoke it. A gate that trusts that status must also read the
-halt.
+so the next run still diffs from the last reviewed SHA. Argus does not
+revoke approvals issued before this guard was enabled, including stored
+approvals for the same SHA. External merge gates must reject the latest
+halt outcome instead of accepting any historical `APPROVE` row.
 
-A human can allow a split PR, or a plan over the budget (up to 50
+A human can authorize a multi-behavior PR, or a plan over the budget (up to 50
 reviewers), for one exact head:
 
 ```bash
 argus review owner/repo --pr 123 \
-  --review-override-sha <40-char lowercase HEAD sha> \
+  --review-override-sha HEAD_SHA \
   --review-override-reason "why this PR stays together"
 ```
 

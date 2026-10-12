@@ -513,3 +513,33 @@ class TestPinnedBaseMatchesReceipt:
         node_pin.assert_not_called()
         assert full.call_args.kwargs["base_sha"] == pin
         assert result["scope_base_sha"] == pin
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("old_verdict", ["APPROVE", "BLOCKING"])
+    async def test_new_attempt_clears_checkpointed_terminal_decisions(
+        self, old_verdict: str
+    ) -> None:
+        from argus.graph import _node_fetch_diff
+
+        state = {
+            "request": _make_request(pr_number=42).model_dump(),
+            "response": {"verdict": old_verdict},
+            "scope": {"head_sha": "previous-head"},
+        }
+        with (
+            patch("argus.graph._fetch_prior_review", new_callable=AsyncMock, return_value=None),
+            patch("argus.graph._fetch_dismissed_findings", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "argus.graph._fetch_pr_diff_and_description",
+                new_callable=AsyncMock,
+                return_value=("d", "", "a" * 40, "main", self.PIN1),
+            ),
+            patch(
+                "argus.graph._fetch_full_pr_changed_files",
+                new_callable=AsyncMock,
+                return_value=([], None),
+            ),
+        ):
+            result = await _node_fetch_diff(state, {"configurable": {}})
+        assert result.get("response") == {}
+        assert result.get("scope") == {}

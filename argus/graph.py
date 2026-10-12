@@ -2524,6 +2524,9 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         "head_sha": head_sha,
         "base_branch": base_branch,
         "scope_base_sha": scope_base_sha,
+        # A retried checkpoint must not terminate on an earlier attempt's decision.
+        "response": {},
+        "scope": {},
         "bench_config_changes": bench_config_changes,
         "bench_config_unconfirmed": unconfirmed_reason,
     }
