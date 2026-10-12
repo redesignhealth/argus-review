@@ -21,6 +21,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `--commit-status` posts every outcome to the reviewed head (`halt.head_sha` or `scope.head_sha`) instead of re-reading the live head. The scope gate and bench guard share one merge base pinned in `fetch_diff`; an unpinnable base, an empty manifest for a non-empty diff, an empty-file behavior, or untrimmed titles halt `scope_unverified`.
 - `ReviewResponse` JSON schema gains `scope` and `halt` (golden snapshot updated). The stderr summary block is unchanged.
 
+## [0.2.11] - 2026-10-12
+
+### Fixed
+
+- The bench-config-change guard (TECH-6282) no longer fails closed on a file whose
+  patch GitHub's compare API omits (diff too large) when the repo has explicitly
+  declared that file generated/non-diffable via `.gitattributes`
+  (`linguist-generated=true` / `-diff`) — the same signal other AI review tools
+  (e.g. Cubic) already honor to skip generated files. Previously, any oversized
+  file anywhere in a PR's diff (e.g. a large Drizzle-generated migration snapshot,
+  unrelated to Argus's own bench config) forced every review round to BLOCKING
+  with no way out, since the guard treated "missing patch" as suspicious
+  regardless of whether the file was remotely bench-related. The real
+  bench-config-path check (`_is_bench_config_path`) is unaffected: a genuine
+  bench config file can't hide behind a `.gitattributes` declaration. (TECH-7402)
+
 ## [0.2.10] - 2026-10-03
 
 ### Fixed
@@ -405,7 +421,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.10...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.2.11...HEAD
+[0.2.11]: https://github.com/redesignhealth/argus-review/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/redesignhealth/argus-review/compare/v0.2.9...v0.2.10
 [0.2.9]: https://github.com/redesignhealth/argus-review/compare/v0.2.8...v0.2.9
 [0.2.8]: https://github.com/redesignhealth/argus-review/compare/v0.2.7...v0.2.8

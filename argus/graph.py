@@ -27,6 +27,7 @@ parameters, making add_node() calls report spurious arg-type errors.
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import operator
@@ -2230,6 +2231,62 @@ def _detect_bench_config_routing_lines(diff: str) -> list[str]:
     return matches
 
 
+async def _is_generated_nodiff_path(worktree_path: str | None, filename: str) -> bool:
+    """Return True if the repo itself declares ``filename`` generated/non-diffable.
+
+    A file whose patch GitHub's compare API omits (diff too large) is otherwise
+    treated as bench-config-unconfirmed below regardless of whether the file is
+    remotely bench-related -- this fires for any oversized file anywhere in the
+    diff, e.g. a large auto-generated migration snapshot unrelated to Argus's own
+    config. Repos already have a standard, explicit, auditable way to declare a
+    file generated-and-not-meaningfully-diffable: ``.gitattributes``
+    ``linguist-generated=true`` / ``-diff``. Honor that signal here so a
+    missing-patch file only stays unconfirmed (and forces BLOCKING) when the repo
+    hasn't already declared it non-diffable. This does NOT weaken
+    ``_is_bench_config_path`` above, which matches on filename regardless of patch
+    content or gitattributes -- a real bench config file can't hide behind this.
+    """
+    if not worktree_path:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git",
+            "-C",
+            worktree_path,
+            "check-attr",
+            "diff",
+            "linguist-generated",
+            "--",
+            filename,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+        except (asyncio.TimeoutError, TimeoutError):
+            proc.kill()
+            with contextlib.suppress(Exception):
+                await proc.communicate()
+            return False
+    except Exception:
+        return False
+    if proc.returncode != 0:
+        return False
+    diff_unset = False
+    linguist_generated = False
+    for line in stdout.decode(errors="replace").splitlines():
+        # Format: "<path>: <attr>: <value>"
+        parts = line.split(": ", 2)
+        if len(parts) != 3:
+            continue
+        _, attr, value = parts
+        if attr == "diff" and value == "unset":
+            diff_unset = True
+        elif attr == "linguist-generated" and value == "true":
+            linguist_generated = True
+    return diff_unset or linguist_generated
+
+
 def _is_high_blast_radius(diff: str) -> str | None:
     r"""Return the first changed path that matches a high-blast-radius pattern, or None.
 
@@ -2504,6 +2561,12 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
                 bench_config_changes.append(
                     f"added line modifying bench routing in {filename}: {line}"
                 )
+        elif await _is_generated_nodiff_path(worktree_path, filename):
+            logger.info(
+                "Missing patch content for '%s' ignored for bench-config verification: "
+                "repo declares it generated/non-diffable via .gitattributes",
+                filename,
+            )
         elif not unconfirmed_reason and filename not in bench_config_changes:
             unconfirmed_reason = (
                 f"Diff patch content missing or empty for '{filename}' in GitHub API "
