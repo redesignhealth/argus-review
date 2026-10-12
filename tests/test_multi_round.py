@@ -241,10 +241,35 @@ class TestScopedDiff:
         mock_gh.get_compare_diff.assert_called_once_with(
             "org/repo", "ccccdddd5678", "aabbccdd1234", max_lines=5000
         )
-        # Three compare_metadata calls: prior->head, base_branch->head (clamp), base_branch->head (pin)
-        assert mock_gh.get_compare_metadata.call_count == 3
+        # Two compare_metadata calls: prior->head, base_branch->head (clamp, reused as the pin)
+        assert mock_gh.get_compare_metadata.call_count == 2
         mock_gh.get_compare_metadata.assert_any_call("org/repo", "aabb00112233", "aabbccdd1234")
         mock_gh.get_compare_metadata.assert_any_call("org/repo", "main", "aabbccdd1234")
+
+    @pytest.mark.asyncio
+    async def test_round2_clamp_reuses_merge_base_as_scope_pin(self) -> None:
+        mb = "c" * 40
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = {
+            "base_branch": "main",
+            "head_sha": "aabbccdd1234",
+            "body": "d",
+        }
+        mock_gh.get_compare_metadata.side_effect = [
+            {"status": "diverged", "merge_base_sha": "deadbeef0000", "ahead_by": 3, "behind_by": 1},
+            {"status": "ahead", "merge_base_sha": mb, "ahead_by": 3, "behind_by": 0},
+        ]
+        mock_gh.get_compare_diff.return_value = "diff"
+        with patch(_GH_CLIENT_CLASS, return_value=mock_gh):
+            fn = _reload_graph()
+            from argus.models import ReviewRequest
+
+            result = await fn(
+                ReviewRequest(repo="org/repo", pr_number=42), prior_sha="aabb00112233"
+            )
+
+        assert result[4] == mb
+        assert mock_gh.get_compare_metadata.call_count == 2
 
     @pytest.mark.asyncio
     async def test_round2_clamps_to_merge_base_on_force_push_rewind(self) -> None:

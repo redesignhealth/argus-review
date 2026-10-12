@@ -149,7 +149,9 @@ operations the pipeline needs, nothing more.
   as the latest completed round and uses `len(rounds)` as the round-number
   hint (approximate once a PR's history exceeds the 200-row cap — in
   practice a single convergence loop runs on the order of 10 rounds, so this
-  is not a real-world limitation).
+  is not a real-world limitation). Argus drops halted rounds (`verdict: null`)
+  client-side, after that cap; a backend should exclude them before applying
+  the limit, as the SQL backends do.
 - An empty `rounds` list means "no completed rounds yet" (round 1 case).
 
 **POST — write a new round**

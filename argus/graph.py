@@ -623,6 +623,7 @@ async def _fetch_pr_diff_and_description(
                         prior_sha[:12],
                         head_sha[:12],
                     )
+                clamped_pin: str | None = None
                 if meta["status"] in ("diverged", "behind"):
                     clamp_meta = gh.get_compare_metadata(request.repo, base_branch, head_sha)
                     new_base = clamp_meta["merge_base_sha"]
@@ -646,6 +647,7 @@ async def _fetch_pr_diff_and_description(
                             f"Invalid merge_base_sha from GitHub compare: {new_base!r}"
                         )
                     base_sha_for_diff = new_base
+                    clamped_pin = new_base if SHA40.fullmatch(new_base) else None
                     logger.warning(
                         "History rewrite detected (%s): prior_sha %s is no longer an "
                         "ancestor of head %s (ahead_by=%d behind_by=%d). Clamping base "
@@ -668,7 +670,12 @@ async def _fetch_pr_diff_and_description(
                 diff = gh.get_compare_diff(
                     request.repo, base_sha_for_diff, head_sha, max_lines=5000
                 )
-                pinned_base = _pin_scope_base(request.repo, base_branch, head_sha)
+                # A clamp already resolved merge-base(base_branch, head); reuse it as the pin.
+                pinned_base = clamped_pin or (
+                    None
+                    if meta["status"] in ("diverged", "behind")
+                    else _pin_scope_base(request.repo, base_branch, head_sha)
+                )
             else:
                 # Round 1: the full-scope pin is also the diff base
                 pinned_base = _pin_scope_base(request.repo, base_branch, head_sha)
