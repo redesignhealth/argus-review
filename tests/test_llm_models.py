@@ -7,6 +7,7 @@ cost-estimation surface.
 
 from __future__ import annotations
 
+import litellm
 import pytest
 
 from argus.llm.models import (
@@ -49,12 +50,13 @@ class TestPricingLookup:
 
     def test_claude_default_pricing_rates(self) -> None:
         """Regression guard: claude-sonnet-5-5 rates in litellm must match
-        expected rates ($2/$10/$0.20 per Mtok)."""
+        expected rates ($2/$10/$0.10 per Mtok). Anthropic lowered the cache-read
+        rate from $0.20 to $0.10 on 2026-10-07 (litellm#45113)."""
         cost = get_token_cost(ALIAS_MAP["claude-default"])
         assert cost is not None
         assert cost.input_cost_per_token == pytest.approx(2e-6)
         assert cost.output_cost_per_token == pytest.approx(10e-6)
-        assert cost.cache_read_cost_per_token == pytest.approx(0.2e-6)
+        assert cost.cache_read_cost_per_token == pytest.approx(0.1e-6)
 
     def test_claude_opus_5_5_pricing_rates(self) -> None:
         """Regression guard: claude-opus-5-5 rates in litellm must match
@@ -85,13 +87,28 @@ class TestPricingLookup:
         assert cost.cache_read_cost_per_token < cost.input_cost_per_token
 
 
+@pytest.fixture
+def fixed_claude_default_rates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """litellm.model_cost is fetched live at import, so pin the row used by the
+    arithmetic tests; only the TestPricingLookup guards read live rates."""
+    row = {
+        "input_cost_per_token": 2e-6,
+        "output_cost_per_token": 10e-6,
+        "cache_read_input_token_cost": 0.1e-6,
+        "cache_creation_input_token_cost": 2.5e-6,
+    }
+    monkeypatch.setitem(litellm.model_cost, ALIAS_MAP["claude-default"], row)
+
+
 class TestEstimateCostUsd:
+    @pytest.mark.usefixtures("fixed_claude_default_rates")
     def test_computes_expected_cost_for_claude_default(self) -> None:
         cost = estimate_cost_usd(
             ALIAS_MAP["claude-default"], input_tokens=1_000_000, output_tokens=1_000_000
         )
         assert cost == pytest.approx(2.00 + 10.00)
 
+    @pytest.mark.usefixtures("fixed_claude_default_rates")
     def test_cached_input_tokens_billed_separately_at_cache_read_rate(self) -> None:
         """cached_input_tokens is additive (billed at the cache-read rate),
         not a subset subtracted from input_tokens."""
@@ -101,8 +118,9 @@ class TestEstimateCostUsd:
             output_tokens=0,
             cached_input_tokens=1_000_000,
         )
-        assert cost == pytest.approx(2.00 + 0.20)
+        assert cost == pytest.approx(2.00 + 0.10)
 
+    @pytest.mark.usefixtures("fixed_claude_default_rates")
     def test_cache_creation_tokens_billed(self) -> None:
         """cache_creation_tokens is billed at the cache-creation rate."""
         cost = estimate_cost_usd(
