@@ -54,7 +54,7 @@ def _assessment(*groups: list[str], indeterminate: bool = False) -> ScopeAssessm
 
 
 def _gate(assessment: Any = None, files: Any = FILES, fetch_error: Exception | None = None) -> Any:
-    fetch = MagicMock(return_value=(BASE, files), side_effect=fetch_error)
+    fetch = MagicMock(return_value=files, side_effect=fetch_error)
     assess = (
         AsyncMock(side_effect=assessment)
         if isinstance(assessment, Exception)
@@ -197,8 +197,8 @@ class TestFetchScopeManifest:
     def test_lists_files_from_pinned_base_without_second_metadata_call(self) -> None:
         gh = self._gh()
         with patch("argus.github_client.GitHubClient", return_value=gh):
-            base, files = _fetch_scope_manifest("org/repo", BASE, HEAD)
-        assert (base, files) == (BASE, FILES)
+            files = _fetch_scope_manifest("org/repo", BASE, HEAD)
+        assert files == FILES
         gh.get_compare_metadata.assert_not_called()
         gh.get_compare_files.assert_called_once_with("org/repo", BASE, HEAD)
         gh.get_pr_files.assert_not_called()

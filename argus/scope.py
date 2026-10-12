@@ -29,12 +29,11 @@ from argus.pipeline_models import ReviewPlan
 SCOPE_PROMPT = "pr-review-scope"
 MAX_BEHAVIORS = 12  # model output bound; more is treated as unverifiable
 MAX_SPLIT_SUGGESTIONS = 8  # slices shown in a halt
-HARD_DISPATCH_CAP = 50  # never overridable
 PATCH_CHARS = 6000  # per-file patch cap sent to the model
 INPUT_CHARS = 150_000  # whole-input cap; beyond it the gate halts instead of guessing
 DESCRIPTION_CHARS = 4000
 OVERRIDE_REASON_MAX = 500
-_SHA40 = re.compile(r"[0-9a-f]{40}")
+SHA40 = re.compile(r"[0-9a-f]{40}")
 
 
 class ScopeUnverified(Exception):  # noqa: N818 -- reads as the halt code it maps to
@@ -58,7 +57,7 @@ def validate_override(sha: str | None, reason: str | None) -> tuple[str, str] | 
     if sha is None or reason is None:
         raise ValueError("--review-override-sha and --review-override-reason must be set together")
     reason = reason.strip()
-    if not _SHA40.fullmatch(sha):
+    if not SHA40.fullmatch(sha):
         raise ValueError("--review-override-sha must be a 40-character lowercase hex SHA")
     if not 1 <= len(reason) <= OVERRIDE_REASON_MAX:
         raise ValueError(

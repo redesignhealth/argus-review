@@ -82,8 +82,8 @@ from argus.models import (
     Verdict,
 )
 from argus.scope import (
-    HARD_DISPATCH_CAP,
     SCOPE_PROMPT,
+    SHA40,
     ScopeAssessment,
     ScopeUnverified,
     build_scope_input,
@@ -174,7 +174,7 @@ _HIGH_BLAST_RADIUS_SUFFIXES = (
 
 # Hard ceiling on reviewers per fan-out (initial plan and gap-fill separately).
 # Exceeding it halts the review (see _node_plan, _node_check_coverage); it never truncates.
-_MAX_REVIEWER_FANOUT = HARD_DISPATCH_CAP
+_MAX_REVIEWER_FANOUT = 50
 
 # Per-group file cap instructed to the planner (see _build_planner_messages).
 # Measured: groups over this size reliably exhausted the reviewer's turn budget.
@@ -238,7 +238,6 @@ class ReviewState(TypedDict, total=False):
     coverage: dict[str, Any]
     response: dict[str, Any]
     validation: dict[str, Any]  # FindingValidationResult (empty if no BLOCKINGs)
-    base_branch: str  # PR base branch (or SHA-mode base_ref) used for the scope gate
     scope_base_sha: str | None  # merge base pinned once in fetch_diff; None if unresolvable
     scope: dict[str, Any]  # ScopeReceipt dict, set by scope_gate
     is_lite: bool  # True when preflight routed to lite review
@@ -1829,9 +1828,6 @@ async def _node_precheck_fail(state: ReviewState) -> dict[str, Any]:
     return {"response": response.model_dump()}
 
 
-_SHA40_RE = re.compile(r"[0-9a-f]{40}")
-
-
 def _halt_update(state: ReviewState, code: Any, detail: str, **kwargs: Any) -> dict[str, Any]:
     """State update that ends the run with a BLOCKING halt response."""
     prior_data = state.get("prior_review", {})
@@ -1869,12 +1865,10 @@ def _pin_scope_base(repo: str, base_branch: str, head_sha: str) -> str | None:
     except Exception:  # noqa: BLE001 -- the scope gate halts on None
         logger.warning("Could not pin merge base for %s", repo, exc_info=True)
         return None
-    return merge_base if isinstance(merge_base, str) and _SHA40_RE.fullmatch(merge_base) else None
+    return merge_base if isinstance(merge_base, str) and SHA40.fullmatch(merge_base) else None
 
 
-def _fetch_scope_manifest(
-    repo: str, base_sha: str, head_sha: str
-) -> tuple[str, list[dict[str, Any]]]:
+def _fetch_scope_manifest(repo: str, base_sha: str, head_sha: str) -> list[dict[str, Any]]:
     """Full-PR manifest ``base_sha..head_sha`` for the already-pinned base (no refetch)."""
     from argus.github_client import GitHubClient
 
@@ -1882,7 +1876,7 @@ def _fetch_scope_manifest(
     files, truncated = gh.get_compare_files(repo, base_sha, head_sha)
     if truncated:
         raise ScopeUnverified("GitHub file list hit the 300-file cap; PR scope cannot be verified")
-    return base_sha, files
+    return files
 
 
 async def _assess_scope(payload: str) -> ScopeAssessment:
@@ -1905,11 +1899,9 @@ async def _node_scope_gate(state: ReviewState, config: RunnableConfig) -> dict[s
     head_sha = state["head_sha"]
     try:
         pinned_base = state.get("scope_base_sha")
-        if not _SHA40_RE.fullmatch(pinned_base or ""):
+        if not (pinned_base and SHA40.fullmatch(pinned_base)):
             raise ScopeUnverified("could not pin the PR merge base")
-        base_sha, files = await asyncio.to_thread(
-            _fetch_scope_manifest, req.repo, pinned_base, head_sha
-        )
+        files = await asyncio.to_thread(_fetch_scope_manifest, req.repo, pinned_base, head_sha)
         manifest = {f.get("filename", "") for f in files}
         if not manifest and state.get("diff", "").strip():
             raise ScopeUnverified("GitHub returned no changed files for a non-empty diff")
@@ -1934,7 +1926,7 @@ async def _node_scope_gate(state: ReviewState, config: RunnableConfig) -> dict[s
             split_suggestions=assessment.behaviors,
         )
     receipt = ScopeReceipt(
-        base_sha=base_sha,
+        base_sha=pinned_base,
         head_sha=head_sha,
         behaviors=assessment.behaviors,
         rationale=assessment.rationale[:1000],
@@ -2522,7 +2514,6 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         "diff": diff,
         "description": description,
         "head_sha": head_sha,
-        "base_branch": base_branch,
         "scope_base_sha": scope_base_sha,
         # A retried checkpoint must not terminate on an earlier attempt's decision.
         "response": {},
