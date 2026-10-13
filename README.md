@@ -86,9 +86,45 @@ consolidates every finding into one review with a verdict and severity
 tags.
 
 ```
-fetch_diff → plan → [system reviewers ‖ specialists ‖ cross-cutting] (parallel)
+fetch_diff → scope_gate → plan → [system reviewers ‖ specialists ‖ cross-cutting] (parallel)
            → check_coverage → (fill_gaps if needed) → write_review → persist
 ```
+
+### Scope and workload halts
+
+Before dispatching reviewer sessions, Argus checks the whole PR (merge base to
+head, on every round, including incremental and lite rounds). If the PR
+contains more than one independently mergeable behavior, or Argus cannot
+verify its scope, the review halts with a `BLOCKING` verdict, `HIGH` risk,
+and no findings. The same happens when the plan needs more reviewers than
+`ARGUS_REVIEWER_DISPATCH_BUDGET` (default 16, range 3-50), or when more
+than 50 gap-fill reviewers are needed. The response carries a `halt`
+object with one of these codes: `scope_split`, `scope_unverified`,
+`dispatch_budget_exceeded`, `gap_fill_cap_exceeded`. A successful review
+carries a `scope` receipt pinned to the reviewed head SHA.
+
+A halted round is not a reviewed round: it is stored with a null verdict,
+so the next run still diffs from the last reviewed SHA. Argus does not
+revoke approvals issued before this guard was enabled, including stored
+approvals for the same SHA. External merge gates must reject the latest
+halt outcome instead of accepting any historical `APPROVE` row.
+
+A human can authorize a multi-behavior PR, or a plan over the budget (up to 50
+reviewers), for one exact head:
+
+```bash
+argus review owner/repo --pr 123 \
+  --review-override-sha HEAD_SHA \
+  --review-override-reason "why this PR stays together"
+```
+
+Both flags are required together. The SHA must equal the head Argus
+resolves, or the run fails before it spends anything (with `--sha`,
+pass the full 40-character SHA). The reason (1-500
+characters) is stored in `scope.override_reason`. These flags exist only
+on the CLI, never on the API request. Agents and skills must not add
+them automatically. They never override `scope_unverified` or
+`gap_fill_cap_exceeded`.
 
 Full design rationale is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -300,7 +336,7 @@ details are in [`docs/STORAGE.md`](docs/STORAGE.md).
 
 ## Adapting Argus to your team
 
-Argus ships with a full set of production review prompts — 20 files, one
+Argus ships with a full set of production review prompts — 21 files, one
 per reviewer role — rather than a thin default. Adapting them to your team
 is the main lever for making Argus *yours*.
 

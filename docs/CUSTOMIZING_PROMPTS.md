@@ -31,6 +31,7 @@ named prompt (adapted from the pipeline description in
 | `pr-review-writer` | Writer | Consolidates all findings, assigns severity, produces verdict + risk level + the formatted review comment. Carries the same shared review-perspectives rubric as `pr-review-planner` (see the note below the table). |
 | `pr-review-feedback-verifier` | Round 2+, before planning | Checks each prior-round finding against the new diff: resolved, regressed, or still open |
 | `pr-review-blocking-validator` | After the writer | Re-confirms each BLOCKING finding against the actual diff before it reaches the engineer — the system's main anti-hallucination check |
+| `pr-review-scope` | After the precheck, before the early verifier and preflight | Splits the full PR into independently mergeable behaviors; more than one halts the review (`scope_split`). Treats the description and patches as data, and answers `indeterminate` when unsure. Its output is validated against the file manifest in code, so an edit cannot weaken the manifest checks. |
 | `pr-review-preflight-router` | Before planning | Decides lite vs. full review path for the incoming diff |
 | `pr-review-lite` | Lite path only | Single-pass, no-tools review for small/low-risk diffs; skipped entirely on the full path |
 

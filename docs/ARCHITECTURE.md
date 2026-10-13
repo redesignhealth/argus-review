@@ -52,6 +52,11 @@ LangGraph for step coordination and true parallel fan-out (via LangGraph's
          │  (fan-in)        │        │  BLOCKING, no LLM  │ synthesized response,
          └────────┬─────────┘        └───────────────────┘ routes straight to END.
                   │ (no verified hit)
+         ┌────────▼─────────┐        ┌───────────────────┐
+         │  scope_gate      │──HALT──▶│  END (BLOCKING)   │ scope_split /
+         │  full PR, pinned │        │  halt, no findings │ scope_unverified
+         └────────┬─────────┘        └───────────────────┘
+                  │ one behavior
          ┌────────▼─────────┐
          │  early_verifier  │ Sonnet agent — round 2+ only, no-op on round 1
          │  (sequential)    │ Verifies prior BLOCKINGs before routing decision
@@ -100,6 +105,47 @@ LangGraph for step coordination and true parallel fan-out (via LangGraph's
                   └────────────────────────────┘
                                     END
 ```
+
+### Scope gate and workload halts
+
+`scope_gate` runs after the deterministic precheck (a verified-rule hit
+still short-circuits first) and before `early_verifier` and `preflight`. It
+runs on every round, including incremental and lite rounds, and always over
+the full PR, not the round diff.
+
+1. It pins the base: `get_compare_metadata(base, head)` returns the merge
+   base, which must be 40 lowercase hex characters. `get_compare_files(merge_base, head)`
+   then lists the files. A listing of 300 files or more halts; the gate never
+   falls back to the unpinned PR files endpoint. `fetch_diff` pins the base
+   once; the round-1 (or SHA-mode) diff, the bench guard, and this gate all use
+   that same SHA. Round 2+ diffs keep the `prior_sha` and rebase-clamp base.
+2. A Sonnet call (native JSON schema, prompt `pr-review-scope`) partitions
+   the files into independently mergeable behaviors. The prompt treats the
+   description and patches as data. Each patch is capped at 6000 characters
+   and the whole input at 150000 characters; a missing patch is marked as
+   changed, never as no change. Model output is capped at 4096 tokens and 12
+   behaviors.
+3. Code validates the partition against the manifest. Overlapping, unknown,
+   or unassigned files, empty scope for a non-empty PR, duplicate titles, and
+   self or cyclic `depends_on` are `scope_unverified`. So is an `indeterminate`
+   answer, an oversized input, and any gate error (the error message is not
+   copied into the halt).
+4. More than one behavior is `scope_split`, with up to 8 suggested slices.
+
+The planner node counts reviewers (`sum(1 + specialists)` per group plus 2
+always-on) before the fan-out edge emits any `Send`. A count over
+`ARGUS_REVIEWER_DISPATCH_BUDGET` halts with `dispatch_budget_exceeded`.
+A count over 50 always halts. The check-coverage node halts with
+`gap_fill_cap_exceeded` when more than 50 gap-fill reviewers are needed
+(the limit of 50 applies to each fan-out separately). Nothing truncates.
+Every halt routes to `END`.
+
+A human override (`--review-override-sha`, `--review-override-reason`) can
+pass `scope_split` and a budget overrun of up to 50. It is passed in the
+graph config, not the serialized request. A successful run always ends with
+a `scope` receipt whose `head_sha` is the reviewed head and that has at most
+one behavior (or an `override_reason`); `run_review` raises instead of
+returning an `APPROVE` without one.
 
 ### Lite path
 
@@ -212,7 +258,8 @@ class CoverageGap(BaseModel):
 ```
 
 If gaps exist, the pipeline dispatches 1-2 targeted reviewers to fill them,
-then proceeds.
+then proceeds. More than 50 gaps halts the review (`gap_fill_cap_exceeded`)
+instead of dropping gaps.
 
 ### Step 4b: Review writer
 

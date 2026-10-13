@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from argus.cli import _post_review
-from argus.models import ReviewResponse, RiskLevel, Verdict
+from argus.models import ReviewResponse, RiskLevel, ScopeReceipt, Verdict
 
 
 def _response(verdict: Verdict = Verdict.APPROVE) -> ReviewResponse:
@@ -93,6 +93,18 @@ class TestCommitStatusFlag:
         call_args = mock_client.set_commit_status.call_args.args
         assert call_args[1] == "deadbeef"
         assert call_args[2] == "failure"
+
+    def test_approve_targets_scope_head_not_current_pr_head(self) -> None:
+        mock_client = MagicMock()
+        mock_client.get_pull_request.return_value = {"head_sha": "f" * 40}
+        response = _response(Verdict.APPROVE)
+        response.scope = ScopeReceipt(base_sha="b" * 40, head_sha="a" * 40)
+        with patch("argus.github_client.GitHubClient.for_writes", return_value=mock_client):
+            _post_review("owner/repo", _args(commit_status=True, pr=7), response)
+        mock_client.get_pull_request.assert_not_called()
+        call_args = mock_client.set_commit_status.call_args.args
+        assert call_args[1] == "a" * 40
+        assert call_args[2] == "success"
 
     def test_commit_status_unresolvable_sha_exits(self) -> None:
         mock_client = MagicMock()

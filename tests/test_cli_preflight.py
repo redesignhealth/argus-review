@@ -227,6 +227,8 @@ class TestRunReviewConnectivityErrorExit:
             post=False,
             commit_status=False,
             output=None,
+            review_override_sha=None,
+            review_override_reason=None,
         )
         parser = MagicMock()
 

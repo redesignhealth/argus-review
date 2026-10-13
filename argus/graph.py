@@ -78,8 +78,21 @@ from argus.models import (
     ReviewRequest,
     ReviewResponse,
     RiskLevel,
+    ScopeReceipt,
     Severity,
     Verdict,
+)
+from argus.scope import (
+    SCOPE_PROMPT,
+    SHA40,
+    ScopeAssessment,
+    ScopeUnverified,
+    build_scope_input,
+    dispatch_count,
+    halt_response,
+    require_receipt,
+    validate_assessment,
+    validate_override,
 )
 from argus.pipeline_models import (
     AgentRunData,
@@ -160,9 +173,8 @@ _HIGH_BLAST_RADIUS_SUFFIXES = (
     "argus/bench_default.toml",
 )
 
-# Maximum number of parallel reviewer Sends dispatched by _edge_fan_out_reviewers
-# and _edge_fan_out_gap_fills. Guards against planner-produced plans with an
-# unbounded number of system groups (e.g. a very large monorepo PR).
+# Hard ceiling on reviewers per fan-out (initial plan and gap-fill separately).
+# Exceeding it halts the review (see _node_plan, _node_check_coverage); it never truncates.
 _MAX_REVIEWER_FANOUT = 50
 
 # Per-group file cap instructed to the planner (see _build_planner_messages).
@@ -172,7 +184,7 @@ _MAX_GROUP_FILES = 8
 # ReviewResponse fields the writer/lite-review OpenAI extraction call must
 # never be asked to produce: free-form dicts (not expressible in OpenAI
 # strict-mode schemas) and flags/data the pipeline sets itself, never the LLM.
-_PIPELINE_ONLY_RESPONSE_FIELDS = frozenset({"stage_costs", "stage_seconds"})
+_PIPELINE_ONLY_RESPONSE_FIELDS = frozenset({"stage_costs", "stage_seconds", "scope", "halt"})
 
 # LangGraph max_concurrency cap passed to graph.ainvoke. Limits how many
 # reviewer nodes run concurrently so the connection pool and Claude API
@@ -188,12 +200,6 @@ _HISTORY_BACKEND_DISPLAY_NAMES: dict[HistoryBackendKind, str] = {
     "http": "the HTTP storage backend",
     "sqlite": "local SQLite",
 }
-
-# Only these plan-driven reviewer types are subject to the fan-out ceiling -
-# their count scales with the (possibly hallucinated) plan size. Always-on
-# reviewers (cross-cutting, tests-and-docs, feedback-verifier) are code-added
-# singletons, never unbounded, so they are exempt from the cap and never dropped.
-_CAPPABLE_REVIEWER_TYPES = frozenset({"system", "specialist"})
 
 # Safety: if _MAX_CONCURRENT_REVIEWERS is ever raised past the thread pool size,
 # reviewers will queue behind the executor instead of running concurrently.
@@ -233,6 +239,8 @@ class ReviewState(TypedDict, total=False):
     coverage: dict[str, Any]
     response: dict[str, Any]
     validation: dict[str, Any]  # FindingValidationResult (empty if no BLOCKINGs)
+    scope_base_sha: str | None  # merge base pinned once in fetch_diff; None if unresolvable
+    scope: dict[str, Any]  # ScopeReceipt dict, set by scope_gate
     is_lite: bool  # True when preflight routed to lite review
     is_catchup_merge: bool  # True when _is_catchup_merge_only confirmed a structural catch-up
     preflight_result: dict[str, Any]  # PreflightResult dict
@@ -552,10 +560,12 @@ async def _fetch_pr_diff_and_description(
     request: ReviewRequest,
     prior_sha: str | None = None,
     pre_resolved_head_sha: str | None = None,
-) -> tuple[str, str, str, str]:
+) -> tuple[str, str, str, str, str | None]:
     """Fetch PR diff and description from GitHub.
 
-    Returns (diff, description, head_sha, base_branch). When ``prior_sha`` is provided
+    Returns (diff, description, head_sha, base_branch, pinned_base). ``pinned_base`` is the
+    merge base resolved once here and used for the round-1/SHA diff, the bench guard and
+    the scope gate; ``None`` if it cannot be pinned (the scope gate then halts). When ``prior_sha`` is provided
     (round 2+), the diff is scoped to ``prior_sha..head_sha`` instead of the
     full PR diff.
     """
@@ -568,7 +578,7 @@ async def _fetch_pr_diff_and_description(
     settings = get_settings()
     gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
 
-    def _fetch() -> tuple[str, str, str, str]:
+    def _fetch() -> tuple[str, str, str, str, str | None]:
         if request.pr_number:
             pr_data = gh.get_pull_request(request.repo, request.pr_number)
             base_branch = pr_data["base_branch"]
@@ -614,6 +624,7 @@ async def _fetch_pr_diff_and_description(
                         prior_sha[:12],
                         head_sha[:12],
                     )
+                clamped_pin: str | None = None
                 if meta["status"] in ("diverged", "behind"):
                     clamp_meta = gh.get_compare_metadata(request.repo, base_branch, head_sha)
                     new_base = clamp_meta["merge_base_sha"]
@@ -637,6 +648,7 @@ async def _fetch_pr_diff_and_description(
                             f"Invalid merge_base_sha from GitHub compare: {new_base!r}"
                         )
                     base_sha_for_diff = new_base
+                    clamped_pin = new_base if SHA40.fullmatch(new_base) else None
                     logger.warning(
                         "History rewrite detected (%s): prior_sha %s is no longer an "
                         "ancestor of head %s (ahead_by=%d behind_by=%d). Clamping base "
@@ -659,17 +671,29 @@ async def _fetch_pr_diff_and_description(
                 diff = gh.get_compare_diff(
                     request.repo, base_sha_for_diff, head_sha, max_lines=5000
                 )
+                # A clamp already resolved merge-base(base_branch, head); reuse it as the pin.
+                pinned_base = clamped_pin or (
+                    None
+                    if meta["status"] in ("diverged", "behind")
+                    else _pin_scope_base(request.repo, base_branch, head_sha)
+                )
             else:
-                # Round 1: full PR diff (base_branch...head_sha)
-                diff = gh.get_compare_diff(request.repo, base_branch, head_sha, max_lines=5000)
-            return diff, description, head_sha, base_branch
+                # Round 1: the full-scope pin is also the diff base
+                pinned_base = _pin_scope_base(request.repo, base_branch, head_sha)
+                diff = gh.get_compare_diff(
+                    request.repo, pinned_base or base_branch, head_sha, max_lines=5000
+                )
+            return diff, description, head_sha, base_branch, pinned_base
         elif request.sha and request.base_ref:
             if not _SHA_RE.fullmatch(request.sha):
                 raise ValueError(f"Invalid sha (must be 7-40 hex chars): {request.sha!r}")
             if not re.fullmatch(r"[A-Za-z0-9._/\-]+", request.base_ref) or ".." in request.base_ref:
                 raise ValueError(f"Invalid base_ref: {request.base_ref!r}")
-            diff = gh.get_compare_diff(request.repo, request.base_ref, request.sha, max_lines=5000)
-            return diff, "", request.sha, request.base_ref
+            pinned_base = _pin_scope_base(request.repo, request.base_ref, request.sha)
+            diff = gh.get_compare_diff(
+                request.repo, pinned_base or request.base_ref, request.sha, max_lines=5000
+            )
+            return diff, "", request.sha, request.base_ref, pinned_base
         else:
             raise ValueError("ReviewRequest must have pr_number or both sha and base_ref")
 
@@ -714,8 +738,9 @@ async def _fetch_full_pr_changed_files(
     head_sha: str,
     round_diff: str,
     prior_sha: str | None = None,
+    base_sha: str | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Return the set of changed files across the full PR (base_branch...head_sha)
+    """Return the set of changed files across the full PR (``base_sha`` if pinned, else base_branch...head_sha)
     along with statuses and patches, and an unconfirmed reason string if completeness
     could not be guaranteed.
 
@@ -733,7 +758,7 @@ async def _fetch_full_pr_changed_files(
 
         settings = get_settings()
         gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
-        base = base_branch
+        base = base_sha or base_branch
         head = head_sha
 
         last_error: Exception | None = None
@@ -1736,7 +1761,7 @@ async def _node_precheck_rules(state: ReviewState, config: RunnableConfig) -> di
 
 def _edge_precheck_decision(state: ReviewState) -> str:
     """Route to the fast-fail terminal node iff a verified rule fired."""
-    return "precheck_fail" if state.get("precheck_fast_fail") else "early_verifier"
+    return "precheck_fail" if state.get("precheck_fast_fail") else "scope_gate"
 
 
 _MAX_DISPLAYED_FAST_FAIL_HITS = 50
@@ -1809,6 +1834,118 @@ async def _node_precheck_fail(state: ReviewState) -> dict[str, Any]:
         preflight_reason="deterministic precheck fast-fail (verified rule hit, no LLM spend)",
     )
     return {"response": response.model_dump()}
+
+
+def _halt_update(state: ReviewState, code: Any, detail: str, **kwargs: Any) -> dict[str, Any]:
+    """State update that ends the run with a BLOCKING halt response."""
+    prior_data = state.get("prior_review", {})
+    prior = PriorReviewContext.model_validate(prior_data) if prior_data else None
+    response = halt_response(
+        code,
+        detail,
+        state.get("head_sha", ""),
+        review_round=prior.round_number if prior else 1,
+        prior_review_id=prior.review_id if prior else None,
+        **kwargs,
+    )
+    logger.warning("Review halted (%s): %s", code, detail)
+    return {"response": response.model_dump()}
+
+
+def _override_reason(state: ReviewState, config: RunnableConfig | None) -> str | None:
+    """Human override reason, honored only when pinned to exactly the head under review."""
+    conf = (config or {}).get("configurable", {})
+    sha = conf.get("review_override_sha")
+    return (
+        cast("str | None", conf.get("review_override_reason"))
+        if (sha and sha == state.get("head_sha"))
+        else None
+    )
+
+
+def _pin_scope_base(repo: str, base_branch: str, head_sha: str) -> str | None:
+    """Resolve the merge base once per run; ``None`` (never a guess) if it cannot be pinned."""
+    from argus.github_client import GitHubClient
+
+    try:
+        gh = GitHubClient(token=get_settings().GITHUB_TOKEN_RO)
+        merge_base = gh.get_compare_metadata(repo, base_branch, head_sha)["merge_base_sha"]
+    except Exception:  # noqa: BLE001 -- the scope gate halts on None
+        logger.warning("Could not pin merge base for %s", repo, exc_info=True)
+        return None
+    return merge_base if isinstance(merge_base, str) and SHA40.fullmatch(merge_base) else None
+
+
+def _fetch_scope_manifest(repo: str, base_sha: str, head_sha: str) -> list[dict[str, Any]]:
+    """Full-PR manifest ``base_sha..head_sha`` for the already-pinned base (no refetch)."""
+    from argus.github_client import GitHubClient
+
+    gh = GitHubClient(token=get_settings().GITHUB_TOKEN_RO)
+    files, truncated = gh.get_compare_files(repo, base_sha, head_sha)
+    if truncated:
+        raise ScopeUnverified("GitHub file list hit the 300-file cap; PR scope cannot be verified")
+    return files
+
+
+async def _assess_scope(payload: str) -> ScopeAssessment:
+    """One native-JSON-schema model call (same method as ``run_preflight_check``)."""
+    prompt = await fetch_prompt(SCOPE_PROMPT)
+    llm = _get_llm(
+        f"anthropic:{CLAUDE_DEFAULT}", "scope", max_tokens=4096, temperature=0
+    ).with_structured_output(ScopeAssessment, method="json_schema")
+    messages = [{"role": "system", "content": prompt}, {"role": "user", "content": payload}]
+    return cast(ScopeAssessment, await llm.ainvoke(messages))
+
+
+async def _node_scope_gate(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
+    """Full-PR semantic gate: one independently mergeable behavior, or halt (BLOCKING).
+
+    Runs on every round and on the lite path (it precedes preflight), always over the
+    full pinned PR, never the incremental round diff. Every failure halts; none approves.
+    """
+    req = ReviewRequest.model_validate(state["request"])
+    head_sha = state["head_sha"]
+    try:
+        pinned_base = state.get("scope_base_sha")
+        if not (pinned_base and SHA40.fullmatch(pinned_base)):
+            raise ScopeUnverified("could not pin the PR merge base")
+        files = await asyncio.to_thread(_fetch_scope_manifest, req.repo, pinned_base, head_sha)
+        manifest = {f.get("filename", "") for f in files}
+        if not manifest and state.get("diff", "").strip():
+            raise ScopeUnverified("GitHub returned no changed files for a non-empty diff")
+        if manifest:
+            assessment = await _assess_scope(build_scope_input(files, state.get("description", "")))
+        else:
+            assessment = ScopeAssessment(indeterminate=False, behaviors=[], rationale="empty PR")
+        validate_assessment(assessment, manifest)
+    except ScopeUnverified as exc:
+        return _halt_update(state, "scope_unverified", str(exc))
+    except Exception as exc:  # noqa: BLE001 -- any failure must halt BLOCKING, never pass
+        logger.error("Scope gate failed", exc_info=True)
+        return _halt_update(state, "scope_unverified", f"scope check failed ({type(exc).__name__})")
+
+    override = _override_reason(state, config) if len(assessment.behaviors) > 1 else None
+    if len(assessment.behaviors) > 1 and not override:
+        return _halt_update(
+            state,
+            "scope_split",
+            f"PR contains {len(assessment.behaviors)} independently mergeable behaviors; "
+            "split it into separate PRs",
+            split_suggestions=assessment.behaviors,
+        )
+    receipt = ScopeReceipt(
+        base_sha=pinned_base,
+        head_sha=head_sha,
+        behaviors=assessment.behaviors,
+        rationale=assessment.rationale[:1000],
+        override_reason=override,
+    )
+    return {"scope": receipt.model_dump()}
+
+
+def _edge_scope_decision(state: ReviewState) -> str:
+    """Route a halt straight to END, otherwise continue to the early verifier."""
+    return END if state.get("response") else "early_verifier"
 
 
 async def _node_early_verifier(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
@@ -2378,7 +2515,7 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
 
     pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
 
-    diff, description, head_sha, base_branch = await _fetch_pr_diff_and_description(
+    diff, description, head_sha, base_branch, scope_base_sha = await _fetch_pr_diff_and_description(
         req, prior_sha=prior_sha, pre_resolved_head_sha=pre_resolved_head_sha
     )
 
@@ -2402,7 +2539,7 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     settings = get_settings()
 
     full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
-        req, base_branch, head_sha, diff, prior_sha=prior_sha
+        req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
     )
 
     bench_config_changes: list[str] = []
@@ -2447,6 +2584,10 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         "diff": diff,
         "description": description,
         "head_sha": head_sha,
+        "scope_base_sha": scope_base_sha,
+        # A retried checkpoint must not terminate on an earlier attempt's decision.
+        "response": {},
+        "scope": {},
         "bench_config_changes": bench_config_changes,
         "bench_config_unconfirmed": unconfirmed_reason,
     }
@@ -2467,8 +2608,8 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     return result
 
 
-async def _node_plan(state: ReviewState) -> dict[str, Any]:
-    """Run the planner to produce a ReviewPlan."""
+async def _node_plan(state: ReviewState, config: RunnableConfig | None = None) -> dict[str, Any]:
+    """Run the planner to produce a ReviewPlan, halting before dispatch if over budget."""
     plan = await plan_review(state["diff"], state["description"])
     logger.info(
         "Planner: %d groups, %d cross-cutting concerns",
@@ -2484,16 +2625,33 @@ async def _node_plan(state: ReviewState) -> dict[str, Any]:
             ", ".join(oversized),
         )
 
-    return {"plan": plan.model_dump()}
+    update: dict[str, Any] = {"plan": plan.model_dump()}
+    count = dispatch_count(plan)
+    budget = get_settings().ARGUS_REVIEWER_DISPATCH_BUDGET
+    if count > budget:
+        reason = _override_reason(state, config) if count <= _MAX_REVIEWER_FANOUT else None
+        if not reason:
+            return _halt_update(
+                state,
+                "dispatch_budget_exceeded",
+                f"plan needs {count} reviewers; budget is {budget} (hard ceiling "
+                f"{_MAX_REVIEWER_FANOUT})",
+                dispatch_count=count,
+                dispatch_budget=budget,
+            )
+        update["scope"] = {**state.get("scope", {}), "override_reason": reason}
+    return update
 
 
-def _edge_fan_out_reviewers(state: ReviewState) -> list[Send]:
+def _edge_fan_out_reviewers(state: ReviewState) -> list[Send] | str:
     """Fan-out edge: dispatch one Send per reviewer (system groups + specialists + cross-cutting).
 
     Takes only ``state``: LangGraph propagates ``configurable`` (including
     ``worktree_path``) to dispatched nodes automatically, so this edge has no
     need to read or forward ``config``.
     """
+    if state.get("response"):  # _node_plan halted: dispatch nothing
+        return END
     plan = ReviewPlan.model_validate(state["plan"])
     sends: list[Send] = []
 
@@ -2551,30 +2709,6 @@ def _edge_fan_out_reviewers(state: ReviewState) -> list[Send]:
             ),
         )
     )
-
-    # Apply cap before building the dispatch plan so the printed plan
-    # reflects exactly which reviewers will ACTUALLY run.
-    #
-    # Only plan-driven (cappable) sends are subject to the ceiling. Always-on
-    # singletons - cross_cutting, tests_and_docs, and feedback-verifier sends
-    # (which carry no reviewer_type key at all) - are never dropped.
-    group_sends = [s for s in sends if s.arg.get("reviewer_type") in _CAPPABLE_REVIEWER_TYPES]
-    protected = [s for s in sends if s.arg.get("reviewer_type") not in _CAPPABLE_REVIEWER_TYPES]
-    group_cap = max(0, _MAX_REVIEWER_FANOUT - len(protected))
-    if len(group_sends) > group_cap:
-        requested_groups = len(group_sends)
-        group_sends = group_sends[:group_cap]
-        logger.warning(
-            "Fan-out ceiling reached: %d reviewers requested, keeping %d total "
-            "(%d group + %d always-on, cap=%d). Large plans may have incomplete "
-            "per-group coverage.",
-            requested_groups + len(protected),
-            group_cap + len(protected),
-            group_cap,
-            len(protected),
-            _MAX_REVIEWER_FANOUT,
-        )
-    sends = group_sends + protected
 
     # Log the full pipeline plan — model constants imported at module level
     # from argus.runners
@@ -2878,11 +3012,25 @@ async def _node_check_coverage(state: ReviewState) -> dict[str, Any]:
         if f.failure_reason is None
     ]
     coverage = await check_coverage(plan, findings_models)
-    return {"coverage": coverage.model_dump()}
+    update: dict[str, Any] = {"coverage": coverage.model_dump()}
+    if not coverage.is_covered and len(coverage.gaps) > _MAX_REVIEWER_FANOUT:
+        update.update(
+            _halt_update(
+                state,
+                "gap_fill_cap_exceeded",
+                f"{len(coverage.gaps)} coverage gaps need gap-fill reviewers "
+                f"(hard ceiling {_MAX_REVIEWER_FANOUT})",
+                dispatch_count=len(coverage.gaps),
+                dispatch_budget=_MAX_REVIEWER_FANOUT,
+            )
+        )
+    return update
 
 
 def _edge_coverage_decision(state: ReviewState) -> str:
-    """Conditional edge: fill gaps or proceed to writer."""
+    """Conditional edge: fill gaps or proceed to writer (a halt ends the run)."""
+    if state.get("response"):
+        return END
     coverage = CoverageResult.model_validate(state["coverage"])
     if coverage.is_covered:
         return "write_review"
@@ -2919,16 +3067,6 @@ def _edge_fan_out_gap_fills(state: ReviewState) -> list[Send]:
                 ),
             )
         )
-
-    if len(sends) > _MAX_REVIEWER_FANOUT:
-        logger.warning(
-            "Gap-fill fan-out ceiling reached: %d gap-fill reviewers requested, dropping %d "
-            "(cap=%d). Some coverage gaps may not be filled.",
-            len(sends),
-            len(sends) - _MAX_REVIEWER_FANOUT,
-            _MAX_REVIEWER_FANOUT,
-        )
-        sends = sends[:_MAX_REVIEWER_FANOUT]
 
     logger.info("Gap-fill: dispatching %d reviewer Sends", len(sends))
     return sends
@@ -3132,7 +3270,7 @@ def _build_review_graph() -> StateGraph[ReviewState]:
 
         All rounds:
           fetch_diff -> (precheck_checks, precheck_rules) -> precheck_join
-             -> (precheck_fail | early_verifier) -> preflight
+             -> (precheck_fail | scope_gate) -> (END on halt | early_verifier) -> preflight
           -> lite_review (lite path)
           -> plan -> fan_out[run_reviewer...] -> collect_findings
              -> check_coverage -> (fill_gaps | write_review)
@@ -3164,6 +3302,7 @@ def _build_review_graph() -> StateGraph[ReviewState]:
         "precheck_join", lambda state: {}
     )  # passthrough; fans in the parallel pair above
     graph.add_node("precheck_fail", _node_precheck_fail)
+    graph.add_node("scope_gate", _node_scope_gate)
     graph.add_node("early_verifier", _node_early_verifier)
     graph.add_node("preflight", _node_preflight)
     graph.add_node("lite_review", _node_lite_review)
@@ -3200,19 +3339,20 @@ def _build_review_graph() -> StateGraph[ReviewState]:
     graph.add_edge("precheck_checks", "precheck_join")
     graph.add_edge("precheck_rules", "precheck_join")
     graph.add_conditional_edges(
-        "precheck_join", _edge_precheck_decision, ["precheck_fail", "early_verifier"]
+        "precheck_join", _edge_precheck_decision, ["precheck_fail", "scope_gate"]
     )
     graph.add_edge("precheck_fail", END)
+    graph.add_conditional_edges("scope_gate", _edge_scope_decision, ["early_verifier", END])
     graph.add_edge("early_verifier", "preflight")
     graph.add_conditional_edges("preflight", _edge_preflight_decision, ["plan", "lite_review"])
     graph.add_edge("lite_review", END)
-    graph.add_conditional_edges("plan", _edge_fan_out_reviewers, ["run_reviewer"])
+    graph.add_conditional_edges("plan", _edge_fan_out_reviewers, ["run_reviewer", END])
     graph.add_edge("run_reviewer", "collect_findings")
     graph.add_edge("collect_findings", "check_coverage")
     graph.add_conditional_edges(
         "check_coverage",
         _edge_coverage_decision,
-        {"write_review": "write_review", "fill_gaps": "fill_gaps"},
+        {"write_review": "write_review", "fill_gaps": "fill_gaps", END: END},
     )
     graph.add_conditional_edges("fill_gaps", _edge_fan_out_gap_fills, ["run_gap_reviewer"])
     graph.add_edge("run_gap_reviewer", "write_review")
@@ -3459,15 +3599,27 @@ def _looks_like_missing_schema_object(exc: Exception) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> ReviewResponse:
+async def run_review(
+    request: ReviewRequest,
+    flow_run_id: str | None = None,
+    *,
+    review_override_sha: str | None = None,
+    review_override_reason: str | None = None,
+) -> ReviewResponse:
     """Execute the v3 review pipeline via LangGraph StateGraph.
 
     This is the public entry point called by an external orchestrator (or the
     CLI, for local runs).
     Handles round-history logging after the pipeline completes.
+
+    ``review_override_sha``/``review_override_reason`` are the human scope/budget
+    override (CLI-only, deliberately not on ``ReviewRequest``): both required, and the
+    SHA must equal the resolved head or the run fails before any review spend.
     """
     import time
     import uuid
+
+    override = validate_override(review_override_sha, review_override_reason)
 
     # Fail fast on a bad ARGUS_DB_URL / ARGUS_HISTORY_DB_PATH, before any of
     # the pipeline's LLM cost runs. Both history-backend implementations
@@ -3538,6 +3690,12 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     else:
         head_sha_for_worktree = None
 
+    if override and override[0] != head_sha_for_worktree:
+        raise ValueError(
+            f"--review-override-sha {override[0][:12]} does not match the resolved head "
+            f"{(head_sha_for_worktree or 'none')[:12]}; refusing a stale override"
+        )
+
     # Two branches below:
     #   1. SHA available  -> run inside the provisioned_worktree context
     #      manager (guarantees worktree teardown via its finally block).
@@ -3560,6 +3718,8 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
                             "thread_id": thread_id,
                             "worktree_path": worktree_path,
                             "head_sha": head_sha,
+                            "review_override_sha": override[0] if override else None,
+                            "review_override_reason": override[1] if override else None,
                         },
                         "max_concurrency": _MAX_CONCURRENT_REVIEWERS,
                     },
@@ -3587,6 +3747,8 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
             result = await _invoke_graph(None)
 
         response = ReviewResponse.model_validate(result["response"])
+        scope = result.get("scope")
+        response.scope = ScopeReceipt.model_validate(scope) if scope else None
         response.stage_costs = stage_costs()
         response.stage_seconds = stage_seconds()
 
@@ -3615,11 +3777,17 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     # second, PR-visible half of that same observability, not a duplicate
     # warning path.
     precheck_scanner_failures = result.get("precheck_scanner_failures", [])
-    gate_added_precheck_finding, failed_labels = apply_precheck_gate_and_surface_degraded_coverage(
-        response,
-        findings_models,
-        result,
-        get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
+    # A halt is a complete BLOCKING response: the gates below would only add dummy findings.
+    halted = response.halt is not None
+    gate_added_precheck_finding, failed_labels = (
+        (False, [])
+        if halted
+        else apply_precheck_gate_and_surface_degraded_coverage(
+            response,
+            findings_models,
+            result,
+            get_settings().ARGUS_PRECHECK_BLOCK_ON_SCANNER_FAILURE,
+        )
     )
     if gate_added_precheck_finding:
         logger.warning(
@@ -3643,7 +3811,7 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
     # forced BLOCKING finding is included in persistence counts.
     bench_config_changes = result.get("bench_config_changes", [])
     bench_config_unconfirmed = result.get("bench_config_unconfirmed")
-    if apply_bench_config_change_gate(
+    if not halted and apply_bench_config_change_gate(
         response, bench_config_changes, unconfirmed_reason=bench_config_unconfirmed
     ):
         if bench_config_changes:
@@ -3663,6 +3831,8 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
 
     # Use head_sha from graph state (populated for both PR and SHA mode)
     reviewed_sha = result.get("head_sha") or request.sha
+    if not halted and response.verdict is Verdict.APPROVE:
+        require_receipt(response.scope, reviewed_sha or "")
 
     # See compute_persisted_finding_counts' own docstring for why
     # "coverage-gap" findings are excluded from these two persisted counts.
@@ -3691,7 +3861,9 @@ async def run_review(request: ReviewRequest, flow_run_id: str | None = None) -> 
         flow_run_id=flow_run_id,
         repo=request.repo,
         pr_number=request.pr_number,
-        verdict=response.verdict.value,
+        # A halt stores verdict=NULL (current_stage=completed) so history readers, which
+        # filter on verdict IS NOT NULL, never treat it as a reviewed round.
+        verdict=None if halted else response.verdict.value,
         risk_level=response.risk_level.value,
         blocking_count=blocking_count,
         suggestion_count=suggestion_count,

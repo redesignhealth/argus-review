@@ -128,6 +128,67 @@
       "title": "PriorFeedbackItem",
       "type": "object"
     },
+    "ReviewHalt": {
+      "description": "Pipeline-generated stop: the review ended before a normal verdict (always BLOCKING).",
+      "properties": {
+        "code": {
+          "enum": [
+            "scope_split",
+            "scope_unverified",
+            "dispatch_budget_exceeded",
+            "gap_fill_cap_exceeded"
+          ],
+          "title": "Code",
+          "type": "string"
+        },
+        "detail": {
+          "title": "Detail",
+          "type": "string"
+        },
+        "dispatch_budget": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dispatch Budget"
+        },
+        "dispatch_count": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dispatch Count"
+        },
+        "head_sha": {
+          "title": "Head Sha",
+          "type": "string"
+        },
+        "split_suggestions": {
+          "items": {
+            "$ref": "#/$defs/ScopeBehavior"
+          },
+          "title": "Split Suggestions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "code",
+        "detail",
+        "head_sha"
+      ],
+      "title": "ReviewHalt",
+      "type": "object"
+    },
     "RiskLevel": {
       "description": "Risk classification for the PR.",
       "enum": [
@@ -138,6 +199,80 @@
       ],
       "title": "RiskLevel",
       "type": "string"
+    },
+    "ScopeBehavior": {
+      "description": "One independently mergeable behavior within a PR.",
+      "properties": {
+        "depends_on": {
+          "description": "Titles of behaviors this one depends on",
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "title": {
+          "description": "Unique behavior title within the receipt",
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "title": "ScopeBehavior",
+      "type": "object"
+    },
+    "ScopeReceipt": {
+      "description": "Pipeline-generated proof that the full PR was scope-checked at a pinned head.",
+      "properties": {
+        "base_sha": {
+          "title": "Base Sha",
+          "type": "string"
+        },
+        "behaviors": {
+          "items": {
+            "$ref": "#/$defs/ScopeBehavior"
+          },
+          "title": "Behaviors",
+          "type": "array"
+        },
+        "head_sha": {
+          "title": "Head Sha",
+          "type": "string"
+        },
+        "override_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human override reason when the gate was explicitly overridden",
+          "title": "Override Reason"
+        },
+        "rationale": {
+          "default": "",
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_sha",
+        "head_sha"
+      ],
+      "title": "ScopeReceipt",
+      "type": "object"
     },
     "Severity": {
       "description": "Finding severity \u2014 only two levels by design.\n\nBLOCKING = runtime failures and security vulnerabilities only.\nSUGGESTION = everything else.",
@@ -246,6 +381,18 @@
       "title": "Findings",
       "type": "array"
     },
+    "halt": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReviewHalt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Set when the pipeline halted before a normal verdict; never LLM-generated"
+    },
     "lite_mode": {
       "default": false,
       "description": "True if this review was performed in lite mode (single-pass check)",
@@ -305,6 +452,18 @@
     },
     "risk_level": {
       "$ref": "#/$defs/RiskLevel"
+    },
+    "scope": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScopeReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Scope receipt set by the pipeline; never LLM-generated"
     },
     "stage_costs": {
       "additionalProperties": {

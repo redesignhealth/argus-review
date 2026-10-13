@@ -235,7 +235,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(round_diff, "desc", "head12345678", "main"),
+                return_value=(round_diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -304,7 +304,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(round_diff, "desc", "head12345678", "main"),
+                return_value=(round_diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -347,7 +347,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -407,7 +407,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(round_diff, "desc", "head12345678", "main"),
+                return_value=(round_diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -446,7 +446,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -477,7 +477,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -518,7 +518,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -556,7 +556,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -593,7 +593,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -650,7 +650,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):
@@ -696,7 +696,7 @@ class TestMultiRoundBenchConfigGuardRegressions:
             patch(
                 "argus.graph._fetch_pr_diff_and_description",
                 new_callable=AsyncMock,
-                return_value=(diff, "desc", "head12345678", "main"),
+                return_value=(diff, "desc", "head12345678", "main", None),
             ),
             patch(_GH_CLIENT_CLASS, return_value=mock_gh),
         ):

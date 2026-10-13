@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Scope gate: before the early verifier and preflight (including incremental and lite rounds), a new `pr-review-scope` prompt splits the full pinned PR (`merge-base..head`) into independently mergeable behaviors. More than one behavior halts with `scope_split`. An unverifiable manifest (overlapping, unknown, or unassigned files, cyclic dependencies, a 300-file listing, an oversized or indeterminate input, or any gate error) halts with `scope_unverified`.
+- Workload halts: a plan that needs more reviewers than `ARGUS_REVIEWER_DISPATCH_BUDGET` (default 16, range 3-50) halts with `dispatch_budget_exceeded` before any reviewer starts. More than 50 gap-fill reviewers halts with `gap_fill_cap_exceeded`.
+- `ReviewResponse.scope` (pipeline-generated receipt: `base_sha`, `head_sha`, `behaviors`, `rationale`, `override_reason`) and `ReviewResponse.halt` (`code`, `detail`, `head_sha`, `split_suggestions`, `dispatch_count`, `dispatch_budget`). Both are excluded from LLM-generated output. A halt is always `BLOCKING` with `HIGH` risk and has no findings.
+- CLI `--review-override-sha` and `--review-override-reason`: a human exception for `scope_split` and for a plan over the budget (up to the hard ceiling of 50). The SHA must equal the resolved head. It never overrides `scope_unverified` or `gap_fill_cap_exceeded`.
+
+### Changed
+
+- The fan-out ceiling of 50 reviewers no longer truncates the plan or the gap-fill list; exceeding it halts the review.
+- A halted round is stored with `verdict = NULL` and `current_stage = completed`, so it never becomes the prior round: the last reviewed SHA and round count do not advance. The HTTP storage client now skips `verdict = null` rounds like the SQL backends. No schema migration.
+- `--commit-status` posts every outcome to the reviewed head (`halt.head_sha` or `scope.head_sha`) instead of re-reading the live head. The scope gate and bench guard share one merge base pinned in `fetch_diff`; an unpinnable base, an empty manifest for a non-empty diff, an empty-file behavior, or untrimmed titles halt `scope_unverified`.
+- `ReviewResponse` JSON schema gains `scope` and `halt` (golden snapshot updated). The stderr summary block is unchanged.
+
 ## [0.2.11] - 2026-10-12
 
 ### Fixed

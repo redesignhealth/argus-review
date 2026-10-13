@@ -50,8 +50,8 @@ def _make_state(*, precheck_fast_fail: list | None = None, **overrides: object) 
 # ---------------------------------------------------------------------------
 
 
-def test_edge_routes_to_early_verifier_when_no_fast_fail() -> None:
-    assert _edge_precheck_decision(_make_state()) == "early_verifier"
+def test_edge_routes_to_scope_gate_when_no_fast_fail() -> None:
+    assert _edge_precheck_decision(_make_state()) == "scope_gate"
 
 
 def test_edge_routes_to_precheck_fail_when_verified_hit_present() -> None:
@@ -61,7 +61,7 @@ def test_edge_routes_to_precheck_fail_when_verified_hit_present() -> None:
 
 def test_edge_ignores_empty_fast_fail_list() -> None:
     state = _make_state(precheck_fast_fail=[])
-    assert _edge_precheck_decision(state) == "early_verifier"
+    assert _edge_precheck_decision(state) == "scope_gate"
 
 
 # ---------------------------------------------------------------------------
@@ -511,7 +511,11 @@ def test_graph_wires_precheck_fan_out_and_fan_in() -> None:
     # ... which conditionally routes to the fast-fail terminal node or
     # continues into the normal round-1+ path.
     assert ("precheck_join", "precheck_fail") in edges
-    assert ("precheck_join", "early_verifier") in edges
+    assert ("precheck_join", "scope_gate") in edges
+    assert ("precheck_join", "early_verifier") not in edges
+    # The scope gate sits between the precheck and the early verifier/preflight.
+    assert ("scope_gate", "early_verifier") in edges
+    assert ("scope_gate", "__end__") in edges
     assert ("precheck_fail", "__end__") in edges
 
 
