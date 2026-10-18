@@ -20,10 +20,13 @@ classifiers = [
 ]
 dependencies = [
     # Claude Agent SDK for orchestrator + subagent dispatch.
-    # Pinned to ==0.1.81: regenerating the lock on a sliding
-    # exclude-newer window would otherwise downgrade to 0.1.75 and
-    # potentially miss API surface added in 0.1.76+.
-    "claude-agent-sdk==0.1.81",
+    # Pinned exactly: the SDK bundles the Claude Code CLI, and Anthropic's
+    # API rejects claude-opus-5-5 from Claude Code older than 2.1.280
+    # (claude_code_version_too_old, TECH-7686). 0.2.158 is the first SDK
+    # release that bundles CLI 2.1.280 (0.1.81 bundled 2.1.139). Do not
+    # lower this pin below a release bundling >= 2.1.280 (enforced by
+    # tests/test_sdk_bundled_cli_version.py).
+    "claude-agent-sdk==0.2.158",
     # LangGraph for pipeline orchestration
     "langgraph>=1.0.10,<2",
     "langgraph-checkpoint-postgres>=2.0.0",

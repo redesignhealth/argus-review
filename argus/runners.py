@@ -219,7 +219,7 @@ _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
 # Tool-call budget warning thresholds and truthful messages for Claude-path
 # sessions.
 #
-# In claude-agent-sdk 0.1.81, supported tool-lifecycle hooks that can inject
+# In claude-agent-sdk 0.2.158, supported tool-lifecycle hooks that can inject
 # feedback via hookSpecificOutput.additionalContext are PostToolUse and
 # PostToolUseFailure. PostToolBatch is the exact-per-turn future option in
 # Claude Code, but is untyped and unsupported in this SDK version.
@@ -284,7 +284,7 @@ def _make_tool_budget_nudge_hooks(
     """Create PostToolUse and PostToolUseFailure hooks that inject non-blocking
     nudge warnings into Claude-path sessions when tool-call counts cross budget thresholds.
 
-    In claude-agent-sdk 0.1.81, supported tool-lifecycle hooks that can inject
+    In claude-agent-sdk 0.2.158, supported tool-lifecycle hooks that can inject
     feedback via hookSpecificOutput.additionalContext are PostToolUse and
     PostToolUseFailure. PostToolBatch is the exact-per-turn future option in
     Claude Code, but is untyped and unsupported in this SDK version.
