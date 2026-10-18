@@ -2,7 +2,8 @@
 
 Anthropic's API rejects claude-opus-5-5 from Claude Code older than 2.1.280
 (HTTP 400, ``claude_code_version_too_old``). The Claude Agent SDK bundles the
-CLI, so the SDK pin determines it. See TECH-7686.
+CLI, so the SDK pin determines it. Pinned SDK 0.2.168 bundles 2.1.301; 2.1.280 is
+the minimum for opus-5-5. See TECH-7686.
 """
 
 import re

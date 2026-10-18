@@ -46,7 +46,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-# Pinned internal import: the exact SDK pin (0.2.158) is load-bearing;
+# Pinned internal import: the exact SDK pin (0.2.168) is load-bearing;
 # this test and internal import must be revisited whenever claude-agent-sdk is bumped.
 from claude_agent_sdk._internal.query import _convert_hook_output_for_cli
 from claude_agent_sdk.types import _hooks_to_internal_format
