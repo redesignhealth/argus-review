@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-19
+
 ### Fixed
 
 - The cross-cutting reviewer no longer fails every round with `API Error: 400` (TECH-7686). Argus bundled Claude Code 2.1.139 (through `claude-agent-sdk` 0.1.81), and Anthropic's API rejects `claude-opus-5-5` from Claude Code older than 2.1.280 ("version 2.1.280 or newer is required", `claude_code_version_too_old`). That reviewer is the only one that runs opus through the SDK, so it returned no tokens and no findings. `claude-agent-sdk` is now pinned to 0.2.168, which bundles Claude Code 2.1.301. A new test asserts the bundled CLI is at least 2.1.280.
@@ -432,7 +434,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/redesignhealth/argus-review/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/redesignhealth/argus-review/compare/v0.2.11...v0.3.0
 [0.2.11]: https://github.com/redesignhealth/argus-review/compare/v0.2.10...v0.2.11
 [0.2.10]: https://github.com/redesignhealth/argus-review/compare/v0.2.9...v0.2.10
