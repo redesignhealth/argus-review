@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The cross-cutting reviewer no longer fails every round with `API Error: 400` (TECH-7686). Argus bundled Claude Code 2.1.139 (through `claude-agent-sdk` 0.1.81), and Anthropic's API rejects `claude-opus-5-5` from Claude Code older than 2.1.280 ("version 2.1.280 or newer is required", `claude_code_version_too_old`). That reviewer is the only one that runs opus through the SDK, so it returned no tokens and no findings. `claude-agent-sdk` is now pinned to 0.2.168, which bundles Claude Code 2.1.301. A new test asserts the bundled CLI is at least 2.1.280.
+
+### Changed
+
+- `claude-agent-sdk` 0.1.81 to 0.2.168. This adds `jsonschema>=4.20.0` as a transitive dependency and raises the `mcp` floor to 1.23.0; semgrep's exact `mcp==1.23.3` pin in the `prechecks` extra still satisfies it, with little headroom (see the comment in `pyproject.toml`).
+- A test that exercised the SDK's private hook-conversion helper now calls `claude_agent_sdk.types._hooks_to_internal_format`, where that logic moved. It is a private API and should be rechecked on each SDK bump.
+
 ## [0.3.0] - 2026-10-13
 
 ### Added

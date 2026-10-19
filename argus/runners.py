@@ -219,10 +219,12 @@ _TURN_BUDGET_SYSTEM_PROMPT_LINE_CLAUDE = (
 # Tool-call budget warning thresholds and truthful messages for Claude-path
 # sessions.
 #
-# In claude-agent-sdk 0.1.81, supported tool-lifecycle hooks that can inject
-# feedback via hookSpecificOutput.additionalContext are PostToolUse and
-# PostToolUseFailure. PostToolBatch is the exact-per-turn future option in
-# Claude Code, but is untyped and unsupported in this SDK version.
+# In claude-agent-sdk 0.2.168, the hook events in the HookEvent literal that
+# ClaudeAgentOptions.hooks is typed to accept, and that can inject feedback via
+# hookSpecificOutput.additionalContext, are PostToolUse and PostToolUseFailure.
+# PostToolBatch would give exact per-turn nudges and has a typed hookSpecificOutput
+# (PostToolBatchHookSpecificOutput), but it is not in the HookEvent literal, so it
+# is not used here.
 # We attach to PostToolUse and PostToolUseFailure to track combined tool
 # invocations and inject non-blocking convergence/stop nudges.
 #
@@ -284,10 +286,12 @@ def _make_tool_budget_nudge_hooks(
     """Create PostToolUse and PostToolUseFailure hooks that inject non-blocking
     nudge warnings into Claude-path sessions when tool-call counts cross budget thresholds.
 
-    In claude-agent-sdk 0.1.81, supported tool-lifecycle hooks that can inject
-    feedback via hookSpecificOutput.additionalContext are PostToolUse and
-    PostToolUseFailure. PostToolBatch is the exact-per-turn future option in
-    Claude Code, but is untyped and unsupported in this SDK version.
+    In claude-agent-sdk 0.2.168, the hook events in the HookEvent literal that
+    ClaudeAgentOptions.hooks is typed to accept, and that can inject feedback via
+    hookSpecificOutput.additionalContext, are PostToolUse and PostToolUseFailure.
+    PostToolBatch would give exact per-turn nudges and has a typed hookSpecificOutput
+    (PostToolBatchHookSpecificOutput), but it is not in the HookEvent literal, so it
+    is not used here.
 
     One callback is shared by both events, closing over combined tool-call count
     and one-shot flags. Subagent tool calls (bearing agent_id) are skipped.

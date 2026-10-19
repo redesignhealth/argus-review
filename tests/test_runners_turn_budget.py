@@ -39,7 +39,6 @@ import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKClient,
     HookMatcher,
     ResultMessage,
     ToolResultBlock,
@@ -47,9 +46,10 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-# Pinned internal import: the exact SDK pin (0.1.81) is load-bearing;
+# Pinned internal import: the exact SDK pin (0.2.168) is load-bearing;
 # this test and internal import must be revisited whenever claude-agent-sdk is bumped.
 from claude_agent_sdk._internal.query import _convert_hook_output_for_cli
+from claude_agent_sdk.types import _hooks_to_internal_format
 from claude_agent_sdk.types import (
     HookContext,
     HookEvent,
@@ -692,8 +692,9 @@ class TestClaudeAgentSdkHookContract:
         assert isinstance(hooks["PostToolUse"][0], HookMatcher)
         assert isinstance(hooks["PostToolUseFailure"][0], HookMatcher)
 
-        client = ClaudeSDKClient(options=ClaudeAgentOptions(hooks=hooks))
-        internal = client._convert_hooks_to_internal_format(hooks)
+        # claude-agent-sdk 0.2.x moved this from a ClaudeSDKClient method to a
+        # module-level helper in claude_agent_sdk.types (TECH-7686).
+        internal = _hooks_to_internal_format(hooks)
         assert "PostToolUse" in internal
         assert "PostToolUseFailure" in internal
         assert len(internal["PostToolUse"]) == 1
