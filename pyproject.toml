@@ -157,8 +157,12 @@ prechecks = [
 # transitives jsonschema/importlib-metadata/pywin32 -- to that version for
 # EVERY install of this package, not just prechecks users. This is provably
 # safe, not a functional regression: claude-agent-sdk (core, always
-# installed) only requires mcp>=1.19.0, and 1.23.3 satisfies that floor, so
-# nothing here depends on an mcp feature added after 1.23.3. Investigated
+# installed) requires mcp>=1.23.0,<3 (and jsonschema>=4.20.0) as of 0.2.168,
+# and 1.23.3 satisfies that floor, so nothing here depends on an mcp feature
+# added after 1.23.3. Headroom is thin: semgrep's exact mcp==1.23.3 pin now
+# sits just above the SDK's 1.23.0 floor, so a future SDK bump that raises the
+# mcp floor above 1.23.3 will conflict with the prechecks extra and need the
+# semgrep pin revisited at that point. Investigated
 # uv's `conflicts` mechanism (declaring dev/prechecks mutually exclusive) as
 # a way to fork the resolution and keep the newer mcp for non-prechecks
 # installs -- it has no effect here, because 1.23.3 already satisfies both
