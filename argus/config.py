@@ -262,6 +262,12 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def _cached_settings() -> Settings:
+    from argus.dotenv_utils import dotenv_disabled
+
+    if dotenv_disabled():
+        # ARGUS_NO_DOTENV: ignore the ``env_file`` in model_config too, not
+        # just load_dotenv_early, so a ``.env`` in the cwd cannot configure us.
+        return Settings(_env_file=None)
     return Settings()
 
 

@@ -64,6 +64,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -229,6 +230,7 @@ async def run(
     request: "ReviewRequest",
     review_override_sha: str | None = None,
     review_override_reason: str | None = None,
+    expect_head_sha: str | None = None,
 ) -> "ReviewResponse":
     """Run the review pipeline (storage backend resolved automatically:
     Postgres if ``ARGUS_DB_URL`` is set, HTTP shim if the storage URLs are
@@ -240,6 +242,7 @@ async def run(
         flow_run_id=None,
         review_override_sha=review_override_sha,
         review_override_reason=review_override_reason,
+        expect_head_sha=expect_head_sha,
     )
 
 
@@ -362,6 +365,16 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
         dest="review_override_reason",
         default=None,
         help="Reason for --review-override-sha (1-500 characters); recorded in the scope receipt.",
+    )
+    parser.add_argument(
+        "--expect-head-sha",
+        dest="expect_head_sha",
+        default=None,
+        help=(
+            "Fail before any review spend unless the resolved head commit equals this "
+            "40-character lowercase SHA. For services that review a specific commit and "
+            "must not silently review a newer one if the PR head moved."
+        ),
     )
     parser.add_argument(
         "--no-prompt-overrides",
@@ -622,6 +635,9 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
     if args.pr and args.sha:
         sys.exit("Provide either --pr or --sha, not both")
 
+    if args.expect_head_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", args.expect_head_sha):
+        sys.exit("--expect-head-sha must be a 40-character lowercase hex SHA")
+
     if args.no_prompt_overrides:
         os.environ["ARGUS_NO_PROMPT_OVERRIDES"] = "1"
 
@@ -676,6 +692,7 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
                 request,
                 review_override_sha=args.review_override_sha,
                 review_override_reason=args.review_override_reason,
+                expect_head_sha=args.expect_head_sha,
             )
         )
     except HistoryBackendConnectivityError as exc:

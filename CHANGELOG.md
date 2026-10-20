@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CLI `--expect-head-sha <sha>`: the review fails before any LLM spend unless the resolved head commit equals this 40-character lowercase SHA, so a service that reviews a specific commit never silently reviews a newer one if the PR head moves (TECH-7789). Also available as `run_review(..., expect_head_sha=...)`.
+- `ARGUS_NO_DOTENV` (truthy): stop all `.env` loading. It disables both `load_dotenv_early` and the `Settings` `env_file`, so a `.env` in the working directory cannot configure the process. For service workers that review untrusted checkouts, alongside `ARGUS_NO_PROMPT_OVERRIDES` and `ARGUS_NO_BENCH_OVERRIDES`.
+
 ## [0.3.1] - 2026-10-19
 
 ### Fixed

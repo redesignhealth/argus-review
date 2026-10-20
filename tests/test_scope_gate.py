@@ -476,6 +476,21 @@ class TestRunReviewHaltAndReceipt:
         with pytest.raises(ValueError, match="stale"):
             await _run({}, review_override_sha="d" * 40, review_override_reason="r")
 
+    async def test_expect_head_sha_mismatch_fails_before_any_graph_run(self) -> None:
+        with pytest.raises(ValueError, match="head moved"):
+            await _run({}, expect_head_sha="d" * 40)
+
+    async def test_expect_head_sha_must_be_a_full_lowercase_sha(self) -> None:
+        with pytest.raises(ValueError, match="40-character"):
+            await _run({}, expect_head_sha=HEAD[:12])
+
+    async def test_expect_head_sha_match_runs_the_review(self) -> None:
+        resp, _, _ = await _run(
+            {"response": _approve(), "head_sha": HEAD, "findings": [], "scope": _scope_dict()},
+            expect_head_sha=HEAD,
+        )
+        assert resp.scope is not None and resp.scope.head_sha == HEAD
+
     async def test_override_pair_is_required(self) -> None:
         with pytest.raises(ValueError, match="together"):
             await _run({}, review_override_sha=HEAD)
