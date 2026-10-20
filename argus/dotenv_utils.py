@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 
 
-_TRUTHY = frozenset({"1", "true", "t", "yes", "y", "on"})
+# The strings pydantic treats as True for a bool setting; shared with the CLI so the
+# two truthy checks cannot drift.
+TRUTHY_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
 
 
 def dotenv_disabled() -> bool:
@@ -24,7 +26,7 @@ def dotenv_disabled() -> bool:
     :func:`load_dotenv_early` and the pydantic ``Settings`` env_file) so the
     process environment is the only configuration source.
     """
-    return os.environ.get("ARGUS_NO_DOTENV", "").strip().lower() in _TRUTHY
+    return os.environ.get("ARGUS_NO_DOTENV", "").strip().lower() in TRUTHY_STRINGS
 
 
 def _preferred_env_filename() -> str:

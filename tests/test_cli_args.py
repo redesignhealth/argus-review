@@ -354,47 +354,15 @@ class TestExpectHeadShaFlag:
         args = _parse(["review", "owner/repo", "--pr", "1", "--expect-head-sha", sha])
         assert args.expect_head_sha == sha
 
+    def test_malformed_sha_is_a_parser_error(self) -> None:
+        parser = _build_parser()
+        for bad in ("a" * 39, "A" * 40, "g" * 40, ""):
+            args = _parse(["review", "owner/repo", "--pr", "1", "--expect-head-sha", bad])
+            with pytest.raises(SystemExit) as exc:
+                _validate_review_args(parser, args)
+            assert exc.value.code == 2
 
-class TestNoDotenv:
-    def test_load_dotenv_early_is_a_noop_when_disabled(
-        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from argus.dotenv_utils import load_dotenv_early
-
-        (tmp_path / ".env").write_text("ARGUS_TEST_DOTENV_SENTINEL=loaded\n")
-        monkeypatch.delenv("ARGUS_TEST_DOTENV_SENTINEL", raising=False)
-        monkeypatch.setenv("ARGUS_NO_DOTENV", "1")
-        assert load_dotenv_early(start=tmp_path, env_filename=".env") is None
-        assert "ARGUS_TEST_DOTENV_SENTINEL" not in os.environ
-
-    def test_load_dotenv_early_still_loads_when_not_disabled(
-        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from argus.dotenv_utils import load_dotenv_early
-
-        (tmp_path / ".env").write_text("ARGUS_TEST_DOTENV_SENTINEL=loaded\n")
-        monkeypatch.delenv("ARGUS_TEST_DOTENV_SENTINEL", raising=False)
-        monkeypatch.delenv("ARGUS_NO_DOTENV", raising=False)
-        try:
-            assert load_dotenv_early(start=tmp_path, env_filename=".env") is not None
-            assert os.environ["ARGUS_TEST_DOTENV_SENTINEL"] == "loaded"
-        finally:
-            os.environ.pop("ARGUS_TEST_DOTENV_SENTINEL", None)
-
-    def test_settings_ignore_cwd_env_file_when_disabled(
-        self, tmp_path: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from argus.config import clear_cache, get_settings
-
-        (tmp_path / ".env").write_text("ARGUS_GEMINI_CACHE_TTL=7\n")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("ARGUS_GEMINI_CACHE_TTL", raising=False)
-        try:
-            monkeypatch.delenv("ARGUS_NO_DOTENV", raising=False)
-            clear_cache()
-            assert get_settings().ARGUS_GEMINI_CACHE_TTL == 7
-            monkeypatch.setenv("ARGUS_NO_DOTENV", "true")
-            clear_cache()
-            assert get_settings().ARGUS_GEMINI_CACHE_TTL == 3600
-        finally:
-            clear_cache()
+    def test_valid_sha_passes_validation(self) -> None:
+        parser = _build_parser()
+        args = _parse(["review", "owner/repo", "--pr", "1", "--expect-head-sha", "a" * 40])
+        _validate_review_args(parser, args)

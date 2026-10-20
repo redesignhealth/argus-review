@@ -481,8 +481,9 @@ class TestRunReviewHaltAndReceipt:
             await _run({}, expect_head_sha="d" * 40)
 
     async def test_expect_head_sha_must_be_a_full_lowercase_sha(self) -> None:
-        with pytest.raises(ValueError, match="40-character"):
-            await _run({}, expect_head_sha=HEAD[:12])
+        for bad in (HEAD[:12], HEAD.upper(), "z" * 40):
+            with pytest.raises(ValueError, match="40-character"):
+                await _run({}, expect_head_sha=bad)
 
     async def test_expect_head_sha_match_runs_the_review(self) -> None:
         resp, _, _ = await _run(

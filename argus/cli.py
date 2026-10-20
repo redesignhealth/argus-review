@@ -64,12 +64,13 @@ import contextlib
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
+
+from argus.dotenv_utils import TRUTHY_STRINGS
 
 if TYPE_CHECKING:
     from argus.config import Settings
@@ -80,6 +81,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+
 logger = logging.getLogger("argus_review_local")
 
 # Hard wall-clock backstop: if the entire review has not completed within this
@@ -496,10 +498,11 @@ def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namesp
     """Cross-flag validation that argparse's own declarative options can't express."""
     if args.post and args.sha and not args.pr:
         parser.error("--post requires --pr (a PR to comment on); --sha alone has nowhere to post")
-    from argus.scope import validate_override
+    from argus.scope import validate_expect_head_sha, validate_override
 
     try:
         validate_override(args.review_override_sha, args.review_override_reason)
+        validate_expect_head_sha(args.expect_head_sha)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -635,9 +638,6 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
     if args.pr and args.sha:
         sys.exit("Provide either --pr or --sha, not both")
 
-    if args.expect_head_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", args.expect_head_sha):
-        sys.exit("--expect-head-sha must be a 40-character lowercase hex SHA")
-
     if args.no_prompt_overrides:
         os.environ["ARGUS_NO_PROMPT_OVERRIDES"] = "1"
 
@@ -737,7 +737,7 @@ def _packaged_prompt_names() -> list[str]:
 # argus.config.Settings). Kept in sync here so `argus prompts list`/`export`
 # (deliberately Settings-free, see below) treats the env var identically to
 # `argus review`, which resolves it through Settings.
-_PYDANTIC_TRUTHY_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
+_PYDANTIC_TRUTHY_STRINGS = TRUTHY_STRINGS
 
 
 def _is_truthy_env_value(value: str) -> bool:

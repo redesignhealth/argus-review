@@ -10,7 +10,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 # Single source of truth for the reviewer-subprocess wall-clock budget.
 # ``argus.runners._SUBPROCESS_TIMEOUT_S`` (the fallback used when no Settings
@@ -209,6 +209,26 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Drop the ``.env`` source when ``ARGUS_NO_DOTENV`` is truthy.
+
+        Enforced here, on the class, so every ``Settings()`` construction honors the
+        kill switch, not just the cached accessor.
+        """
+        from argus.dotenv_utils import dotenv_disabled
+
+        if dotenv_disabled():
+            return (init_settings, env_settings, file_secret_settings)
+        return (init_settings, env_settings, dotenv_settings, file_secret_settings)
+
     @property
     def db_url(self) -> str | None:
         """Resolved Postgres URL: ``ARGUS_DB_URL`` wins over ``SUPABASE_DB_URL``."""
@@ -262,12 +282,6 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def _cached_settings() -> Settings:
-    from argus.dotenv_utils import dotenv_disabled
-
-    if dotenv_disabled():
-        # ARGUS_NO_DOTENV: ignore the ``env_file`` in model_config too, not
-        # just load_dotenv_early, so a ``.env`` in the cwd cannot configure us.
-        return Settings(_env_file=None)
     return Settings()
 
 
