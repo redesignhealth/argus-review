@@ -773,13 +773,23 @@ async def _fetch_full_pr_changed_files(
                 parsed_files: list[dict[str, Any]] = []
                 for f in files:
                     if isinstance(f, str):
-                        parsed_files.append({"filename": f, "status": "modified", "patch": ""})
+                        parsed_files.append(
+                            {
+                                "filename": f,
+                                "status": "modified",
+                                "patch": "",
+                                "previous_filename": "",
+                                "sha": "",
+                            }
+                        )
                     elif isinstance(f, dict):
                         parsed_files.append(
                             {
                                 "filename": f.get("filename", ""),
                                 "status": f.get("status", "modified"),
                                 "patch": f.get("patch", ""),
+                                "previous_filename": f.get("previous_filename", ""),
+                                "sha": f.get("sha", ""),
                             }
                         )
 
@@ -798,6 +808,10 @@ async def _fetch_full_pr_changed_files(
                                 if isinstance(pf, dict)
                                 else "modified",
                                 "patch": pf.get("patch", "") if isinstance(pf, dict) else "",
+                                "previous_filename": pf.get("previous_filename", "")
+                                if isinstance(pf, dict)
+                                else "",
+                                "sha": pf.get("sha", "") if isinstance(pf, dict) else "",
                             }
                             for pf in pr_files
                         ]
@@ -838,7 +852,14 @@ async def _fetch_full_pr_changed_files(
         )
         diff_statuses = _extract_diff_file_statuses(round_diff)
         fallback_files = [
-            {"filename": fn, "status": status, "patch": ""} for fn, status in diff_statuses.items()
+            {
+                "filename": fn,
+                "status": status,
+                "patch": "",
+                "previous_filename": "",
+                "sha": "",
+            }
+            for fn, status in diff_statuses.items()
         ]
         return fallback_files, unconfirmed_reason
 
@@ -2543,6 +2564,8 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     )
 
     bench_config_changes: list[str] = []
+    pending_missing: list[dict[str, Any]] = []
+
     for f in full_changed_files:
         # Exclude files with status == 'removed' — pure deletion of a bench config is safe
         if f.get("status") == "removed":
@@ -2561,18 +2584,44 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
                 bench_config_changes.append(
                     f"added line modifying bench routing in {filename}: {line}"
                 )
-        elif await _is_generated_nodiff_path(worktree_path, filename):
-            logger.info(
-                "Missing patch content for '%s' ignored for bench-config verification: "
-                "repo declares it generated/non-diffable via .gitattributes",
-                filename,
-            )
-        elif not unconfirmed_reason and filename not in bench_config_changes:
-            unconfirmed_reason = (
-                f"Diff patch content missing or empty for '{filename}' in GitHub API "
-                "response; complete changes could not be verified for bench routing"
-            )
-            logger.warning(unconfirmed_reason)
+        else:
+            if filename not in bench_config_changes:
+                pending_missing.append(f)
+
+    # Fallback to local git object verification for missing-patch files (TECH-7768)
+    if pending_missing and not unconfirmed_reason:
+        from argus.bench_local_verify import verify_missing_patches_locally
+
+        trusted_head = config.get("configurable", {}).get("head_sha")
+        local_results = await verify_missing_patches_locally(
+            repo=req.repo,
+            worktree_path=worktree_path,
+            trusted_head_sha=trusted_head,
+            head_sha=head_sha,
+            base_sha=scope_base_sha,
+            entries=pending_missing,
+        )
+        for f in pending_missing:
+            filename = f.get("filename", "")
+            res = local_results.get(filename)
+            if res and res.verified:
+                for line in res.routing_lines:
+                    bench_config_changes.append(
+                        f"present in verified head content modifying bench routing in {filename}: {line}"
+                    )
+            else:
+                if await _is_generated_nodiff_path(worktree_path, filename):
+                    logger.info(
+                        "Missing patch content for '%s' ignored for bench-config verification: "
+                        "repo declares it generated/non-diffable via .gitattributes",
+                        filename,
+                    )
+                elif not unconfirmed_reason and filename not in bench_config_changes:
+                    unconfirmed_reason = (
+                        f"Diff patch content missing or empty for '{filename}' in GitHub API "
+                        "response; complete changes could not be verified for bench routing"
+                    )
+                    logger.warning(unconfirmed_reason)
 
     # Also scan current round diff for any routing lines
     for line in _detect_bench_config_routing_lines(diff):
