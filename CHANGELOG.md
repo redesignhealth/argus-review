@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Added a bounded local git object verification fallback for files whose diff patch is omitted by GitHub's API (e.g. large lockfiles or generated assets) in the bench config change guard (TECH-7768). When a local git mirror and worktree are provisioned, missing-patch files are strictly verified against git objects for bench configuration routing modifications, preventing false-positive blocking unconfirmed verdicts without weakening bench routing protections.
+
+
 ## [0.3.1] - 2026-10-19
 
 ### Fixed

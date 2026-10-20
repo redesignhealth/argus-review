@@ -532,6 +532,7 @@ class GitHubClient:
                         "status": f.get("status", "modified"),
                         "patch": f.get("patch", ""),
                         "previous_filename": f.get("previous_filename", ""),
+                        "sha": f.get("sha", ""),
                     }
                 )
         return results, is_truncated
@@ -573,6 +574,7 @@ class GitHubClient:
                         "status": f.get("status", "modified"),
                         "patch": f.get("patch", ""),
                         "previous_filename": f.get("previous_filename", ""),
+                        "sha": f.get("sha", ""),
                     }
                 )
         return results, is_truncated
