@@ -13,6 +13,22 @@ import os
 from pathlib import Path
 
 
+# The strings pydantic treats as True for a bool setting; shared with the CLI so the
+# two truthy checks cannot drift.
+TRUTHY_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
+
+
+def dotenv_disabled() -> bool:
+    """True when ``ARGUS_NO_DOTENV`` is truthy.
+
+    Official/service runs review untrusted checkouts from a working directory
+    that may contain a ``.env``; this switch stops every ``.env`` load (both
+    :func:`load_dotenv_early` and the pydantic ``Settings`` env_file) so the
+    process environment is the only configuration source.
+    """
+    return os.environ.get("ARGUS_NO_DOTENV", "").strip().lower() in TRUTHY_STRINGS
+
+
 def _preferred_env_filename() -> str:
     """Pick the default env filename based on ENVIRONMENT."""
     env = (os.environ.get("ENVIRONMENT") or "").lower()
@@ -61,11 +77,15 @@ def load_dotenv_early(
     """Load dotenv file early (before importing settings/clients).
 
     This is a no-op when:
+    - ``ARGUS_NO_DOTENV`` is truthy, or
     - running in AWS Lambda (secrets are expected to come from SSM/env), or
     - running in pytest and `skip_in_test=True`, or
     - python-dotenv isn't installed, or
     - no env file can be found.
     """
+    if dotenv_disabled():
+        return None
+
     # Never load local dotenv inside Lambda.
     if os.environ.get("AWS_LAMBDA_FUNCTION_NAME"):
         return None

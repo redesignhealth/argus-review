@@ -85,6 +85,7 @@ from argus.models import (
 from argus.scope import (
     SCOPE_PROMPT,
     SHA40,
+    validate_expect_head_sha,
     ScopeAssessment,
     ScopeUnverified,
     build_scope_input,
@@ -3605,6 +3606,7 @@ async def run_review(
     *,
     review_override_sha: str | None = None,
     review_override_reason: str | None = None,
+    expect_head_sha: str | None = None,
 ) -> ReviewResponse:
     """Execute the v3 review pipeline via LangGraph StateGraph.
 
@@ -3620,6 +3622,7 @@ async def run_review(
     import uuid
 
     override = validate_override(review_override_sha, review_override_reason)
+    validate_expect_head_sha(expect_head_sha)
 
     # Fail fast on a bad ARGUS_DB_URL / ARGUS_HISTORY_DB_PATH, before any of
     # the pipeline's LLM cost runs. Both history-backend implementations
@@ -3689,6 +3692,13 @@ async def run_review(
         head_sha_for_worktree = pr_data["head_sha"]
     else:
         head_sha_for_worktree = None
+
+    if expect_head_sha is not None and expect_head_sha != head_sha_for_worktree:
+        raise ValueError(
+            f"expect_head_sha {expect_head_sha[:12]} does not match the resolved head "
+            f"{(head_sha_for_worktree or 'none')[:12]}; the PR head moved, refusing to review "
+            "a different commit"
+        )
 
     if override and override[0] != head_sha_for_worktree:
         raise ValueError(

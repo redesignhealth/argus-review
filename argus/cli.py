@@ -70,6 +70,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from argus.dotenv_utils import TRUTHY_STRINGS
+
 if TYPE_CHECKING:
     from argus.config import Settings
     from argus.models import ReviewRequest, ReviewResponse
@@ -79,6 +81,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%H:%M:%S",
 )
+
 logger = logging.getLogger("argus_review_local")
 
 # Hard wall-clock backstop: if the entire review has not completed within this
@@ -229,6 +232,7 @@ async def run(
     request: "ReviewRequest",
     review_override_sha: str | None = None,
     review_override_reason: str | None = None,
+    expect_head_sha: str | None = None,
 ) -> "ReviewResponse":
     """Run the review pipeline (storage backend resolved automatically:
     Postgres if ``ARGUS_DB_URL`` is set, HTTP shim if the storage URLs are
@@ -240,6 +244,7 @@ async def run(
         flow_run_id=None,
         review_override_sha=review_override_sha,
         review_override_reason=review_override_reason,
+        expect_head_sha=expect_head_sha,
     )
 
 
@@ -364,6 +369,16 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
         help="Reason for --review-override-sha (1-500 characters); recorded in the scope receipt.",
     )
     parser.add_argument(
+        "--expect-head-sha",
+        dest="expect_head_sha",
+        default=None,
+        help=(
+            "Fail before any review spend unless the resolved head commit equals this "
+            "40-character lowercase SHA. For services that review a specific commit and "
+            "must not silently review a newer one if the PR head moved."
+        ),
+    )
+    parser.add_argument(
         "--no-prompt-overrides",
         action="store_true",
         dest="no_prompt_overrides",
@@ -483,10 +498,11 @@ def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namesp
     """Cross-flag validation that argparse's own declarative options can't express."""
     if args.post and args.sha and not args.pr:
         parser.error("--post requires --pr (a PR to comment on); --sha alone has nowhere to post")
-    from argus.scope import validate_override
+    from argus.scope import validate_expect_head_sha, validate_override
 
     try:
         validate_override(args.review_override_sha, args.review_override_reason)
+        validate_expect_head_sha(args.expect_head_sha)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -676,6 +692,7 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
                 request,
                 review_override_sha=args.review_override_sha,
                 review_override_reason=args.review_override_reason,
+                expect_head_sha=args.expect_head_sha,
             )
         )
     except HistoryBackendConnectivityError as exc:
@@ -720,7 +737,7 @@ def _packaged_prompt_names() -> list[str]:
 # argus.config.Settings). Kept in sync here so `argus prompts list`/`export`
 # (deliberately Settings-free, see below) treats the env var identically to
 # `argus review`, which resolves it through Settings.
-_PYDANTIC_TRUTHY_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
+_PYDANTIC_TRUTHY_STRINGS = TRUTHY_STRINGS
 
 
 def _is_truthy_env_value(value: str) -> bool:

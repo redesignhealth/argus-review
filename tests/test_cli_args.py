@@ -343,3 +343,26 @@ class TestPromptsSubcommand:
     def test_prompts_export_force_defaults_off(self) -> None:
         args = _parse(["prompts", "export", "/tmp/out"])
         assert args.force is False
+
+
+class TestExpectHeadShaFlag:
+    def test_defaults_to_none(self) -> None:
+        assert _parse(["review", "owner/repo", "--pr", "1"]).expect_head_sha is None
+
+    def test_flag_parses(self) -> None:
+        sha = "a" * 40
+        args = _parse(["review", "owner/repo", "--pr", "1", "--expect-head-sha", sha])
+        assert args.expect_head_sha == sha
+
+    def test_malformed_sha_is_a_parser_error(self) -> None:
+        parser = _build_parser()
+        for bad in ("a" * 39, "A" * 40, "g" * 40, ""):
+            args = _parse(["review", "owner/repo", "--pr", "1", "--expect-head-sha", bad])
+            with pytest.raises(SystemExit) as exc:
+                _validate_review_args(parser, args)
+            assert exc.value.code == 2
+
+    def test_valid_sha_passes_validation(self) -> None:
+        parser = _build_parser()
+        args = _parse(["review", "owner/repo", "--pr", "1", "--expect-head-sha", "a" * 40])
+        _validate_review_args(parser, args)

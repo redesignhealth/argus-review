@@ -50,6 +50,13 @@ class ScopeAssessment(BaseModel):
     rationale: str
 
 
+def validate_expect_head_sha(sha: str | None) -> str | None:
+    """Return ``sha`` unchanged if it is ``None`` or a 40-char lowercase hex SHA, else raise."""
+    if sha is not None and not SHA40.fullmatch(sha):
+        raise ValueError("expect_head_sha must be a 40-character lowercase hex SHA")
+    return sha
+
+
 def validate_override(sha: str | None, reason: str | None) -> tuple[str, str] | None:
     """Return ``(sha, reason)`` for a valid human override pair, ``None`` if neither is set."""
     if sha is None and reason is None:

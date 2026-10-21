@@ -229,6 +229,8 @@ Argus reads configuration from environment variables, or from a `.env` file
 in the working directory (add it to `.gitignore` — never commit it).
 [`.env.example`](.env.example) lists every variable Argus reads, required
 and optional, with comments — copy it to `.env` and fill in what you need.
+Set `ARGUS_NO_DOTENV=1` in the real environment to ignore `.env` files
+entirely (for service workers that run in a directory they do not control).
 
 Three keys are required for a first run:
 
