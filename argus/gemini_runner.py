@@ -144,7 +144,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import random
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -207,6 +210,171 @@ _FORCE_TOOL_CONFIG = types.ToolConfig(
 # timeout would otherwise produce, rather than letting it escape
 # uncaught.
 _HTTP_TIMEOUT_FRACTION = 0.8
+
+# ---------------------------------------------------------------------------
+# One-shot retry of transient Gemini failures
+# ---------------------------------------------------------------------------
+# A session is retried AT MOST ONCE, and only when it failed with a transient
+# error (HTTP 429/500/502/503/504, RESOURCE_EXHAUSTED/UNAVAILABLE/
+# DEADLINE_EXCEEDED/INTERNAL, or an httpx timeout/connect/read/remote-protocol
+# error) before the model returned ANY response (i.e. on turn 0), so the retry
+# restarts the session cleanly from the beginning. Later failures are not
+# retried. The cooldown depends on the error kind (see `_retry_decision`):
+# 45-60 s jitter for 429/RESOURCE_EXHAUSTED (per-minute quota windows), 5-10 s
+# for 5xx/network errors; a server Retry-After/retryDelay >= 5 s is honored;
+# never more than 60 s. Daily-quota 429s are not retried. Overridable via
+# ARGUS_GEMINI_RETRY_RATE_LIMIT_{MIN,MAX}_S, ARGUS_GEMINI_RETRY_COOLDOWN_{MIN,MAX}_S
+# and ARGUS_GEMINI_RETRY_MAX_WAIT_S (read per call, so tests can set them to 0).
+# The 60 s worst case is far inside ARGUS_SESSION_TIMEOUT (default 1500 s), and
+# the retry is skipped if <25% of that timeout remains.
+_RETRY_RATE_LIMIT_MIN_S = 45.0  # 429 / RESOURCE_EXHAUSTED: per-minute windows
+_RETRY_RATE_LIMIT_MAX_S = 60.0
+_RETRY_SHORT_MIN_S = 5.0  # 5xx / UNAVAILABLE / DEADLINE_EXCEEDED / network
+_RETRY_SHORT_MAX_S = 10.0
+_RETRY_MAX_WAIT_S = 60.0  # hard cap on any single wait, incl. a server Retry-After
+_RETRY_AFTER_MIN_S = 5.0  # a server delay below this is ignored (jitter used)
+# A server-suggested delay above this means the quota window is not a
+# per-minute one (minutes/hours): fail fast rather than retry.
+_RETRY_GIVEUP_DELAY_S = 120.0
+# Do not retry when less than this fraction of the session timeout remains
+# (e.g. the first attempt already burned its HTTP timeout).
+_RETRY_MIN_REMAINING_FRACTION = 0.25
+_TRANSIENT_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+_TRANSIENT_STATUSES = frozenset(
+    {"RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL"}
+)
+_TRANSIENT_HTTPX = (
+    httpx.TimeoutException,
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+)
+_DETAIL_MAX_CHARS = 300
+_SECRET_RE = re.compile(
+    r"(AIza[0-9A-Za-z_\-]{20,}|(?i:(?:api[_-]?key|key|token)=)[^&\s\"']+|"
+    r"(?i:bearer\s+)[A-Za-z0-9._\-]+|sk-[A-Za-z0-9_\-]{16,})"
+)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return default
+
+
+@dataclass
+class _Progress:
+    """Mutable per-session state shared between attempts and the failure handler."""
+
+    responses: int = 0  # successful generate_content responses received
+    retried: bool = False
+    retry_wait_s: float = 0.0
+
+
+def _scrub(text: str) -> str:
+    """Redact anything key-shaped and truncate for logging."""
+    text = _SECRET_RE.sub("***", text).replace("\n", " ")
+    return text[:_DETAIL_MAX_CHARS]
+
+
+def _error_code_status(exc: BaseException) -> tuple[int | None, str | None]:
+    """Best-effort (HTTP code, status string) for an SDK/transport exception."""
+    if isinstance(exc, genai_errors.APIError):
+        code = getattr(exc, "code", None)
+        status = getattr(exc, "status", None)
+        return (
+            code if isinstance(code, int) else None,
+            status if isinstance(status, str) else None,
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code, None
+    return None, None
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    code, status = _error_code_status(exc)
+    if code in _TRANSIENT_HTTP_CODES or (status or "").upper() in _TRANSIENT_STATUSES:
+        return True
+    if isinstance(exc, (genai_errors.APIError, httpx.HTTPStatusError)):
+        return False  # a definite API answer that is not transient (400/401/403/404...)
+    return isinstance(exc, _TRANSIENT_HTTPX)
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Server-suggested delay from a Retry-After header or RetryInfo.retryDelay."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    try:
+        raw = headers.get("retry-after") if headers is not None else None
+        if raw is not None:
+            return max(0.0, float(raw))
+    except (TypeError, ValueError, AttributeError):
+        pass
+    details = getattr(exc, "details", None)
+    err = details.get("error", details) if isinstance(details, dict) else None
+    items = err.get("details") if isinstance(err, dict) else None
+    for item in items if isinstance(items, list) else []:
+        delay = item.get("retryDelay") if isinstance(item, dict) else None
+        if isinstance(delay, str) and delay.endswith("s"):
+            try:
+                return max(0.0, float(delay[:-1]))
+            except ValueError:
+                pass
+    return None
+
+
+def _is_daily_quota(exc: BaseException, server_delay: float | None) -> bool:
+    """True when a 429 reports a per-day quota or a many-minutes retry delay."""
+    if server_delay is not None and server_delay > _RETRY_GIVEUP_DELAY_S:
+        return True
+    return bool(re.search(r"per\s*day|perday", str(exc), re.IGNORECASE))
+
+
+def _retry_decision(exc: BaseException) -> tuple[str, float] | None:
+    """``(kind, wait_seconds)`` if ``exc`` should be retried once, else ``None``.
+
+    Kinds: ``rate_limit`` (429/RESOURCE_EXHAUSTED, 45-60 s jitter),
+    ``server`` (5xx/UNAVAILABLE/DEADLINE_EXCEEDED/INTERNAL) and ``network``
+    (5-10 s jitter). A server Retry-After/retryDelay >= 5 s replaces the
+    jittered value; the wait never exceeds 60 s. A daily-quota 429 is never
+    retried.
+    """
+    if not _is_transient_error(exc):
+        return None
+    code, status = _error_code_status(exc)
+    server_delay = _retry_after_seconds(exc)
+    if code == 429 or (status or "").upper() == "RESOURCE_EXHAUSTED":
+        if _is_daily_quota(exc, server_delay):
+            return None
+        kind = "rate_limit"
+        lo = _env_float("ARGUS_GEMINI_RETRY_RATE_LIMIT_MIN_S", _RETRY_RATE_LIMIT_MIN_S)
+        hi = _env_float("ARGUS_GEMINI_RETRY_RATE_LIMIT_MAX_S", _RETRY_RATE_LIMIT_MAX_S)
+    else:
+        kind = "server" if code is not None or status else "network"
+        lo = _env_float("ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S", _RETRY_SHORT_MIN_S)
+        hi = _env_float("ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S", _RETRY_SHORT_MAX_S)
+    cap = _env_float("ARGUS_GEMINI_RETRY_MAX_WAIT_S", _RETRY_MAX_WAIT_S)
+    wait = random.uniform(lo, max(lo, hi))  # noqa: S311 - jitter, not security
+    if server_delay is not None and server_delay >= _RETRY_AFTER_MIN_S:
+        wait = server_delay
+    return kind, min(wait, cap)
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """Short, key-free label such as ``429 RESOURCE_EXHAUSTED`` or ``ConnectError``."""
+    code, status = _error_code_status(exc)
+    detail = " ".join(p for p in (str(code) if code is not None else "", status or "") if p)
+    detail = detail or type(exc).__name__
+    if (code == 429 or (status or "").upper() == "RESOURCE_EXHAUSTED") and _is_daily_quota(
+        exc, _retry_after_seconds(exc)
+    ):
+        detail += " (daily quota)"
+    return detail
+
 
 # Matches the fenced-json extraction argus.helpers.parse_review_result
 # already applies for the Claude path.
@@ -599,6 +767,7 @@ async def _run_turns(
     repo_root: str,
     timeout_s: float,
     started_at: datetime,
+    progress: _Progress | None = None,
 ) -> SessionResult:
     """The actual tool-calling loop. Returns ``failure_reason="turn_budget_exhausted"``
     when the loop ran out of turns without a ``finish_review`` call, else
@@ -736,8 +905,7 @@ async def _run_turns(
                             entry.role if entry else "unknown",
                             model,
                             _turn,
-                            exc,
-                            exc_info=True,
+                            _scrub(str(exc)),
                         )
                         raise
                     logger.warning(
@@ -760,6 +928,8 @@ async def _run_turns(
                         model=model, contents=contents, config=config
                     )
 
+                if progress is not None:
+                    progress.responses += 1
                 usage = response.usage_metadata
                 if usage is not None:
                     usage_prompt_total += usage.prompt_token_count or 0
@@ -922,6 +1092,35 @@ async def _run_turns(
         )
 
 
+async def _run_turns_with_retry(
+    *, progress: _Progress, timeout_s: float, **kwargs: Any
+) -> SessionResult:
+    """``_run_turns`` with at most one retry of a transient turn-0 failure."""
+    label = kwargs.get("label") or "unlabeled"
+    t0 = asyncio.get_running_loop().time()
+    try:
+        return await _run_turns(timeout_s=timeout_s, progress=progress, **kwargs)
+    except (genai_errors.APIError, httpx.HTTPError) as exc:
+        remaining = timeout_s - (asyncio.get_running_loop().time() - t0)
+        decision = _retry_decision(exc) if progress.responses == 0 else None
+        if decision is None or remaining < timeout_s * _RETRY_MIN_REMAINING_FRACTION:
+            raise
+        kind, wait = decision
+        if wait >= remaining:
+            raise
+        progress.retried = True
+        progress.retry_wait_s = wait
+        logger.info(
+            "gemini session [%s] retrying after %s (kind=%s) in %.1fs",
+            label,
+            _failure_detail(exc),
+            kind,
+            wait,
+        )
+        await asyncio.sleep(wait)
+    return await _run_turns(timeout_s=timeout_s, progress=progress, **kwargs)
+
+
 def _redact_gemini_inputs(inputs: dict[str, Any], **_: Any) -> dict[str, Any]:
     """LangSmith ``process_inputs`` hook: redact credentials from Settings."""
     if not isinstance(inputs, dict):
@@ -988,9 +1187,11 @@ async def run_session_gemini(
     )
 
     started_at = datetime.now(timezone.utc)
+    progress = _Progress()
     try:
         return await asyncio.wait_for(
-            _run_turns(
+            _run_turns_with_retry(
+                progress=progress,
                 entry=entry,
                 model=model,
                 system_prompt=system_prompt,
@@ -1057,12 +1258,15 @@ async def run_session_gemini(
         # identically here, even though this runner has no literal
         # subprocess "worker" the way the Claude Agent SDK path does.
         finished_at = datetime.now(timezone.utc)
+        detail = _failure_detail(exc)
         logger.warning(
-            "Gemini session [%s] failed with a non-timeout error after %.1fs (%s: %s)",
+            "Gemini session [%s] failed after %.1fs (%s, %s%s): %s",
             label or "unlabeled",
             (finished_at - started_at).total_seconds(),
             type(exc).__name__,
-            exc,
+            detail,
+            ", after one retry" if progress.retried else "",
+            _scrub(str(exc)),
         )
         return SessionResult(
             result_text="",
@@ -1075,4 +1279,5 @@ async def run_session_gemini(
             context7_call_count=0,
             model=model,
             failure_reason="worker_crashed",
+            failure_detail=detail,
         )
