@@ -219,13 +219,23 @@ _HTTP_TIMEOUT_FRACTION = 0.8
 # DEADLINE_EXCEEDED/INTERNAL, or an httpx timeout/connect/read/remote-protocol
 # error) before the model returned ANY response (i.e. on turn 0), so the retry
 # restarts the session cleanly from the beginning. Later failures are not
-# retried. Cooldown is jittered (min..max seconds); a server-provided
-# Retry-After / retryDelay is honored but the final wait never exceeds
-# `_RETRY_MAX_WAIT_S`. All three are overridable via env vars (read per call,
-# so tests can set them to 0).
-_RETRY_COOLDOWN_MIN_S = 3.0
-_RETRY_COOLDOWN_MAX_S = 6.0
-_RETRY_MAX_WAIT_S = 15.0
+# retried. The cooldown depends on the error kind (see `_retry_decision`):
+# 45-60 s jitter for 429/RESOURCE_EXHAUSTED (per-minute quota windows), 5-10 s
+# for 5xx/network errors; a server Retry-After/retryDelay >= 5 s is honored;
+# never more than 60 s. Daily-quota 429s are not retried. Overridable via
+# ARGUS_GEMINI_RETRY_RATE_LIMIT_{MIN,MAX}_S, ARGUS_GEMINI_RETRY_COOLDOWN_{MIN,MAX}_S
+# and ARGUS_GEMINI_RETRY_MAX_WAIT_S (read per call, so tests can set them to 0).
+# The 60 s worst case is far inside ARGUS_SESSION_TIMEOUT (default 1500 s), and
+# the retry is skipped if <25% of that timeout remains.
+_RETRY_RATE_LIMIT_MIN_S = 45.0  # 429 / RESOURCE_EXHAUSTED: per-minute windows
+_RETRY_RATE_LIMIT_MAX_S = 60.0
+_RETRY_SHORT_MIN_S = 5.0  # 5xx / UNAVAILABLE / DEADLINE_EXCEEDED / network
+_RETRY_SHORT_MAX_S = 10.0
+_RETRY_MAX_WAIT_S = 60.0  # hard cap on any single wait, incl. a server Retry-After
+_RETRY_AFTER_MIN_S = 5.0  # a server delay below this is ignored (jitter used)
+# A server-suggested delay above this means the quota window is not a
+# per-minute one (minutes/hours): fail fast rather than retry.
+_RETRY_GIVEUP_DELAY_S = 120.0
 # Do not retry when less than this fraction of the session timeout remains
 # (e.g. the first attempt already burned its HTTP timeout).
 _RETRY_MIN_REMAINING_FRACTION = 0.25
@@ -294,14 +304,6 @@ def _is_transient_error(exc: BaseException) -> bool:
     return isinstance(exc, _TRANSIENT_HTTPX)
 
 
-def _failure_detail(exc: BaseException) -> str:
-    """Short, key-free label such as ``429 RESOURCE_EXHAUSTED`` or ``ConnectError``."""
-    code, status = _error_code_status(exc)
-    parts = [str(code) if code is not None else "", status or ""]
-    detail = " ".join(p for p in parts if p)
-    return detail or type(exc).__name__
-
-
 def _retry_after_seconds(exc: BaseException) -> float | None:
     """Server-suggested delay from a Retry-After header or RetryInfo.retryDelay."""
     response = getattr(exc, "response", None)
@@ -325,15 +327,53 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     return None
 
 
-def _compute_retry_wait(exc: BaseException) -> float:
-    lo = _env_float("ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S", _RETRY_COOLDOWN_MIN_S)
-    hi = max(lo, _env_float("ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S", _RETRY_COOLDOWN_MAX_S))
+def _is_daily_quota(exc: BaseException, server_delay: float | None) -> bool:
+    """True when a 429 reports a per-day quota or a many-minutes retry delay."""
+    if server_delay is not None and server_delay > _RETRY_GIVEUP_DELAY_S:
+        return True
+    return bool(re.search(r"per\s*day|perday", str(exc), re.IGNORECASE))
+
+
+def _retry_decision(exc: BaseException) -> tuple[str, float] | None:
+    """``(kind, wait_seconds)`` if ``exc`` should be retried once, else ``None``.
+
+    Kinds: ``rate_limit`` (429/RESOURCE_EXHAUSTED, 45-60 s jitter),
+    ``server`` (5xx/UNAVAILABLE/DEADLINE_EXCEEDED/INTERNAL) and ``network``
+    (5-10 s jitter). A server Retry-After/retryDelay >= 5 s replaces the
+    jittered value; the wait never exceeds 60 s. A daily-quota 429 is never
+    retried.
+    """
+    if not _is_transient_error(exc):
+        return None
+    code, status = _error_code_status(exc)
+    server_delay = _retry_after_seconds(exc)
+    if code == 429 or (status or "").upper() == "RESOURCE_EXHAUSTED":
+        if _is_daily_quota(exc, server_delay):
+            return None
+        kind = "rate_limit"
+        lo = _env_float("ARGUS_GEMINI_RETRY_RATE_LIMIT_MIN_S", _RETRY_RATE_LIMIT_MIN_S)
+        hi = _env_float("ARGUS_GEMINI_RETRY_RATE_LIMIT_MAX_S", _RETRY_RATE_LIMIT_MAX_S)
+    else:
+        kind = "server" if code is not None or status else "network"
+        lo = _env_float("ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S", _RETRY_SHORT_MIN_S)
+        hi = _env_float("ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S", _RETRY_SHORT_MAX_S)
     cap = _env_float("ARGUS_GEMINI_RETRY_MAX_WAIT_S", _RETRY_MAX_WAIT_S)
-    wait = random.uniform(lo, hi)  # noqa: S311 - jitter, not security
-    server = _retry_after_seconds(exc)
-    if server is not None:
-        wait = max(wait, server)
-    return min(wait, cap)
+    wait = random.uniform(lo, max(lo, hi))  # noqa: S311 - jitter, not security
+    if server_delay is not None and server_delay >= _RETRY_AFTER_MIN_S:
+        wait = server_delay
+    return kind, min(wait, cap)
+
+
+def _failure_detail(exc: BaseException) -> str:
+    """Short, key-free label such as ``429 RESOURCE_EXHAUSTED`` or ``ConnectError``."""
+    code, status = _error_code_status(exc)
+    detail = " ".join(p for p in (str(code) if code is not None else "", status or "") if p)
+    detail = detail or type(exc).__name__
+    if (code == 429 or (status or "").upper() == "RESOURCE_EXHAUSTED") and _is_daily_quota(
+        exc, _retry_after_seconds(exc)
+    ):
+        detail += " (daily quota)"
+    return detail
 
 
 # Matches the fenced-json extraction argus.helpers.parse_review_result
@@ -1062,21 +1102,19 @@ async def _run_turns_with_retry(
         return await _run_turns(timeout_s=timeout_s, progress=progress, **kwargs)
     except (genai_errors.APIError, httpx.HTTPError) as exc:
         remaining = timeout_s - (asyncio.get_running_loop().time() - t0)
-        if (
-            progress.responses != 0
-            or not _is_transient_error(exc)
-            or remaining < timeout_s * _RETRY_MIN_REMAINING_FRACTION
-        ):
+        decision = _retry_decision(exc) if progress.responses == 0 else None
+        if decision is None or remaining < timeout_s * _RETRY_MIN_REMAINING_FRACTION:
             raise
-        wait = _compute_retry_wait(exc)
+        kind, wait = decision
         if wait >= remaining:
             raise
         progress.retried = True
         progress.retry_wait_s = wait
         logger.info(
-            "gemini session [%s] retrying after %s in %.1fs",
+            "gemini session [%s] retrying after %s (kind=%s) in %.1fs",
             label,
             _failure_detail(exc),
+            kind,
             wait,
         )
         await asyncio.sleep(wait)
