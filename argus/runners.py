@@ -572,6 +572,9 @@ class SessionResult:
     model: str | None = None
     failure_reason: Literal["timeout", "worker_crashed", "turn_budget_exhausted"] | None = None
     timed_out: bool = False
+    # Short, key-free reason detail (e.g. "429 RESOURCE_EXHAUSTED") for logs and
+    # diagnostics; not persisted and does not affect failure_reason semantics.
+    failure_detail: str | None = None
 
     def __post_init__(self) -> None:
         self.timed_out, self.failure_reason = _sync_timed_out_and_failure_reason(

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Gemini reviewer sessions now retry ONCE on a transient failure (HTTP 429/500/502/503/504, `RESOURCE_EXHAUSTED`/`UNAVAILABLE`/`DEADLINE_EXCEEDED`/`INTERNAL`, or an httpx timeout/connect/read/remote-protocol error) that happens before the model returned any response, after a jittered 3-6 s cooldown (a server `Retry-After`/`retryDelay` is honored, capped at 15 s). Auth, permission, bad-request and not-found errors are never retried. Overridable via `ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S`, `ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S`, `ARGUS_GEMINI_RETRY_MAX_WAIT_S`.
+- A failed Gemini session now logs a WARNING with the exception type, HTTP code/status and a scrubbed, 300-character-truncated message, and `SessionResult.failure_detail` carries a short label such as `429 RESOURCE_EXHAUSTED`. `failure_reason` stays `worker_crashed`; degraded-coverage note text is unchanged. The existing ERROR log for a failed `generate_content` call is also scrubbed of key-shaped strings.
+
 ## [0.3.2] - 2026-10-21
 
 ### Added

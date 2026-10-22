@@ -64,6 +64,9 @@ def _isolate_gemini_cache_dir(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) ->
     from argus.config import clear_cache as clear_settings_cache
 
     monkeypatch.setenv("ARGUS_GEMINI_CACHE_DIR", str(tmp_path / "gemini-cache"))
+    # Existing tests must not sleep through the real retry cooldown.
+    monkeypatch.setenv("ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S", "0")
+    monkeypatch.setenv("ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S", "0")
     clear_settings_cache()
     yield
     clear_settings_cache()
@@ -149,7 +152,7 @@ def _make_response(
     return response
 
 
-def _make_fake_client(responses: list[MagicMock], cache_name: str | None = None) -> MagicMock:
+def _make_fake_client(responses: list[Any], cache_name: str | None = None) -> MagicMock:
     """Build a fake genai.Client with .aio.models.generate_content and
     .caches.create wired up for a test.
 
@@ -1712,3 +1715,124 @@ class TestGoogleBaseUrlOverride:
         assert all(
             ho.base_url == "https://proxy.example.com/v1beta" for ho in constructed_http_options
         )
+
+
+# ---------------------------------------------------------------------------
+# One-shot retry of transient failures
+# ---------------------------------------------------------------------------
+
+
+def _api_error(code: int, status: str, cls: type = genai_errors.ClientError) -> Any:
+    return cls(code, {"message": f"boom {status}", "status": status})
+
+
+async def _run(fake_client: MagicMock, label: str = "retry-test") -> Any:
+    with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+        return await run_session_gemini(
+            entry=_make_entry(caching="off"),
+            system_prompt="sys",
+            user_message="msg",
+            settings=_make_settings(),
+            label=label,
+            repo_root="/tmp/does-not-need-to-exist",
+        )
+
+
+class TestTransientRetry:
+    async def test_429_then_success_retries_once(self, caplog: pytest.LogCaptureFixture) -> None:
+        ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
+        client = _make_fake_client([_api_error(429, "RESOURCE_EXHAUSTED"), ok])
+        with caplog.at_level("INFO", logger="argus.gemini_runner"):
+            result = await _run(client)
+        assert result.failure_reason is None
+        assert client.aio.models.generate_content.await_count == 2
+        assert any("retrying after 429 RESOURCE_EXHAUSTED in" in r.message for r in caplog.records)
+
+    async def test_503_then_503_only_one_retry_with_detail(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        err = _api_error(503, "UNAVAILABLE", genai_errors.ServerError)
+        client = _make_fake_client([err, err, err])
+        with caplog.at_level("INFO", logger="argus.gemini_runner"):
+            result = await _run(client)
+        assert client.aio.models.generate_content.await_count == 2
+        assert result.failure_reason == "worker_crashed"
+        assert result.failure_detail == "503 UNAVAILABLE"
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert any("after one retry" in r.getMessage() for r in warnings)
+
+    @pytest.mark.parametrize(
+        ("code", "status"),
+        [
+            (401, "UNAUTHENTICATED"),
+            (403, "PERMISSION_DENIED"),
+            (400, "INVALID_ARGUMENT"),
+            (404, "NOT_FOUND"),
+        ],
+    )
+    async def test_non_transient_not_retried(self, code: int, status: str) -> None:
+        client = _make_fake_client([_api_error(code, status)])
+        result = await _run(client)
+        assert client.aio.models.generate_content.await_count == 1
+        assert result.failure_reason == "worker_crashed"
+        assert result.failure_detail == f"{code} {status}"
+
+    async def test_httpx_connect_error_is_retried(self) -> None:
+        ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
+        client = _make_fake_client([httpx.ConnectError("reset"), ok])
+        result = await _run(client)
+        assert result.failure_reason is None
+        assert client.aio.models.generate_content.await_count == 2
+
+    async def test_no_retry_after_model_output_already_produced(self) -> None:
+        first = _make_response(calls=[("record_finding", {})], usage=_make_usage(1, 1))
+        client = _make_fake_client(
+            [first, _api_error(503, "UNAVAILABLE", genai_errors.ServerError)]
+        )
+        result = await _run(client)
+        assert client.aio.models.generate_content.await_count == 2  # no third call
+        assert result.failure_reason == "worker_crashed"
+
+    async def test_retry_after_honored_and_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S", "3")
+        monkeypatch.setenv("ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S", "6")
+        sleeps: list[float] = []
+
+        async def fake_sleep(d: float) -> None:
+            sleeps.append(d)
+
+        monkeypatch.setattr("argus.gemini_runner.asyncio.sleep", fake_sleep)
+        ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
+
+        def err_with_retry_after(value: str) -> Any:
+            e = _api_error(429, "RESOURCE_EXHAUSTED")
+            e.response = MagicMock(headers={"retry-after": value})
+            return e
+
+        await _run(_make_fake_client([err_with_retry_after("10"), ok]))
+        await _run(_make_fake_client([err_with_retry_after("600"), ok]))
+        assert sleeps[0] == 10.0
+        assert sleeps[1] == 15.0
+
+    async def test_jitter_within_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from argus.gemini_runner import _compute_retry_wait
+
+        monkeypatch.setenv("ARGUS_GEMINI_RETRY_COOLDOWN_MIN_S", "3")
+        monkeypatch.setenv("ARGUS_GEMINI_RETRY_COOLDOWN_MAX_S", "6")
+        waits = [_compute_retry_wait(_api_error(503, "UNAVAILABLE")) for _ in range(200)]
+        assert all(3.0 <= w <= 6.0 for w in waits)
+        assert len(set(waits)) > 1
+
+    async def test_failure_log_redacts_keys_and_truncates(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        secret = "AIza" + "x" * 35
+        err = genai_errors.ClientError(
+            401, {"message": f"bad key={secret} " + "y" * 1000, "status": "UNAUTHENTICATED"}
+        )
+        client = _make_fake_client([err])
+        with caplog.at_level("WARNING", logger="argus.gemini_runner"):
+            await _run(client)
+        text = " ".join(r.getMessage() for r in caplog.records)
+        assert secret not in text
+        assert len(text) < 1200
