@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-22
+
 ### Changed
 
 - Gemini reviewer sessions now retry ONCE on a transient failure (HTTP 429/500/502/503/504, `RESOURCE_EXHAUSTED`/`UNAVAILABLE`/`DEADLINE_EXCEEDED`/`INTERNAL`, or an httpx timeout/connect/read/remote-protocol error) that happens before the model returned any response. The cooldown depends on the error: 45-60 s jitter for 429/`RESOURCE_EXHAUSTED` (per-minute quota windows), 5-10 s for 5xx and network errors; a server `Retry-After`/`retryDelay` >= 5 s is honored; never more than 60 s. A daily-quota 429 (`PerDay` quota or a retry delay over 120 s) and auth, permission, bad-request and not-found errors are never retried. Overridable via `ARGUS_GEMINI_RETRY_RATE_LIMIT_{MIN,MAX}_S`, `ARGUS_GEMINI_RETRY_COOLDOWN_{MIN,MAX}_S` and `ARGUS_GEMINI_RETRY_MAX_WAIT_S`.
@@ -446,7 +448,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/redesignhealth/argus-review/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/redesignhealth/argus-review/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/redesignhealth/argus-review/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/redesignhealth/argus-review/compare/v0.2.11...v0.3.0
