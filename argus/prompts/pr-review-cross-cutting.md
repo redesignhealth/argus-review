@@ -87,12 +87,11 @@ Principle: if an LLM/AI pipeline builds execution, retry, state-tracking, or par
 Architecture-mandate violations (an adopted design doc names a framework for a concern and the code uses a different approach for that same concern) are standing conformance debt, not a one-time "was this broken before the PR" question. **Causal-scope-filter override**: this overrides the causal scope-check test used elsewhere in this prompt -- if this diff modifies or extends a pipeline that is already non-compliant, the finding is still in scope. Only skip when the diff does not touch the non-compliant pipeline's code at all.
 
 ### Model Registry Compliance (BLOCKING)
-- All LLM model identifiers MUST come from `argus.llm.models`'s exported constants (`GPT_MINI`, `CLAUDE_FRONTIER`, `CLAUDE_OPUS`, `CLAUDE_DEFAULT`, `CLAUDE_MINI`), which resolve `ALIAS_MAP` entries — only register an alias that has an actual call site; this is a standalone, isolated package, not a monorepo, so there's no value in carrying unused registry entries.
-- Flag as **BLOCKING** any new hardcoded model strings the diff introduces — e.g., literal `"gpt-5.4-mini"`, `"claude-sonnet-5"`, `"claude-haiku-4-5"`, or deprecated names like `"gpt-4o"`, `"o3"`, `"claude-3-*"`. This targets model-SELECTION code (a call site choosing which model to use); it does not apply to a legacy pin like `"claude-sonnet-5"` appearing as a `--specialist-model`/`ARGUS_SPECIALIST_MODEL` CLI/env override value, or in docs/tests demonstrating that override -- such a value remains a legitimate override even after it stops being the hardcoded default.
-- Short-lived eval / preview pins are allowed only via `EXPERIMENTAL_MODELS` in `argus/llm/models.py` (with a comment naming a tracking issue/PR and expected removal date) or via inline `# model-registry: allow -- <reason>` comments on user-input alias keys (not provider model identifiers).
-
-### Character Hygiene (cross-file)
-- Confirm the lines ADDED by this diff contain no em-dash characters (U+2014). Flag every added line that contains one. Scope this to diff-added lines only (prose in pre-existing code or docs is out of scope).
+- Judge this against the repository under review, never against a fixed package name. If the repository has a central model registry (a module that exports model aliases or constants for call sites to import -- commonly something like `ALIAS_MAP`, `MODELS`, or an `llm/models.py`), all LLM model identifiers MUST come from it.
+- Flag as **BLOCKING** any new hardcoded model string the diff introduces in model-SELECTION code -- e.g. a literal `"gpt-5.4-mini"`, `"claude-sonnet-5"`, `"claude-haiku-4-5"`, or deprecated names like `"gpt-4o"`, `"o3"`, `"claude-3-*"`. This targets the call site choosing which model to use; it does not apply to a value passed through a CLI/env override (e.g. a `--*-model` flag) or shown in docs or tests demonstrating that override.
+- Only register an alias that has an actual call site; an unused registry entry is dead weight, not a defect worth blocking on.
+- Short-lived eval or preview pins belong in the registry's own experimental section (with a comment naming a tracking issue and an expected removal date) or behind an inline `# model-registry: allow -- <reason>` comment.
+- If the repository has no such registry, do not demand one. Report hardcoded provider model identifiers as a SUGGESTION only when the repository's own conventions clearly place configuration values outside code.
 
 ## Output
 
