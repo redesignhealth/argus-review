@@ -145,6 +145,18 @@ def collect_reviewed_files(results: list[SystemReviewResult]) -> set[str]:
     return reviewed
 
 
+# Only canonical provider codes/statuses and transport exception names may be
+# rendered into reports, never arbitrary exception text or payloads.
+_CANONICAL_FAILURE_DETAIL_RE = re.compile(
+    r"(?:[1-5][0-9]{2}(?: (?:INTERNAL|UNAVAILABLE|RESOURCE_EXHAUSTED|"
+    r"DEADLINE_EXCEEDED|UNAUTHENTICATED|PERMISSION_DENIED|INVALID_ARGUMENT|"
+    r"NOT_FOUND|FAILED_PRECONDITION|UNKNOWN|CANCELLED|ABORTED|OUT_OF_RANGE|"
+    r"UNIMPLEMENTED|DATA_LOSS))?|(?:ConnectError|ReadError|RemoteProtocolError|"
+    r"HTTPStatusError|ServerError|ClientError|APIError))"
+    r"(?: \(daily quota\))?(?:, turn [0-9]+)?"
+)
+
+
 def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str, str]]:
     """Return ``(system_group, failure_reason)`` pairs for reviewers that did
     not complete normally, in the order they appear in ``results``.
@@ -159,10 +171,13 @@ def failed_reviewer_labels(results: list[SystemReviewResult]) -> list[tuple[str,
     """
     labels: list[tuple[str, str]] = []
     for result in results:
-        reason = result.failure_reason
+        reason: str | None = result.failure_reason
         if reason is None and result.timed_out:
             reason = "timeout"
         if reason is not None:
+            detail = result.failure_detail
+            if detail and _CANONICAL_FAILURE_DETAIL_RE.fullmatch(detail):
+                reason = f"{reason}: {detail}"
             labels.append((result.system_group, reason))
     return labels
 
@@ -272,15 +287,16 @@ def build_degraded_coverage_findings(
     """
     findings: list[Finding] = []
     for label, reason in failed_labels:
+        reason_code, _, detail = reason.partition(": ")
         is_precheck = label.startswith("precheck:")
         subject = "Precheck scanner" if is_precheck else "Reviewer session"
-        is_missing = reason == _SCANNER_NOT_INSTALLED_REASON
+        is_missing = reason_code == _SCANNER_NOT_INSTALLED_REASON
         # Distinct wording from a crash/timeout: the reviewer was alive and
         # exploring, it just never reached finish_review.
-        is_exhausted = reason == "turn_budget_exhausted"
+        is_exhausted = reason_code == "turn_budget_exhausted"
         if is_missing:
             reason_desc = "is not installed"
-        elif reason == "timeout":
+        elif reason_code == "timeout":
             reason_desc = "timed out"
         elif is_exhausted:
             reason_desc = "ran out of turns before finishing"
@@ -302,16 +318,22 @@ def build_degraded_coverage_findings(
                 f"Re-run the review or manually inspect the changes in '{label}' "
                 f"to ensure potential issues were not missed due to {reason}."
             )
+        if detail:
+            # Cause first: API/MCP summaries may clip at 200 chars, and the
+            # area name is unbounded model output.
+            description = f"{subject} {reason_desc}. Area: '{label}'. Coverage is degraded."
+        else:
+            description = (
+                f"{subject} '{label}' {reason_desc} and produced no findings. "
+                "Coverage for this area is degraded."
+            )
         findings.append(
             Finding(
                 severity=Severity.SUGGESTION,
                 category="coverage-gap",
                 file=None,
                 line=None,
-                description=(
-                    f"{subject} '{label}' {reason_desc} and produced no findings. "
-                    "Coverage for this area is degraded."
-                ),
+                description=description,
                 suggestion=suggestion,
             )
         )

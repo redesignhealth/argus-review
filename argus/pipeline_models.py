@@ -168,6 +168,14 @@ class SystemReviewResult(BaseModel):
         default=False,
         description="True when failure_reason == 'timeout'; kept for back-compat.",
     )
+    failure_detail: str | None = Field(
+        default=None,
+        description=(
+            "Short, key-free cause for failure_reason (e.g. '503 UNAVAILABLE, turn 45'), "
+            "copied from the runner's SessionResult. Report/degraded-coverage text only -- "
+            "not persisted to agent_runs and never parsed for control flow."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod

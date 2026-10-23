@@ -147,7 +147,7 @@ import logging
 import os
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -219,7 +219,8 @@ _HTTP_TIMEOUT_FRACTION = 0.8
 # DEADLINE_EXCEEDED/INTERNAL, or an httpx timeout/connect/read/remote-protocol
 # error) before the model returned ANY response (i.e. on turn 0), so the retry
 # restarts the session cleanly from the beginning. Later failures are not
-# retried. The cooldown depends on the error kind (see `_retry_decision`):
+# restarted; the SDK retries only individual 5xx requests (see
+# `_HTTP_RETRY_ATTEMPTS`). The cooldown depends on the error kind (see `_retry_decision`):
 # 45-60 s jitter for 429/RESOURCE_EXHAUSTED (per-minute quota windows), 5-10 s
 # for 5xx/network errors; a server Retry-After/retryDelay >= 5 s is honored;
 # never more than 60 s. Daily-quota 429s are not retried. Overridable via
@@ -249,6 +250,13 @@ _TRANSIENT_HTTPX = (
     httpx.ReadError,
     httpx.RemoteProtocolError,
 )
+
+# SDK-level per-request retry of 5xx at any turn; the request is re-sent
+# unchanged, so no tools are replayed. 429s stay in _retry_decision because the
+# SDK cannot tell daily quota from per-minute limits or honor Retry-After.
+_HTTP_RETRY_ATTEMPTS = 3  # including the initial call
+_HTTP_RETRY_INITIAL_DELAY_S = 2.0
+_HTTP_RETRY_MAX_DELAY_S = 20.0
 _DETAIL_MAX_CHARS = 300
 _SECRET_RE = re.compile(
     r"(AIza[0-9A-Za-z_\-]{20,}|(?i:(?:api[_-]?key|key|token)=)[^&\s\"']+|"
@@ -271,8 +279,38 @@ class _Progress:
     """Mutable per-session state shared between attempts and the failure handler."""
 
     responses: int = 0  # successful generate_content responses received
+    last_turn: int | None = None  # 0-based index of the turn that last ran
     retried: bool = False
     retry_wait_s: float = 0.0
+    # Usage accrued so far, so a session that dies mid-flight still reports it.
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    candidates_tokens: int = 0
+    thoughts_tokens: int = 0
+    tool_use_prompt_tokens: int = 0
+    tool_calls: list[str] = field(default_factory=list)
+
+    @property
+    def input_tokens(self) -> int:
+        # Gemini's prompt_token_count already includes the cached portion, so
+        # subtract it to avoid billing it at both input and cache-read rates.
+        # Tool-result tokens are billed as input.
+        return max(self.prompt_tokens - self.cached_tokens, 0) + self.tool_use_prompt_tokens
+
+    @property
+    def output_tokens(self) -> int:
+        # Thinking tokens are a separate additive bucket billed as output.
+        return self.candidates_tokens + self.thoughts_tokens
+
+    def cost_usd(self, model: str) -> float:
+        if self.responses == 0:
+            return 0.0
+        return estimate_cost_usd(
+            model=model,
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+            cached_input_tokens=self.cached_tokens,
+        )
 
 
 def _scrub(text: str) -> str:
@@ -767,7 +805,7 @@ async def _run_turns(
     repo_root: str,
     timeout_s: float,
     started_at: datetime,
-    progress: _Progress | None = None,
+    progress: _Progress,
 ) -> SessionResult:
     """The actual tool-calling loop. Returns ``failure_reason="turn_budget_exhausted"``
     when the loop ran out of turns without a ``finish_review`` call, else
@@ -834,6 +872,16 @@ async def _run_turns(
             label=label,
         )
 
+        # Retry only model calls, not detached synchronous cache creation.
+        request_http_options = types.HttpOptions(
+            retry_options=types.HttpRetryOptions(
+                attempts=_HTTP_RETRY_ATTEMPTS,
+                initial_delay=_HTTP_RETRY_INITIAL_DELAY_S,
+                max_delay=_HTTP_RETRY_MAX_DELAY_S,
+                http_status_codes=[500, 502, 503, 504],
+            )
+        )
+
         def _build_config(cache_name: str | None) -> types.GenerateContentConfig:
             # Gemini constraint (confirmed against the live API, not just
             # documentation): a request using `cached_content=` must NOT
@@ -847,11 +895,14 @@ async def _run_turns(
             # `CreateCachedContentConfig.tool_config`), so the cached
             # branch here sends `cached_content` alone.
             if cache_name:
-                return types.GenerateContentConfig(cached_content=cache_name)
+                return types.GenerateContentConfig(
+                    cached_content=cache_name, http_options=request_http_options
+                )
             return types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 tools=gemini_tools,
                 tool_config=_FORCE_TOOL_CONFIG,
+                http_options=request_http_options,
             )
 
         config = _build_config(cached_content_name)
@@ -860,19 +911,14 @@ async def _run_turns(
             types.Content(role="user", parts=[types.Part.from_text(text=user_message)])
         ]
 
-        tool_calls: list[str] = []
         files_explored: list[str] = []
         exhausted = False
-        usage_prompt_total = 0
-        usage_candidates_total = 0
-        usage_cached_total = 0
-        usage_thoughts_total = 0
-        usage_tool_use_prompt_total = 0
 
         _mid_budget_nudge_turn = _compute_mid_budget_nudge_turn(_MAX_TURNS_GEMINI)
 
         with review_tools.review_session(repo_root) as findings_sink:
             for _turn in range(_MAX_TURNS_GEMINI):
+                progress.last_turn = _turn
                 if (
                     _turn == _MAX_TURNS_GEMINI - _NUDGE_TURNS_BEFORE_BUDGET
                     and contents[-1].parts is not None
@@ -928,23 +974,16 @@ async def _run_turns(
                         model=model, contents=contents, config=config
                     )
 
-                if progress is not None:
-                    progress.responses += 1
+                progress.responses += 1
                 usage = response.usage_metadata
                 if usage is not None:
-                    usage_prompt_total += usage.prompt_token_count or 0
-                    usage_candidates_total += usage.candidates_token_count or 0
-                    usage_cached_total += usage.cached_content_token_count or 0
-                    # thoughts_token_count (thinking-mode output) and
-                    # tool_use_prompt_token_count (tool-result tokens fed
-                    # back to the model) are both billable and both
-                    # separate additive buckets, per
-                    # GenerateContentResponseUsageMetadata's own docstring
-                    # (total_token_count = prompt + candidates +
-                    # tool_use_prompt + thoughts) -- NOT already folded
-                    # into prompt_token_count/candidates_token_count.
-                    usage_thoughts_total += usage.thoughts_token_count or 0
-                    usage_tool_use_prompt_total += usage.tool_use_prompt_token_count or 0
+                    # thoughts and tool-use prompt tokens are billable, separate
+                    # additive buckets (not folded into prompt/candidates counts).
+                    progress.prompt_tokens += usage.prompt_token_count or 0
+                    progress.candidates_tokens += usage.candidates_token_count or 0
+                    progress.cached_tokens += usage.cached_content_token_count or 0
+                    progress.thoughts_tokens += usage.thoughts_token_count or 0
+                    progress.tool_use_prompt_tokens += usage.tool_use_prompt_token_count or 0
 
                 function_calls = response.function_calls or []
                 if not function_calls:
@@ -998,7 +1037,7 @@ async def _run_turns(
                 for call in function_calls:
                     name = call.name or ""
                     args = dict(call.args or {})
-                    tool_calls.append(name)
+                    progress.tool_calls.append(name)
                     output, is_error = await asyncio.to_thread(_execute_tool_call, name, args)
                     if is_error and name != "finish_review":
                         logger.warning("Tool call failed [%s]: %s", name, output[:200])
@@ -1030,35 +1069,19 @@ async def _run_turns(
             result_text = _build_result_text(findings_sink, files_explored)
 
         finished_at = datetime.now(timezone.utc)
-        unique_tool_names = sorted(set(tool_calls))
+        unique_tool_names = sorted(set(progress.tool_calls))
+        cost_usd = progress.cost_usd(model)
 
-        # Gemini's prompt_token_count already INCLUDES the cached portion
-        # (unlike Anthropic's fully-separate input/cache-read counters,
-        # which is the convention estimate_cost_usd's cached_input_tokens
-        # documents) -- so the cached amount must be subtracted out of the
-        # uncached input count here, or it would be billed at both the full
-        # input rate AND the cache-read rate. tool_use_prompt tokens are
-        # billed at the input rate (added in); thoughts tokens are billed
-        # at the output rate (added in) -- see the accumulation loop above.
-        input_tokens = max(usage_prompt_total - usage_cached_total, 0) + usage_tool_use_prompt_total
-        output_tokens = usage_candidates_total + usage_thoughts_total
-        cost_usd = estimate_cost_usd(
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_input_tokens=usage_cached_total,
-        )
-
-        tools_str = f" (tools: {', '.join(unique_tool_names)})" if tool_calls else ""
+        tools_str = f" (tools: {', '.join(unique_tool_names)})" if progress.tool_calls else ""
         logger.info(
             "Gemini agent done [%s]: %d tool calls%s, cost=$%.4f input_tokens=%d cached_tokens=%d output_tokens=%d",
             label or "unlabeled",
-            len(tool_calls),
+            len(progress.tool_calls),
             tools_str,
             cost_usd,
-            input_tokens,
-            usage_cached_total,
-            output_tokens,
+            progress.input_tokens,
+            progress.cached_tokens,
+            progress.output_tokens,
         )
 
         return SessionResult(
@@ -1067,7 +1090,7 @@ async def _run_turns(
             duration_seconds=(finished_at - started_at).total_seconds(),
             started_at=started_at,
             finished_at=finished_at,
-            tool_call_count=len(tool_calls),
+            tool_call_count=len(progress.tool_calls),
             tool_names=unique_tool_names,
             # No Context7 MCP integration in scope for this runner (see module
             # docstring) -- always 0, never derived from tool_calls.
@@ -1207,19 +1230,21 @@ async def run_session_gemini(
     except (TimeoutError, httpx.TimeoutException) as exc:
         finished_at = datetime.now(timezone.utc)
         logger.warning(
-            "Gemini session [%s] timed out after %ss (%s)",
+            "Gemini session [%s] timed out after %ss (%s), %d turn(s) and %d tool call(s) done",
             label or "unlabeled",
             effective_timeout_s,
             type(exc).__name__,
+            progress.responses,
+            len(progress.tool_calls),
         )
         return SessionResult(
             result_text="",
-            cost_usd=0.0,
+            cost_usd=progress.cost_usd(model),
             duration_seconds=(finished_at - started_at).total_seconds(),
             started_at=started_at,
             finished_at=finished_at,
-            tool_call_count=0,
-            tool_names=[],
+            tool_call_count=len(progress.tool_calls),
+            tool_names=sorted(set(progress.tool_calls)),
             context7_call_count=0,
             model=model,
             failure_reason="timeout",
@@ -1259,6 +1284,8 @@ async def run_session_gemini(
         # subprocess "worker" the way the Claude Agent SDK path does.
         finished_at = datetime.now(timezone.utc)
         detail = _failure_detail(exc)
+        if progress.last_turn is not None:
+            detail = f"{detail}, turn {progress.last_turn}"
         logger.warning(
             "Gemini session [%s] failed after %.1fs (%s, %s%s): %s",
             label or "unlabeled",
@@ -1270,12 +1297,12 @@ async def run_session_gemini(
         )
         return SessionResult(
             result_text="",
-            cost_usd=0.0,
+            cost_usd=progress.cost_usd(model),
             duration_seconds=(finished_at - started_at).total_seconds(),
             started_at=started_at,
             finished_at=finished_at,
-            tool_call_count=0,
-            tool_names=[],
+            tool_call_count=len(progress.tool_calls),
+            tool_names=sorted(set(progress.tool_calls)),
             context7_call_count=0,
             model=model,
             failure_reason="worker_crashed",
