@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from argus.models import Finding, ReviewResponse, RiskLevel, Severity, Verdict
 from argus.pipeline_models import RawFinding, SystemReviewResult
 
@@ -145,14 +147,27 @@ def collect_reviewed_files(results: list[SystemReviewResult]) -> set[str]:
     return reviewed
 
 
-# Only canonical provider codes/statuses and transport exception names may be
-# rendered into reports, never arbitrary exception text or payloads.
+def _concrete_subclass_names(base: type[BaseException]) -> set[str]:
+    names = {base.__name__}
+    for sub in base.__subclasses__():
+        names |= _concrete_subclass_names(sub)
+    return names
+
+
+# Only canonical provider codes/statuses, HTTP reason phrases and transport
+# exception names may be rendered into reports, never arbitrary exception text
+# or payloads. Transport names come from httpx itself so they cannot drift.
+_TRANSPORT_ERROR_NAMES = sorted(
+    _concrete_subclass_names(httpx.TransportError) | {"HTTPStatusError"}
+)
 _CANONICAL_FAILURE_DETAIL_RE = re.compile(
     r"(?:[1-5][0-9]{2}(?: (?:INTERNAL|UNAVAILABLE|RESOURCE_EXHAUSTED|"
     r"DEADLINE_EXCEEDED|UNAUTHENTICATED|PERMISSION_DENIED|INVALID_ARGUMENT|"
     r"NOT_FOUND|FAILED_PRECONDITION|UNKNOWN|CANCELLED|ABORTED|OUT_OF_RANGE|"
-    r"UNIMPLEMENTED|DATA_LOSS))?|(?:ConnectError|ReadError|RemoteProtocolError|"
-    r"HTTPStatusError|ServerError|ClientError|APIError))"
+    r"UNIMPLEMENTED|DATA_LOSS|"
+    # HTTP reason phrase (non-JSON error body), e.g. "Bad Gateway"; <= 40 chars.
+    r"(?=[A-Za-z ]{1,40}(?![A-Za-z ]))[A-Z][a-z]+(?: [A-Z][a-z]+)*))?|"
+    r"(?:" + "|".join(_TRANSPORT_ERROR_NAMES) + r"|ServerError|ClientError|APIError))"
     r"(?: \(daily quota\))?(?:, turn [0-9]+)?"
 )
 

@@ -2,8 +2,10 @@
 
 from datetime import datetime, timezone
 
+import httpx
 import pytest
 
+from argus.gemini_runner import _TRANSIENT_HTTPX
 from argus.helpers import (
     apply_precheck_gate_and_surface_degraded_coverage,
     failed_reviewer_labels,
@@ -55,6 +57,10 @@ def test_provider_cause_survives_round_trip_and_short_service_summary() -> None:
         "503 " + "x" * 1000,
         "503 INTERNAL https://private.example",
         "UNAVAILABLE",
+        "502 bad gateway",
+        "502 Bad Gateway at https://private.example",
+        "502 " + "Bad " * 11,
+        "WriteError api_key=x",
         "",
         None,
     ],
@@ -75,7 +81,16 @@ def test_noncanonical_failure_detail_is_never_rendered(detail: str | None) -> No
 
 @pytest.mark.parametrize(
     "detail",
-    ["500 INTERNAL, turn 18", "429 RESOURCE_EXHAUSTED (daily quota), turn 0", "ConnectError"],
+    [
+        "500 INTERNAL, turn 18",
+        "429 RESOURCE_EXHAUSTED (daily quota), turn 0",
+        "ConnectError",
+        "502 Bad Gateway, turn 0",
+        "504 Gateway Timeout",
+        "503 Service Unavailable, turn 3",
+        "WriteError, turn 1",
+        "ReadTimeout",
+    ],
 )
 def test_canonical_failure_detail_is_rendered(detail: str) -> None:
     result = SystemReviewResult(
@@ -87,3 +102,28 @@ def test_canonical_failure_detail_is_rendered(detail: str) -> None:
 def test_success_does_not_turn_into_a_failure_due_to_detail() -> None:
     result = SystemReviewResult(system_group="deployment", failure_detail="500 INTERNAL")
     assert failed_reviewer_labels([result]) == []
+
+
+def _subclasses(base: type[BaseException]) -> set[type[BaseException]]:
+    found: set[type[BaseException]] = {base}
+    for sub in base.__subclasses__():
+        found |= _subclasses(sub)
+    return found
+
+
+@pytest.mark.parametrize(
+    "exc_type",
+    sorted(
+        _subclasses(httpx.TransportError).union(*map(_subclasses, _TRANSIENT_HTTPX)),
+        key=repr,
+    ),
+)
+def test_every_runner_transport_exception_name_is_rendered(
+    exc_type: type[BaseException],
+) -> None:
+    result = SystemReviewResult(
+        system_group="security", failure_reason="worker_crashed", failure_detail=exc_type.__name__
+    )
+    assert failed_reviewer_labels([result]) == [
+        ("security", f"worker_crashed: {exc_type.__name__}")
+    ]

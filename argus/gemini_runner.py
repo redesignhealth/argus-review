@@ -220,7 +220,8 @@ _HTTP_TIMEOUT_FRACTION = 0.8
 # error) before the model returned ANY response (i.e. on turn 0), so the retry
 # restarts the session cleanly from the beginning. Later failures are not
 # restarted; the SDK retries only individual 5xx requests (see
-# `_HTTP_RETRY_ATTEMPTS`). The cooldown depends on the error kind (see `_retry_decision`):
+# `_HTTP_RETRY_ATTEMPTS`), and a 5xx it already retried is not restarted again,
+# so the restart covers 429 and transport errors only. The cooldown depends on the error kind (see `_retry_decision`):
 # 45-60 s jitter for 429/RESOURCE_EXHAUSTED (per-minute quota windows), 5-10 s
 # for 5xx/network errors; a server Retry-After/retryDelay >= 5 s is honored;
 # never more than 60 s. Daily-quota 429s are not retried. Overridable via
@@ -255,6 +256,7 @@ _TRANSIENT_HTTPX = (
 # unchanged, so no tools are replayed. 429s stay in _retry_decision because the
 # SDK cannot tell daily quota from per-minute limits or honor Retry-After.
 _HTTP_RETRY_ATTEMPTS = 3  # including the initial call
+_HTTP_RETRY_STATUS_CODES = (500, 502, 503, 504)
 _HTTP_RETRY_INITIAL_DELAY_S = 2.0
 _HTTP_RETRY_MAX_DELAY_S = 20.0
 _DETAIL_MAX_CHARS = 300
@@ -384,6 +386,8 @@ def _retry_decision(exc: BaseException) -> tuple[str, float] | None:
     if not _is_transient_error(exc):
         return None
     code, status = _error_code_status(exc)
+    if isinstance(exc, genai_errors.ServerError) and code in _HTTP_RETRY_STATUS_CODES:
+        return None  # the SDK already retried this request; a restart would repeat it
     server_delay = _retry_after_seconds(exc)
     if code == 429 or (status or "").upper() == "RESOURCE_EXHAUSTED":
         if _is_daily_quota(exc, server_delay):
@@ -878,7 +882,7 @@ async def _run_turns(
                 attempts=_HTTP_RETRY_ATTEMPTS,
                 initial_delay=_HTTP_RETRY_INITIAL_DELAY_S,
                 max_delay=_HTTP_RETRY_MAX_DELAY_S,
-                http_status_codes=[500, 502, 503, 504],
+                http_status_codes=list(_HTTP_RETRY_STATUS_CODES),
             )
         )
 
