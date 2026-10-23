@@ -1761,7 +1761,7 @@ class TestTransientRetry:
             result = await _run(client)
         assert client.aio.models.generate_content.await_count == 2
         assert result.failure_reason == "worker_crashed"
-        assert result.failure_detail == "503 UNAVAILABLE"
+        assert result.failure_detail == "503 UNAVAILABLE, turn 0"
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
         assert any("after one retry" in r.getMessage() for r in warnings)
 
@@ -1779,7 +1779,7 @@ class TestTransientRetry:
         result = await _run(client)
         assert client.aio.models.generate_content.await_count == 1
         assert result.failure_reason == "worker_crashed"
-        assert result.failure_detail == f"{code} {status}"
+        assert result.failure_detail == f"{code} {status}, turn 0"
 
     async def test_httpx_connect_error_is_retried(self) -> None:
         ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
@@ -1905,7 +1905,7 @@ class TestTransientRetry:
         assert client.aio.models.generate_content.await_count == 1
         assert slept == []
         assert result.failure_reason == "worker_crashed"
-        assert result.failure_detail == "429 RESOURCE_EXHAUSTED (daily quota)"
+        assert result.failure_detail == "429 RESOURCE_EXHAUSTED (daily quota), turn 0"
 
     async def test_429_with_long_retry_delay_not_retried(self) -> None:
         err = _api_error(429, "RESOURCE_EXHAUSTED")
@@ -1927,7 +1927,7 @@ class TestTransientRetry:
         result = await _run(client)
         assert client.aio.models.generate_content.await_count == 2
         assert len(slept) == 1
-        assert result.failure_detail == "429 RESOURCE_EXHAUSTED"
+        assert result.failure_detail == "429 RESOURCE_EXHAUSTED, turn 0"
 
     async def test_retry_info_log_has_kind_and_cooldown(
         self, caplog: pytest.LogCaptureFixture

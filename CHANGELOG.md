@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini requests now retry HTTP 500/502/503/504 in place at every turn (up to three attempts with exponential jitter), retaining the conversation and without replaying tools. The outer session timeout still bounds the total work. The existing quota-aware turn-0 retry remains in place; 429s are excluded from the SDK's status-only retry policy so daily-quota errors still fail fast.
+- Failed Gemini sessions preserve cost and tool accounting from completed turns, and include the failed turn index in their short failure detail.
+- Reviewer failure details now reach degraded-coverage reports instead of disappearing after the runner. Only canonical provider codes/statuses and transport error names are rendered; raw provider messages are never included. The cause precedes the reviewer-area name so it remains visible to consumers that truncate descriptions to 200 characters. Existing failure-reason values and database constraints are unchanged.
+
 ## [0.3.3] - 2026-10-22
 
 ### Changed
