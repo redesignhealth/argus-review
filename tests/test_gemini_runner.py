@@ -1752,18 +1752,25 @@ class TestTransientRetry:
             for r in caplog.records
         )
 
-    async def test_503_then_503_only_one_retry_with_detail(
+    @pytest.mark.parametrize("code", [500, 502, 503, 504])
+    async def test_sdk_retried_5xx_is_not_restarted_at_session_level(self, code: int) -> None:
+        err = _api_error(code, "UNAVAILABLE", genai_errors.ServerError)
+        client = _make_fake_client([err, err, err])
+        result = await _run(client)
+        assert client.aio.models.generate_content.await_count == 1
+        assert result.failure_reason == "worker_crashed"
+        assert result.failure_detail == f"{code} UNAVAILABLE, turn 0"
+
+    async def test_unretried_server_error_code_still_restarts_once(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
-        err = _api_error(503, "UNAVAILABLE", genai_errors.ServerError)
+        # Not in the SDK retry set, so the session retry still applies.
+        err = _api_error(599, "DEADLINE_EXCEEDED", genai_errors.ServerError)
         client = _make_fake_client([err, err, err])
         with caplog.at_level("INFO", logger="argus.gemini_runner"):
             result = await _run(client)
         assert client.aio.models.generate_content.await_count == 2
-        assert result.failure_reason == "worker_crashed"
-        assert result.failure_detail == "503 UNAVAILABLE, turn 0"
-        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert any("after one retry" in r.getMessage() for r in warnings)
+        assert result.failure_detail == "599 DEADLINE_EXCEEDED, turn 0"
 
     @pytest.mark.parametrize(
         ("code", "status"),
@@ -1817,8 +1824,8 @@ class TestTransientRetry:
         for n in ("MIN", "MAX"):
             monkeypatch.delenv(f"ARGUS_GEMINI_RETRY_COOLDOWN_{n}_S")
         for exc, kind in [
-            (_api_error(503, "UNAVAILABLE", genai_errors.ServerError), "server"),
-            (_api_error(500, "INTERNAL", genai_errors.ServerError), "server"),
+            (_api_error(599, "UNAVAILABLE", genai_errors.ServerError), "server"),
+            (_api_error(503, "UNAVAILABLE"), "server"),
             (httpx.ConnectError("reset"), "network"),
         ]:
             for _ in range(50):

@@ -92,12 +92,12 @@ async def test_mid_session_retry_uses_identical_request_without_replaying_tools(
         monkeypatch.setattr(
             gemini_runner, "_maybe_activate_cache", lambda **_: "cachedContents/test"
         )
-    monkeypatch.setattr(gemini_runner, "_HTTP_RETRY_INITIAL_DELAY_S", 2.0 if deadline else 0.001)
-    monkeypatch.setattr(gemini_runner, "_HTTP_RETRY_MAX_DELAY_S", 20.0 if deadline else 0.002)
+    monkeypatch.setattr(gemini_runner, "_HTTP_RETRY_INITIAL_DELAY_S", 30.0 if deadline else 0.001)
+    monkeypatch.setattr(gemini_runner, "_HTTP_RETRY_MAX_DELAY_S", 60.0 if deadline else 0.002)
     settings = SimpleNamespace(
         google_credential=("GOOGLE_API_KEY", "test-key"),
         GOOGLE_BASE_URL=None,
-        ARGUS_SESSION_TIMEOUT=0.1 if deadline else 10,
+        ARGUS_SESSION_TIMEOUT=3 if deadline else 10,
     )
     entry = BenchEntry(
         role="system-generalist",
@@ -118,6 +118,8 @@ async def test_mid_session_retry_uses_identical_request_without_replaying_tools(
     assert client_options and all(options.retry_options is None for options in client_options)
     if cached:
         assert all(request["cachedContent"] == "cachedContents/test" for request in requests)
+    # Deadline case: setup is far inside the timeout, so exactly the first
+    # turn plus one failed request are sent before the backoff is interrupted.
     assert len(requests) == expected_calls
     assert all(request == requests[1] for request in requests[1:])
     assert tool_calls == (["read_file", "finish_review"] if recover else ["read_file"])
@@ -130,4 +132,5 @@ async def test_mid_session_retry_uses_identical_request_without_replaying_tools(
         )
         assert "private-provider-payload" not in result.failure_detail
     if expected_reason == "timeout":
-        assert result.duration_seconds < 1
+        # The deadline fires during the (much longer) SDK backoff sleep.
+        assert result.duration_seconds < 15
