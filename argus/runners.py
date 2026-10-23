@@ -1863,6 +1863,14 @@ async def _run_claude_session(
         allowed_tools=["Read", "Glob", "Grep"] + context7_tools,
         mcp_servers=mcp_servers,
         strict_mcp_config=True,
+        # The session's cwd is the PR's own checkout, so leaving this unset
+        # would let that checkout supply .claude/settings*.json -- hooks,
+        # permissions, env, model -- to a session holding review credentials,
+        # and would load the caller's personal ~/.claude settings too. This
+        # reviewer needs none of them: it declares its own tools, MCP servers
+        # and permission mode above, and reads the PR's CLAUDE.md as ordinary
+        # file content when the prompt asks for it.
+        setting_sources=[],
         permission_mode="default",
         hooks=hooks,
         model=model,
