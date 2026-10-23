@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-23
+
 ### Fixed
 
 - Gemini requests now retry HTTP 500/502/503/504 in place at every turn (up to three attempts with exponential jitter), retaining the conversation and without replaying tools. The outer session timeout still bounds the total work. The quota-aware whole-session turn-0 retry remains for 429s and transport errors, but a 5xx the SDK has already retried (three attempts) is not restarted, so a persistent 5xx costs at most three requests per turn; 429s are excluded from the SDK's status-only retry policy so daily-quota errors still fail fast.
@@ -455,7 +457,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.3...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.4...HEAD
+[0.3.4]: https://github.com/redesignhealth/argus-review/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/redesignhealth/argus-review/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/redesignhealth/argus-review/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/redesignhealth/argus-review/compare/v0.3.0...v0.3.1
