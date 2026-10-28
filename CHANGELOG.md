@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
 ### Changed
 
 - Gemini `caching = "auto"` (the packaged default for the bulk reviewers) no longer creates an explicit context cache; only `"on"` does. Explicit caching held just the system prompt and tools (about 1-3k tokens) and Gemini then reported only that slice as cached on every turn, while the growing conversation (the bulk of each request) was billed uncached. With no explicit cache, Gemini's automatic prefix caching applies to the whole repeated prefix. In paired live runs of the same PR the reported cached share of prompt tokens went from about 7% to about 90% (total prompt tokens about equal, verdicts and finding counts equivalent), and Argus's own cost estimate for the review fell from $12.66 to $3.20. That estimate is computed from the reported `cached_content_token_count`, not from a billing export, and Google does not document how automatic cache hits interact with `cached_content`, so treat the savings as unconfirmed. Because the default behavior of `auto` changes, this ships as a minor release (0.4.0). `caching = "on"` keeps the previous explicit-cache behavior.
@@ -461,7 +463,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/redesignhealth/argus-review/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/redesignhealth/argus-review/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/redesignhealth/argus-review/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/redesignhealth/argus-review/compare/v0.3.1...v0.3.2
