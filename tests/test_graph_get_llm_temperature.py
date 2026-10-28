@@ -188,14 +188,15 @@ def test_temperature_guard_does_not_swallow_claude_mini_when_specialist_model_co
     was over-inclusive. Setting ARGUS_SPECIALIST_MODEL=claude-haiku-4-5 makes
     CLAUDE_DEFAULT resolve to the SAME value as CLAUDE_MINI, pulling
     CLAUDE_MINI's own resolved value into _TEMPERATURE_UNSUPPORTED_MODELS via
-    the CLAUDE_DEFAULT term of the union. _match_dismissals
-    (argus/graph.py) calls `_get_llm(f"anthropic:{CLAUDE_MINI}",
-    temperature=0)` for deterministic dismissal-index matching -- that
-    temperature=0 would then be silently stripped, breaking the exact
-    invariant this set's own comment documents ("claude-haiku-4-5
-    (CLAUDE_MINI) accepts it fine, so is deliberately not included here").
-    The explicit `- {CLAUDE_MINI}` exclusion in the set's construction is
-    what prevents this.
+    the CLAUDE_DEFAULT term of the union. A plain
+    `_get_llm(f"anthropic:{CLAUDE_MINI}", ..., temperature=0)` call (this was
+    the dismissal-index matcher, which no longer passes temperature because
+    Haiku structured output rejects it) would then have its temperature
+    silently stripped, breaking the invariant this set's own comment
+    documents ("claude-haiku-4-5 (CLAUDE_MINI) accepts it fine on plain
+    requests, so is deliberately not included here"). The explicit
+    `- {CLAUDE_MINI}` exclusion in the set's construction is what prevents
+    this.
     """
     overridden_set = _temperature_unsupported_models_under_override(CLAUDE_MINI)
     assert CLAUDE_MINI not in overridden_set

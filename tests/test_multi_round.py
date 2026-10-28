@@ -7,6 +7,7 @@ round 2 writer messages, and model contracts.
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1184,6 +1185,7 @@ class TestApplyDismissals:
         """
         _reload_graph()
         from argus.graph import _apply_dismissals
+        from argus.graph import _get_llm as _get_llm_fn
 
         from pydantic import BaseModel
 
@@ -1208,8 +1210,12 @@ class TestApplyDismissals:
             await _apply_dismissals(findings, dismissals)
 
         mock_get_llm.assert_called_once()
-        assert mock_get_llm.call_args.args[1] == "dismiss_match"
-        assert "temperature" not in mock_get_llm.call_args.kwargs
+        mock_llm.with_structured_output.assert_called_once()
+        bound = inspect.signature(_get_llm_fn).bind(
+            *mock_get_llm.call_args.args, **mock_get_llm.call_args.kwargs
+        )
+        assert bound.arguments["stage"] == "dismiss_match"
+        assert "temperature" not in bound.arguments
 
     @pytest.mark.asyncio
     async def test_out_of_range_indices_ignored(self) -> None:

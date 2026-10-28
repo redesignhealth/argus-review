@@ -522,7 +522,7 @@ async def _apply_dismissals(
         "or -1 if it doesn't match any finding."
     )
 
-    # No `temperature`: with the current langchain-anthropic, structured output on this
+    # No `temperature`: with langchain-anthropic 1.7.7 (anthropic 2.3.0), structured output on this
     # call sends it in a way the Anthropic API rejects ("temperature: Extra inputs are not
     # permitted", HTTP 400), and a failure here aborts the whole review. The matching task
     # is deterministic enough without it.
@@ -1041,7 +1041,8 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
             # set on the assumption Anthropic's temperature deprecation
             # applies across the Sonnet line, not per-checkpoint; re-verify
             # empirically and correct this comment if that assumption turns
-            # out wrong. claude-haiku-4-5 (CLAUDE_MINI) accepts it fine, so
+            # out wrong. claude-haiku-4-5 (CLAUDE_MINI) accepts it fine on plain
+            # requests (not with structured output, see _apply_dismissals), so
             # is deliberately not included here -- see the explicit
             # exclusion below for why "not included" alone isn't enough.
             ALIAS_MAP["claude-frontier"],
@@ -1050,18 +1051,20 @@ _TEMPERATURE_UNSUPPORTED_MODELS: frozenset[str] = (
             CLAUDE_DEFAULT,
         }
     )
-    # Explicit exclusion, not just an absent literal: without this, an
-    # override that happens to land CLAUDE_DEFAULT/CLAUDE_FRONTIER on
-    # CLAUDE_MINI's own resolved value (e.g. `--specialist-model
-    # claude-haiku-4-5`, used directly by this suite's own tests) would pull
-    # that value into the union above via the CLAUDE_DEFAULT/CLAUDE_FRONTIER
-    # terms, and then _apply_dismissals's `_get_llm(f"anthropic:{CLAUDE_MINI}",
-    # "dismiss_match", temperature=0)` call would have ITS temperature silently stripped too
-    # -- a real, silent determinism regression in a call site that has
-    # nothing to do with the override, caught in Argus round 3 review of
-    # this PR. `- {CLAUDE_MINI}` guarantees CLAUDE_MINI's resolved value can
-    # never end up in this set regardless of what any other alias happens to
-    # resolve to.
+    # Explicit exclusion, not just an absent literal: without this, an override that
+    # happens to land CLAUDE_DEFAULT/CLAUDE_FRONTIER on CLAUDE_MINI's own resolved value
+    # (e.g. `--specialist-model claude-haiku-4-5`, used directly by this suite's own
+    # tests) would pull that value into the union above via the
+    # CLAUDE_DEFAULT/CLAUDE_FRONTIER terms, silently stripping `temperature` from any plain
+    # `_get_llm(f"anthropic:{CLAUDE_MINI}", ..., temperature=...)` call that has nothing
+    # to do with the override. `- {CLAUDE_MINI}` guarantees CLAUDE_MINI's resolved value
+    # can never end up in this set.
+    #
+    # `_apply_dismissals`, the former user of such a call, no longer passes `temperature`
+    # at all: structured output on Haiku is rejected with langchain-anthropic 1.7.7
+    # (HTTP 400, "temperature: Extra inputs are not permitted"). `langchain-anthropic` is
+    # unpinned above 1.2.0, so re-check this before relying on `temperature` together
+    # with structured output.
     - {CLAUDE_MINI}
 )
 
