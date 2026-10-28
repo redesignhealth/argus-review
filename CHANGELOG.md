@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-28
+
 ### Fixed
 
 - Rounds that carry dismissals no longer abort with `temperature: Extra inputs are not permitted` (HTTP 400). The `dismiss_match` call (the small Claude Haiku call that maps `--dismiss` text to prior findings) no longer sends `temperature`: with the current `langchain-anthropic`, structured output rejects it, and a failure there aborts the whole review. First-round reviews were unaffected.
@@ -467,7 +469,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/redesignhealth/argus-review/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/redesignhealth/argus-review/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/redesignhealth/argus-review/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/redesignhealth/argus-review/compare/v0.3.2...v0.3.3
