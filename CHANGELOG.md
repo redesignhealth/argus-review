@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Gemini `caching = "auto"` (the packaged default for the bulk reviewers) no longer creates an explicit context cache; only `"on"` does. Explicit caching held just the system prompt and tools (about 1-3k tokens) and Gemini then reported only that slice as cached on every turn, while the growing conversation (the bulk of each request) was billed uncached. With no explicit cache, Gemini's automatic prefix caching applies to the whole repeated prefix. In paired live runs of the same PR the reported cached share of prompt tokens went from about 7% to about 90% (total prompt tokens about equal, verdicts and finding counts equivalent), and Argus's own cost estimate for the review fell from $12.66 to $3.20. `caching = "on"` keeps the previous explicit-cache behavior.
+
 ## [0.3.4] - 2026-10-23
 
 ### Fixed
