@@ -1175,6 +1175,43 @@ class TestApplyDismissals:
         assert matched[0].dismissed_by == "user1"
 
     @pytest.mark.asyncio
+    async def test_dismiss_match_call_sends_no_temperature(self) -> None:
+        """The dismiss_match LLM call must not pass `temperature`.
+
+        With structured output, the current langchain-anthropic request is rejected by the
+        Anthropic API when a temperature is set ("temperature: Extra inputs are not
+        permitted", HTTP 400), and a failure here aborts the whole review.
+        """
+        _reload_graph()
+        from argus.graph import _apply_dismissals
+
+        from pydantic import BaseModel
+
+        class DismissMatch(BaseModel):
+            dismiss_index: int
+            finding_index: int
+
+        class DismissMatches(BaseModel):
+            matches: list[DismissMatch]
+
+        findings = [PriorFinding(severity="BLOCKING", description="issue")]
+        dismissals = [DismissedFinding(description="issue", dismissed_by="u", reason="r")]
+
+        mock_structured = MagicMock()
+        mock_structured.ainvoke = AsyncMock(
+            return_value=DismissMatches(matches=[DismissMatch(dismiss_index=0, finding_index=0)])
+        )
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output = MagicMock(return_value=mock_structured)
+
+        with patch("argus.graph._get_llm", return_value=mock_llm) as mock_get_llm:
+            await _apply_dismissals(findings, dismissals)
+
+        mock_get_llm.assert_called_once()
+        assert mock_get_llm.call_args.args[1] == "dismiss_match"
+        assert "temperature" not in mock_get_llm.call_args.kwargs
+
+    @pytest.mark.asyncio
     async def test_out_of_range_indices_ignored(self) -> None:
         """Matches with out-of-range indices are silently skipped."""
         _reload_graph()

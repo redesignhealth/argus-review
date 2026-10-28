@@ -522,8 +522,12 @@ async def _apply_dismissals(
         "or -1 if it doesn't match any finding."
     )
 
+    # No `temperature`: with the current langchain-anthropic, structured output on this
+    # call sends it in a way the Anthropic API rejects ("temperature: Extra inputs are not
+    # permitted", HTTP 400), and a failure here aborts the whole review. The matching task
+    # is deterministic enough without it.
     llm = _get_llm(
-        f"anthropic:{CLAUDE_MINI}", "dismiss_match", max_tokens=1024, temperature=0
+        f"anthropic:{CLAUDE_MINI}", "dismiss_match", max_tokens=1024
     ).with_structured_output(DismissMatches)
     result = await llm.ainvoke([{"role": "user", "content": prompt}])
 

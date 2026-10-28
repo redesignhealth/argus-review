@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Rounds that carry dismissals no longer abort with `temperature: Extra inputs are not permitted` (HTTP 400). The `dismiss_match` call (the small Claude Haiku call that maps `--dismiss` text to prior findings) no longer sends `temperature`: with the current `langchain-anthropic`, structured output rejects it, and a failure there aborts the whole review. First-round reviews were unaffected.
+
 ## [0.4.0] - 2026-10-28
 
 ### Changed
