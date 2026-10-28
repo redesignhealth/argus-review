@@ -54,7 +54,7 @@ key so that function's own ``group_name`` fallback still applies
 (this runner has no access to the caller's ``group.name`` -- only to
 ``entry.role``, which is a different, bench-level identifier).
 
-Explicit context caching (``entry.caching in {"auto", "on"}``) is
+Explicit context caching (``entry.caching == "on"``) is
 strictly best-effort: Gemini's explicit-cache API has a minimum
 content-size requirement a short prompt plus this small a toolset might
 not clear, so any exception raised while creating/reusing a cache is
@@ -177,14 +177,22 @@ logger = logging.getLogger(__name__)
 
 _MAX_TURNS_GEMINI = 100  # raised from 45 -- see TECH-6558
 
-# Both "auto" and "on" attempt explicit caching today -- there is no
-# separate heuristic distinguishing them yet (Track 1 defined the
-# `caching` values without one; see argus.bench's `_VALID_CACHING`). The
-# graceful-degradation try/except in `_maybe_activate_cache` is what
-# actually protects a caller who set "auto" against a too-small
-# prompt+toolset that can't clear Gemini's minimum cache-content-size
-# requirement. "off" skips caching entirely.
-_CACHE_ENABLED_VALUES = frozenset({"auto", "on"})
+# Only "on" creates an explicit cache. "auto" (the packaged default) and "off"
+# both send the whole request inline and leave caching to Gemini's own
+# automatic prefix caching, which is enabled by default on current models.
+#
+# Why "auto" is not explicit: an explicit cache holds only what is placed in
+# it at creation time (here the system prompt, tools and tool config, about
+# 1-3k tokens), and a request that references it ("cached_content=") must
+# not also carry those three fields. Every turn's growing conversation
+# (the diff plus all prior tool results) is then sent as ordinary
+# `contents`. In live A/B runs of the same PR,
+# explicit caching reported ~7% cached prompt tokens (exactly the cache size
+# on every turn) while caching="off" reported ~90%, with the same total
+# prompt volume. The graceful-degradation try/except in
+# `_maybe_activate_cache` still protects a caller who sets "on" against a
+# prompt+toolset that cannot clear Gemini's minimum cache size.
+_CACHE_ENABLED_VALUES = frozenset({"on"})
 
 _DEFAULT_READ_LIMIT = 2000  # mirrors argus.review_tools._DEFAULT_READ_LIMIT
 

@@ -606,6 +606,36 @@ class TestCacheActivation:
         assert request_config.tools is None
         assert request_config.tool_config is None
 
+    async def test_cache_auto_never_calls_caches_create(self) -> None:
+        # "auto" leaves caching to Gemini's automatic prefix caching: it must
+        # NOT create or reference an explicit cache, because a request that
+        # references one carries only the cache's static prefix and the
+        # growing conversation is then billed uncached.
+        entry = _make_entry(caching="auto")
+        settings = _make_settings()
+
+        response = _make_response(calls=[("finish_review", {"files_explored": []})])
+        fake_client = _make_fake_client([response], cache_name="cachedContents/should-not-be-used")
+
+        with patch("argus.gemini_runner.genai.Client", return_value=fake_client):
+            await run_session_gemini(
+                entry=entry,
+                system_prompt="sys",
+                user_message="msg",
+                settings=settings,
+                repo_root="/tmp/does-not-need-to-exist",
+            )
+
+        fake_client.caches.create.assert_not_called()
+        generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
+        assert generate_kwargs["config"].system_instruction == _with_turn_budget_line("sys")
+        assert generate_kwargs["config"].cached_content is None
+        # With no cache to carry them, tools and the forced tool_config must be
+        # sent inline on the request.
+        assert generate_kwargs["config"].tools is not None
+        assert generate_kwargs["config"].tool_config is not None
+        assert generate_kwargs["config"].tool_config.function_calling_config.mode == "ANY"
+
     async def test_cache_off_never_calls_caches_create(self) -> None:
         entry = _make_entry(caching="off")
         settings = _make_settings()

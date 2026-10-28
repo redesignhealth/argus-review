@@ -78,7 +78,7 @@ Valid `platform` values are exactly:
 
 Valid `caching` values are `"auto"` (the default), `"on"`, and `"off"`. However, how caching is handled depends on the platform runner:
 
-- **`gemini`**: The Gemini runner actively consumes and respects `caching`. `"auto"` and `"on"` enable explicit context caching (with graceful degradation if prompt and toolset size fall below Gemini's minimum cache threshold), while `"off"` skips cache creation and usage entirely.
+- **`gemini`**: The Gemini runner actively consumes and respects `caching`. `"on"` creates an explicit context cache holding the system prompt, tools and tool config (with graceful degradation if they fall below Gemini's minimum cache size). `"auto"` (the default) and `"off"` create no cache and send each request inline, so caching is left to Gemini's automatic prefix caching, which repeats across the turns of a reviewer's growing conversation. Prefer `"auto"` for the long, multi-turn bulk reviewers: an explicit cache covers only the small static prefix, and the conversation is sent uncached on top of it.
 - **`claude-sdk`**: Does not use explicit caching. If `caching` is explicitly set to anything other than `"auto"` (e.g. `"on"` or `"off"`), the runner logs a warning and ignores the setting.
 - **`openai-responses`**: Does not inspect `entry.caching`. OpenAI's Responses API handles prompt caching automatically on the server side (for prefixes >= 1024 tokens) without manual cache control.
 
