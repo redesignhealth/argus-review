@@ -630,6 +630,11 @@ class TestCacheActivation:
         generate_kwargs = fake_client.aio.models.generate_content.await_args.kwargs
         assert generate_kwargs["config"].system_instruction == _with_turn_budget_line("sys")
         assert generate_kwargs["config"].cached_content is None
+        # With no cache to carry them, tools and the forced tool_config must be
+        # sent inline on the request.
+        assert generate_kwargs["config"].tools is not None
+        assert generate_kwargs["config"].tool_config is not None
+        assert generate_kwargs["config"].tool_config.function_calling_config.mode == "ANY"
 
     async def test_cache_off_never_calls_caches_create(self) -> None:
         entry = _make_entry(caching="off")
