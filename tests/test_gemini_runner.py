@@ -36,6 +36,7 @@ from argus.bench import BenchEntry  # noqa: E402
 from argus.gemini_runner import (  # noqa: E402
     _MAX_TURNS_GEMINI,
     _describe_request,
+    _safe_describe_request,
     run_session_gemini,
 )
 from argus.llm.models import resolve as resolve_alias  # noqa: E402
@@ -1838,6 +1839,24 @@ class TestTransientRetry:
         assert any("Gemini 400 request shape [retry-test] (turn=0)" in m for m in messages)
         assert any("Gemini 400 recovered on retry [retry-test]" in m for m in messages)
 
+    async def test_describer_failure_does_not_skip_the_retry(self) -> None:
+        ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
+        client = _make_fake_client([_api_error(400, "INVALID_ARGUMENT"), ok])
+        with patch("argus.gemini_runner._describe_request", side_effect=ValueError("odd args")):
+            result = await _run(client)
+        assert result.failure_reason is None
+        assert client.aio.models.generate_content.await_count == 2
+
+    async def test_inverted_retry_bounds_do_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MIN_S", "0.02")
+        monkeypatch.setenv("ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MAX_S", "0")
+        ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
+        client = _make_fake_client([_api_error(400, "INVALID_ARGUMENT"), ok])
+        result = await _run(client)
+        assert result.failure_reason is None
+
     async def test_invalid_argument_failing_twice_fails_session_after_one_retry(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -2052,3 +2071,24 @@ class TestDescribeRequest:
             ),
         ]
         assert "anomalies=none" in _describe_request(contents)
+
+    async def test_empty_tool_result_is_flagged(self) -> None:
+        contents = [
+            types.Content(
+                role="model",
+                parts=[types.Part.from_function_call(name="grep", args={"pattern": "x"})],
+            ),
+            types.Content(
+                role="user",
+                parts=[types.Part.from_function_response(name="grep", response={})],
+            ),
+        ]
+        assert "zero-size-result@1" in _describe_request(contents)
+
+    async def test_first_turn_without_role_is_not_a_repeat(self) -> None:
+        contents = [types.Content(role=None, parts=[types.Part.from_text(text="hi")])]
+        assert "repeated-role" not in _describe_request(contents)
+
+    async def test_safe_describe_never_raises(self) -> None:
+        out = _safe_describe_request(object(), None)  # type: ignore[arg-type]
+        assert out.startswith("unavailable (")

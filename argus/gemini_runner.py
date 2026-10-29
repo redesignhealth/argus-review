@@ -445,7 +445,8 @@ def _part_shape(part: Any) -> str:
         return f"call:{call.name}({size})"
     resp = getattr(part, "function_response", None)
     if resp is not None:
-        size = len(json.dumps(resp.response or {}, default=str))
+        # An empty result reports size 0 so _describe_request can flag it.
+        size = len(json.dumps(resp.response, default=str)) if resp.response else 0
         return f"result:{resp.name}({size})"
     text = getattr(part, "text", None)
     if text is not None:
@@ -481,8 +482,8 @@ def _describe_request(contents: list[Any], config: Any = None) -> str:
             elif shape.startswith("result:"):
                 results += 1
             if size == 0 and shape.startswith(("text", "thought", "result")):
-                anomalies.append(f"zero-size-{shape.split('(')[0]}@{i}")
-        if content.role == prev_role:
+                anomalies.append(f"zero-size-{re.split(r'[:(]', shape)[0]}@{i}")
+        if prev_role is not None and content.role == prev_role:
             anomalies.append(f"repeated-role-{content.role}@{i}")
         prev_role = content.role
         nxt = contents[i + 1] if i + 1 < len(contents) else None
@@ -509,6 +510,14 @@ def _describe_request(contents: list[Any], config: Any = None) -> str:
         f"contents={len(contents)} approx_chars={total} largest_part={biggest}{cfg} "
         f"anomalies={anomalies or 'none'} tail: {tail_desc}"
     )
+
+
+def _safe_describe_request(contents: list[Any], config: Any) -> str:
+    """``_describe_request`` that can never mask the error being diagnosed."""
+    try:
+        return _describe_request(contents, config)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not replace the 400
+        return f"unavailable ({type(exc).__name__})"
 
 
 def _error_details(exc: BaseException) -> str:
@@ -1070,19 +1079,18 @@ async def _run_turns(
                             label or "unlabeled",
                             _turn,
                             _error_details(exc) or "none",
-                            _describe_request(contents, config),
+                            _safe_describe_request(contents, config),
+                        )
+                        lo = _env_float(
+                            "ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MIN_S",
+                            _INVALID_ARGUMENT_RETRY_MIN_S,
+                        )
+                        hi = _env_float(
+                            "ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MAX_S",
+                            _INVALID_ARGUMENT_RETRY_MAX_S,
                         )
                         await asyncio.sleep(
-                            random.uniform(  # noqa: S311 - jitter, not security
-                                _env_float(
-                                    "ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MIN_S",
-                                    _INVALID_ARGUMENT_RETRY_MIN_S,
-                                ),
-                                _env_float(
-                                    "ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MAX_S",
-                                    _INVALID_ARGUMENT_RETRY_MAX_S,
-                                ),
-                            )
+                            random.uniform(lo, max(lo, hi))  # noqa: S311 - jitter, not security
                         )
                         try:
                             response = await client.aio.models.generate_content(
