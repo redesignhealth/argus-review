@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-29
+
 ### Changed
 
 - A Gemini `400 INVALID_ARGUMENT` no longer ends the reviewer session on the first occurrence. Argus now logs a key-free, text-free summary of the failing request (message count, approximate size, part kinds and sizes for the last four turns, and anomalies such as empty parts or function calls with no matching result) plus any error `details` the API returned, then retries the same request once after a short pause (`ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MIN_S` / `_MAX_S`, default 2-5 s). The log records whether the retry recovered, which separates a transient fault from a malformed request. Other 4xx errors still fail immediately.
@@ -474,6 +476,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
 [Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.4.1...HEAD
+[0.4.2]: https://github.com/redesignhealth/argus-review/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/redesignhealth/argus-review/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/redesignhealth/argus-review/compare/v0.3.4...v0.4.0
 [0.3.4]: https://github.com/redesignhealth/argus-review/compare/v0.3.3...v0.3.4
