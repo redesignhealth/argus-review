@@ -445,8 +445,12 @@ def _part_shape(part: Any) -> str:
         return f"call:{call.name}({size})"
     resp = getattr(part, "function_response", None)
     if resp is not None:
-        # An empty result reports size 0 so _describe_request can flag it.
-        size = len(json.dumps(resp.response, default=str)) if resp.response else 0
+        # An empty result reports size 0 so _describe_request can flag it. The
+        # runner wraps every tool output as {"result": output}, so unwrap it.
+        payload = resp.response
+        if isinstance(payload, dict) and set(payload) == {"result"}:
+            payload = payload["result"]
+        size = len(json.dumps(payload, default=str)) if payload else 0
         return f"result:{resp.name}({size})"
     text = getattr(part, "text", None)
     if text is not None:
