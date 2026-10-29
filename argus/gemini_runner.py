@@ -426,6 +426,113 @@ def _failure_detail(exc: BaseException) -> str:
     return detail
 
 
+_INVALID_ARGUMENT_RETRY_MIN_S = 2.0
+_INVALID_ARGUMENT_RETRY_MAX_S = 5.0
+_SHAPE_TAIL_CONTENTS = 4
+
+
+def _is_invalid_argument(exc: BaseException) -> bool:
+    """True for a Gemini ``400 INVALID_ARGUMENT`` API answer."""
+    code, status = _error_code_status(exc)
+    return code == 400 and (status or "").upper() == "INVALID_ARGUMENT"
+
+
+def _part_shape(part: Any) -> str:
+    """Kind and size of one content part -- never its text."""
+    call = getattr(part, "function_call", None)
+    if call is not None:
+        size = len(json.dumps(call.args or {}, default=str))
+        return f"call:{call.name}({size})"
+    resp = getattr(part, "function_response", None)
+    if resp is not None:
+        # An empty result reports size 0 so _describe_request can flag it. The
+        # runner wraps every tool output as {"result": output}, so unwrap it.
+        payload = resp.response
+        if isinstance(payload, dict) and set(payload) == {"result"}:
+            payload = payload["result"]
+        size = len(json.dumps(payload, default=str)) if payload else 0
+        return f"result:{resp.name}({size})"
+    text = getattr(part, "text", None)
+    if text is not None:
+        tag = "thought" if getattr(part, "thought", False) else "text"
+        return f"{tag}({len(text)})"
+    return type(part).__name__
+
+
+def _describe_request(contents: list[Any], config: Any = None) -> str:
+    """Key-free, text-free summary of a request for diagnosing a 400.
+
+    Gemini's INVALID_ARGUMENT body carries no field name, so this records the
+    structure that could make a request malformed: roles, part kinds and sizes
+    for the last few turns, plus anomalies (empty parts, unanswered function
+    calls, consecutive same-role turns).
+    """
+    total = 0
+    biggest = 0
+    anomalies: list[str] = []
+    prev_role = None
+    for i, content in enumerate(contents):
+        parts = list(content.parts or [])
+        if not parts:
+            anomalies.append(f"empty-content@{i}")
+        calls = results = 0
+        for part in parts:
+            shape = _part_shape(part)
+            size = int(m.group(1)) if (m := re.search(r"\((\d+)\)$", shape)) else 0
+            total += size
+            biggest = max(biggest, size)
+            if shape.startswith("call:"):
+                calls += 1
+            elif shape.startswith("result:"):
+                results += 1
+            if size == 0 and shape.startswith(("text", "thought", "result")):
+                anomalies.append(f"zero-size-{re.split(r'[:(]', shape)[0]}@{i}")
+        if prev_role is not None and content.role == prev_role:
+            anomalies.append(f"repeated-role-{content.role}@{i}")
+        prev_role = content.role
+        nxt = contents[i + 1] if i + 1 < len(contents) else None
+        if calls and nxt is not None:
+            answered = sum(
+                1 for p in (nxt.parts or []) if getattr(p, "function_response", None) is not None
+            )
+            if answered != calls:
+                anomalies.append(f"calls({calls})!=results({answered})@{i}")
+    tail = contents[-_SHAPE_TAIL_CONTENTS:]
+    first = len(contents) - len(tail)
+    tail_desc = "; ".join(
+        f"#{first + j} {c.role}[{', '.join(_part_shape(p) for p in (c.parts or []))}]"
+        for j, c in enumerate(tail)
+    )
+    cfg = ""
+    if config is not None:
+        cfg = (
+            f" tools={len(getattr(config, 'tools', None) or [])}"
+            f" system_instruction={bool(getattr(config, 'system_instruction', None))}"
+            f" cached_content={bool(getattr(config, 'cached_content', None))}"
+        )
+    return (
+        f"contents={len(contents)} approx_chars={total} largest_part={biggest}{cfg} "
+        f"anomalies={anomalies or 'none'} tail: {tail_desc}"
+    )
+
+
+def _safe_describe_request(contents: list[Any], config: Any) -> str:
+    """``_describe_request`` that can never mask the error being diagnosed."""
+    try:
+        return _describe_request(contents, config)
+    except Exception as exc:  # noqa: BLE001 - diagnostics must not replace the 400
+        return f"unavailable ({type(exc).__name__})"
+
+
+def _error_details(exc: BaseException) -> str:
+    """Scrubbed ``details`` payload of an API error (may name the bad field)."""
+    details = getattr(exc, "details", None)
+    try:
+        return _scrub(json.dumps(details, default=str)) if details else ""
+    except (TypeError, ValueError):
+        return ""
+
+
 # Matches the fenced-json extraction argus.helpers.parse_review_result
 # already applies for the Claude path.
 _FENCED_JSON_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
@@ -965,26 +1072,68 @@ async def _run_turns(
                             _turn,
                             _scrub(str(exc)),
                         )
-                        raise
-                    logger.warning(
-                        "Gemini cache [%s] appears invalid upstream (role=%s); "
-                        "invalidating the local record and retrying this turn "
-                        "uncached: %s",
-                        label or "unlabeled",
-                        entry.role,
-                        exc,
-                    )
-                    await asyncio.to_thread(
-                        _invalidate_cache_record,
-                        entry=entry,
-                        model=model,
-                        system_prompt=system_prompt,
-                    )
-                    cached_content_name = None
-                    config = _build_config(None)
-                    response = await client.aio.models.generate_content(
-                        model=model, contents=contents, config=config
-                    )
+                        if not _is_invalid_argument(exc):
+                            raise
+                        # A 400 INVALID_ARGUMENT names no field, so record the
+                        # request's shape, then retry this SAME request once:
+                        # whether it recovers tells a transient fault from a
+                        # deterministic one.
+                        logger.error(
+                            "Gemini 400 request shape [%s] (turn=%d) details=%s: %s",
+                            label or "unlabeled",
+                            _turn,
+                            _error_details(exc) or "none",
+                            _safe_describe_request(contents, config),
+                        )
+                        lo = _env_float(
+                            "ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MIN_S",
+                            _INVALID_ARGUMENT_RETRY_MIN_S,
+                        )
+                        hi = _env_float(
+                            "ARGUS_GEMINI_RETRY_INVALID_ARGUMENT_MAX_S",
+                            _INVALID_ARGUMENT_RETRY_MAX_S,
+                        )
+                        await asyncio.sleep(
+                            random.uniform(lo, max(lo, hi))  # noqa: S311 - jitter, not security
+                        )
+                        try:
+                            response = await client.aio.models.generate_content(
+                                model=model, contents=contents, config=config
+                            )
+                        except Exception as retry_exc:
+                            logger.error(
+                                "Gemini 400 retry failed [%s] (turn=%d): %s",
+                                label or "unlabeled",
+                                _turn,
+                                _scrub(str(retry_exc)),
+                            )
+                            raise
+                        logger.warning(
+                            "Gemini 400 recovered on retry [%s] (turn=%d): the failure "
+                            "was transient, not a malformed request",
+                            label or "unlabeled",
+                            _turn,
+                        )
+                    else:
+                        logger.warning(
+                            "Gemini cache [%s] appears invalid upstream (role=%s); "
+                            "invalidating the local record and retrying this turn "
+                            "uncached: %s",
+                            label or "unlabeled",
+                            entry.role,
+                            exc,
+                        )
+                        await asyncio.to_thread(
+                            _invalidate_cache_record,
+                            entry=entry,
+                            model=model,
+                            system_prompt=system_prompt,
+                        )
+                        cached_content_name = None
+                        config = _build_config(None)
+                        response = await client.aio.models.generate_content(
+                            model=model, contents=contents, config=config
+                        )
 
                 progress.responses += 1
                 usage = response.usage_metadata
