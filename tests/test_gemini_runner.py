@@ -33,7 +33,11 @@ from google.genai import errors as genai_errors  # noqa: E402
 from google.genai import types  # noqa: E402
 
 from argus.bench import BenchEntry  # noqa: E402
-from argus.gemini_runner import _MAX_TURNS_GEMINI, run_session_gemini  # noqa: E402
+from argus.gemini_runner import (  # noqa: E402
+    _MAX_TURNS_GEMINI,
+    _describe_request,
+    run_session_gemini,
+)
 from argus.llm.models import resolve as resolve_alias  # noqa: E402
 from argus.runners import _TURN_BUDGET_SYSTEM_PROMPT_LINE  # noqa: E402
 
@@ -65,7 +69,7 @@ def _isolate_gemini_cache_dir(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setenv("ARGUS_GEMINI_CACHE_DIR", str(tmp_path / "gemini-cache"))
     # Existing tests must not sleep through the real retry cooldown.
-    for name in ("RATE_LIMIT", "COOLDOWN"):
+    for name in ("RATE_LIMIT", "COOLDOWN", "INVALID_ARGUMENT"):
         monkeypatch.setenv(f"ARGUS_GEMINI_RETRY_{name}_MIN_S", "0")
         monkeypatch.setenv(f"ARGUS_GEMINI_RETRY_{name}_MAX_S", "0")
     clear_settings_cache()
@@ -1601,10 +1605,13 @@ class TestCacheInvalidatedUpstreamDegradesGracefully:
                 repo_root="/tmp/does-not-need-to-exist",
             )
 
-        # Not retried uncached (that would mean 2 awaits, as in the
-        # cache-invalid-recovery test above) -- the error propagated
-        # straight out of the cache-retry logic on the first attempt.
-        assert fake_client.aio.models.generate_content.await_count == 1
+        # Not retried uncached: the one retry a 400 INVALID_ARGUMENT gets
+        # re-sends the exact same request (cache reference included), unlike
+        # the cache-invalid-recovery test above, which drops the cache.
+        calls = fake_client.aio.models.generate_content.await_args_list
+        assert len(calls) == 2
+        assert calls[0].kwargs["config"].cached_content == "cachedContents/abc123"
+        assert calls[1].kwargs["config"].cached_content == "cachedContents/abc123"
         assert result.failure_reason == "worker_crashed"
         assert result.result_text == ""
 
@@ -1807,7 +1814,7 @@ class TestTransientRetry:
         [
             (401, "UNAUTHENTICATED"),
             (403, "PERMISSION_DENIED"),
-            (400, "INVALID_ARGUMENT"),
+            (400, "FAILED_PRECONDITION"),
             (404, "NOT_FOUND"),
         ],
     )
@@ -1817,6 +1824,31 @@ class TestTransientRetry:
         assert client.aio.models.generate_content.await_count == 1
         assert result.failure_reason == "worker_crashed"
         assert result.failure_detail == f"{code} {status}, turn 0"
+
+    async def test_invalid_argument_logs_request_shape_and_retries_once(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
+        client = _make_fake_client([_api_error(400, "INVALID_ARGUMENT"), ok])
+        with caplog.at_level("INFO", logger="argus.gemini_runner"):
+            result = await _run(client)
+        assert result.failure_reason is None
+        assert client.aio.models.generate_content.await_count == 2
+        messages = [r.message for r in caplog.records]
+        assert any("Gemini 400 request shape [retry-test] (turn=0)" in m for m in messages)
+        assert any("Gemini 400 recovered on retry [retry-test]" in m for m in messages)
+
+    async def test_invalid_argument_failing_twice_fails_session_after_one_retry(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        err = _api_error(400, "INVALID_ARGUMENT")
+        client = _make_fake_client([err, err, err])
+        with caplog.at_level("INFO", logger="argus.gemini_runner"):
+            result = await _run(client)
+        assert client.aio.models.generate_content.await_count == 2
+        assert result.failure_reason == "worker_crashed"
+        assert result.failure_detail == "400 INVALID_ARGUMENT, turn 0"
+        assert any("Gemini 400 retry failed [retry-test]" in r.message for r in caplog.records)
 
     async def test_httpx_connect_error_is_retried(self) -> None:
         ok = _make_response(calls=[], usage=_make_usage(1, 1), text="fine")
@@ -1988,3 +2020,35 @@ class TestTransientRetry:
         text = " ".join(r.getMessage() for r in caplog.records)
         assert secret not in text
         assert len(text) < 1200
+
+
+class TestDescribeRequest:
+    async def test_summarises_shape_without_leaking_text(self) -> None:
+        contents = [
+            types.Content(role="user", parts=[types.Part.from_text(text="SECRETBODY" * 50)]),
+            types.Content(
+                role="model",
+                parts=[types.Part.from_function_call(name="grep", args={"pattern": "x"})],
+            ),
+            types.Content(role="user", parts=[types.Part.from_text(text="")]),
+        ]
+        out = _describe_request(contents)
+        assert "SECRETBODY" not in out
+        assert "contents=3" in out
+        assert "call:grep(" in out
+        assert "calls(1)!=results(0)@1" in out  # the call was never answered
+        assert "zero-size-text@2" in out
+
+    async def test_clean_request_reports_no_anomalies(self) -> None:
+        contents = [
+            types.Content(role="user", parts=[types.Part.from_text(text="hi")]),
+            types.Content(
+                role="model",
+                parts=[types.Part.from_function_call(name="grep", args={"pattern": "x"})],
+            ),
+            types.Content(
+                role="user",
+                parts=[types.Part.from_function_response(name="grep", response={"output": "ok"})],
+            ),
+        ]
+        assert "anomalies=none" in _describe_request(contents)
