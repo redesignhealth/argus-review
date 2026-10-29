@@ -2092,7 +2092,7 @@ class TestDescribeRequest:
                 parts=[types.Part.from_function_response(name="grep", response={"result": ""})],
             ),
         ]
-        assert "zero-size-result:grep@0" in _describe_request(contents)
+        assert "zero-size-result@0" in _describe_request(contents)
 
     async def test_first_turn_without_role_is_not_a_repeat(self) -> None:
         contents = [types.Content(role=None, parts=[types.Part.from_text(text="hi")])]
