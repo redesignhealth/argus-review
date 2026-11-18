@@ -2505,6 +2505,8 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     Also fetches the prior review from storage. If a prior review exists,
     the diff is scoped to reviewed_sha..HEAD (round 2+).
     """
+    from argus.github_client import GitHubAPIError
+
     req = ReviewRequest.model_validate(state["request"])
 
     # Step 0: check for prior review + dismiss commands (parallel)
@@ -2523,9 +2525,27 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
 
     pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
 
-    diff, description, head_sha, base_branch, scope_base_sha = await _fetch_pr_diff_and_description(
-        req, prior_sha=prior_sha, pre_resolved_head_sha=pre_resolved_head_sha
-    )
+    def fetch(sha: str | None) -> Any:
+        return _fetch_pr_diff_and_description(
+            req, prior_sha=sha, pre_resolved_head_sha=pre_resolved_head_sha
+        )
+
+    try:
+        fetched = await fetch(prior_sha)
+    except GitHubAPIError as exc:
+        if prior is None or exc.status_code != 404:
+            raise
+        # Storage keys prior rounds by (repo, PR number), so a recreated repo or a rewritten
+        # history can return a round whose commit is gone here. Review the whole PR instead.
+        logger.warning(
+            "Prior review %s sha %s is not reachable in %s (404); treating as round 1",
+            prior.review_id,
+            prior_sha,
+            req.repo,
+        )
+        prior, prior_sha = None, None
+        fetched = await fetch(None)
+    diff, description, head_sha, base_branch, scope_base_sha = fetched
 
     # Log review metadata
     lines = diff.splitlines()
