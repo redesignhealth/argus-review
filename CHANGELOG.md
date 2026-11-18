@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-18
+
+### Fixed
+
+- Round 2+ reviews no longer halt with `dispatch_budget_exceeded` after a catch-up merge from the base branch. The round's diff (`prior_sha...head`) held every change the merge brought in, so the planner fanned out over code the PR did not write (for example 65 files for an 8-file PR). The diff now keeps only the files the PR itself changes, and stays whole when the PR file list cannot be confirmed. A file that both the PR and the base branch changed still shows the base branch's lines.
+- A prior review whose commit no longer exists in the repo no longer fails the round with a GitHub 404 (reported by the service as `worker_error`). Storage keys prior rounds by repo and PR number, so a recreated repo or a rewritten history can return such a round. Argus now logs a warning and reviews the whole PR as round 1.
+
 ## [0.4.2] - 2026-10-29
 
 ### Changed
@@ -475,7 +482,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   packaged set.
 - `argus --version`, `argus prompts list`, and `argus prompts export`.
 
-[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/redesignhealth/argus-review/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/redesignhealth/argus-review/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/redesignhealth/argus-review/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/redesignhealth/argus-review/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/redesignhealth/argus-review/compare/v0.3.4...v0.4.0
