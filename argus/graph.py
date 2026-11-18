@@ -43,6 +43,7 @@ from argus.helpers import (
     apply_bench_config_change_gate,
     apply_precheck_gate_and_surface_degraded_coverage,
     compute_persisted_finding_counts,
+    filter_diff_for_files,
 )
 from argus.llm.models import ALIAS_MAP, CLAUDE_DEFAULT, CLAUDE_FRONTIER, CLAUDE_MINI
 from argus.llm.usage import (
@@ -2549,6 +2550,11 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
         req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
     )
+
+    if prior_sha and full_changed_files and not unconfirmed_reason:
+        # A catch-up merge puts the base branch's changes inside prior_sha..head. Keep only
+        # files the PR itself changes, or the plan fans out over code nobody here wrote.
+        diff = filter_diff_for_files(diff, [f.get("filename", "") for f in full_changed_files])
 
     bench_config_changes: list[str] = []
     for f in full_changed_files:
