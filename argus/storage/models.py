@@ -68,6 +68,14 @@ class CodeReviewRound(BaseModel):
     sha: str | None = Field(default=None)
     base_ref: str | None = Field(default=None)
     current_stage: str = Field(default="completed")
+    review_kind: str = Field(
+        default="pr",
+        description="'pr' or 'supplied_diff'; the service persists it with the row.",
+    )
+    diff_digest: str | None = Field(
+        default=None,
+        description="'sha256:<hex>' of the supplied diff document; None for ordinary PRs.",
+    )
 
 
 class CodeReviewRoundRecord(CodeReviewRound):

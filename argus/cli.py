@@ -18,6 +18,9 @@ Usage:
     # Also post/update the review as a PR comment, and set a commit status
     uv run argus review owner/repo --pr 3124 --post --commit-status
 
+    # Review a supplied resolution diff (no PR diff fetched, no GitHub writes)
+    uv run argus review owner/repo --diff-file resolution.diff
+
     # Dismiss a finding before running the next round
     uv run argus review owner/repo --pr 3124 --dismiss "B2 -- pre-existing, not from this PR"
 
@@ -333,6 +336,26 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("-o", "--output", default=None, help="Write review markdown to file")
     parser.add_argument(
+        "--diff-file",
+        dest="diff_file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Review the supplied resolution-diff document at PATH (format: "
+            "upstream-sync-resolution-diff v1) instead of a PR diff. Implies "
+            "--review-kind supplied_diff. Argus fetches no compare diff, ignores /dismiss "
+            "comments and --dismiss, never posts to GitHub, and records a sha256 digest of the "
+            "document's exact bytes. --pr/--sha are optional; --sha must equal the document's head."
+        ),
+    )
+    parser.add_argument(
+        "--review-kind",
+        dest="review_kind",
+        choices=("pr", "supplied_diff"),
+        default=None,
+        help="'supplied_diff' requires --diff-file (which implies it); default 'pr'.",
+    )
+    parser.add_argument(
         "--post",
         action="store_true",
         help=(
@@ -496,6 +519,12 @@ def _resolve_repo(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
 
 def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Cross-flag validation that argparse's own declarative options can't express."""
+    if args.review_kind == "supplied_diff" and not args.diff_file:
+        parser.error("--review-kind supplied_diff requires --diff-file")
+    if args.review_kind == "pr" and args.diff_file:
+        parser.error("--diff-file cannot be combined with --review-kind pr")
+    if args.diff_file and (args.post or args.commit_status):
+        parser.error("--post/--commit-status are not available with --diff-file (no GitHub writes)")
     if args.post and args.sha and not args.pr:
         parser.error("--post requires --pr (a PR to comment on); --sha alone has nowhere to post")
     from argus.scope import validate_expect_head_sha, validate_override
@@ -633,8 +662,8 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
             auth=args.storage_auth,
         )
 
-    if not args.pr and not args.sha:
-        sys.exit("Must provide either --pr or --sha")
+    if not args.pr and not args.sha and not args.diff_file:
+        sys.exit("Must provide either --pr, --sha or --diff-file")
     if args.pr and args.sha:
         sys.exit("Provide either --pr or --sha, not both")
 
@@ -670,15 +699,33 @@ def _run_review(parser: argparse.ArgumentParser, args: argparse.Namespace) -> No
 
     from argus.models import ReviewRequest
 
+    supplied_diff: str | None = None
+    if args.diff_file:
+        try:
+            # Exact bytes, no newline translation: the digest is over the file as written.
+            supplied_diff = Path(args.diff_file).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            sys.exit(f"Cannot read --diff-file {args.diff_file}: {exc}")
+        from argus.supplied_diff import SuppliedDiffError, parse_supplied_diff
+
+        try:
+            parse_supplied_diff(supplied_diff, expect_head_sha=args.sha)
+        except SuppliedDiffError as exc:
+            sys.exit(f"Invalid --diff-file {args.diff_file}: {exc}")
+
     request = ReviewRequest(
         repo=repo,
         pr_number=args.pr,
         sha=args.sha,
         base_ref=args.base_ref,
         dismissals=args.dismiss,
+        supplied_diff=supplied_diff,
     )
 
-    target = f"SHA {args.sha[:12]}" if args.sha else f"PR #{args.pr}"
+    if supplied_diff is not None:
+        target = f"supplied diff {args.diff_file}"
+    else:
+        target = f"SHA {args.sha[:12]}" if args.sha else f"PR #{args.pr}"
     logger.info("Starting local review: %s %s", repo, target)
 
     _start_watchdog(repo, args.pr)

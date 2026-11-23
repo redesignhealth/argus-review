@@ -87,6 +87,8 @@ class CodeReviewRoundIn(BaseModel):
     sha: str | None = Field(default=None)
     base_ref: str | None = Field(default=None)
     current_stage: str = Field(default="completed")
+    review_kind: str = Field(default="pr")
+    diff_digest: str | None = Field(default=None)
 
 
 class CodeReviewRoundRow(BaseModel):
@@ -119,6 +121,8 @@ class CodeReviewRoundRow(BaseModel):
     sha: str | None = None
     base_ref: str | None = None
     current_stage: str = "completed"
+    review_kind: str = "pr"
+    diff_digest: str | None = None
     created_at: datetime
     # Populated only by ``select_latest_completed_round``; ``None`` from
     # the list / upsert RETURNING paths.

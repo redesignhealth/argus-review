@@ -230,6 +230,7 @@ class TestRunReviewConnectivityErrorExit:
             review_override_sha=None,
             review_override_reason=None,
             expect_head_sha=None,
+            diff_file=None,
         )
         parser = MagicMock()
 

@@ -366,6 +366,19 @@
       "title": "Coverage Map",
       "type": "array"
     },
+    "diff_digest": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "'sha256:<hex>' of the exact UTF-8 bytes of the supplied diff document (None for ordinary PR reviews)",
+      "title": "Diff Digest"
+    },
     "dropped_findings": {
       "description": "BLOCKING findings rejected by the validator (audit trail, not shown in comment)",
       "items": {
@@ -442,6 +455,16 @@
     "review_comment": {
       "description": "Formatted markdown comment ready to post on the PR",
       "title": "Review Comment",
+      "type": "string"
+    },
+    "review_kind": {
+      "default": "pr",
+      "description": "'supplied_diff' when the diff was supplied by the caller, else 'pr'",
+      "enum": [
+        "pr",
+        "supplied_diff"
+      ],
+      "title": "Review Kind",
       "type": "string"
     },
     "review_round": {
