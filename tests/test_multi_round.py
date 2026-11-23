@@ -777,12 +777,14 @@ class TestDismissCommentParsing:
     async def test_parse_dismiss_comments(self) -> None:
         """_fetch_dismissed_findings stores full comment body for /dismiss comments."""
         mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = {"user": "pr-author"}  # TECH-9842
         mock_gh.list_issue_comments.return_value = [
             {
                 "id": 1,
                 "user": "octocat",
                 "body": "/dismiss except Exception — intentional design choice",
                 "created_at": "2026-04-08T12:00:00Z",
+                "author_association": "MEMBER",
             },
             {
                 "id": 2,

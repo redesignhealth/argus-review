@@ -410,6 +410,12 @@ async def _fetch_prior_review(repo: str, pr_number: int) -> PriorReviewContext |
         return None
 
 
+# Who may dismiss a finding with a ``/dismiss`` PR comment (TECH-9842): people with write-level
+# standing in the repo, as reported by GitHub itself. CONTRIBUTOR / FIRST_TIMER / NONE (anyone on
+# a public repo) never count.
+_DISMISS_TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
 async def _fetch_dismissed_findings(
     repo: str,
     pr_number: int,
@@ -447,11 +453,23 @@ async def _fetch_dismissed_findings(
             settings = get_settings()
             gh = GitHubClient(token=settings.GITHUB_TOKEN_RO)
             comments = await asyncio.to_thread(gh.list_issue_comments, repo, pr_number)
+            # Fail closed: if the PR author cannot be established, no comment dismisses anything
+            # (the except below logs it). A builder must not dismiss its own findings.
+            pr_author = str(
+                (await asyncio.to_thread(gh.get_pull_request, repo, pr_number))["user"]
+            ).casefold()
+            ignored = 0
 
             for comment in comments:
                 body = (comment.get("body") or "").strip()
                 user = comment.get("user", "unknown")
                 if "/dismiss" in body.lower():
+                    if (
+                        str(user).casefold() == pr_author
+                        or comment.get("author_association") not in _DISMISS_TRUSTED_ASSOCIATIONS
+                    ):
+                        ignored += 1
+                        continue
                     dismissed.append(
                         DismissedFinding(
                             description=body,
@@ -459,6 +477,14 @@ async def _fetch_dismissed_findings(
                             reason="from PR comment",
                         )
                     )
+            if ignored:
+                logger.warning(
+                    "Ignored %d /dismiss comment(s) on %s PR #%d from the PR author or from "
+                    "users without write standing",
+                    ignored,
+                    repo,
+                    pr_number,
+                )
         except Exception:  # noqa: BLE001 — dismiss parsing failure should not block review
             logger.warning(
                 "Failed to parse dismiss comments for %s PR #%d",

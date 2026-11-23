@@ -762,7 +762,7 @@ class GitHubClient:
             issue_number: Issue or pull request number.
 
         Returns:
-            List of comment objects with id, user, body, created_at.
+            List of comment objects with id, user, body, created_at, author_association.
         """
         comments = self._request("GET", f"/repos/{repo}/issues/{issue_number}/comments")
 
@@ -774,6 +774,10 @@ class GitHubClient:
                     "user": comment["user"]["login"],
                     "body": comment.get("body", ""),
                     "created_at": comment.get("created_at"),
+                    # GitHub's own statement of the commenter's standing in the repo
+                    # (OWNER/MEMBER/COLLABORATOR/CONTRIBUTOR/NONE/...). Not forgeable by the
+                    # commenter; the dismissal path uses it to decide who may dismiss.
+                    "author_association": comment.get("author_association") or "NONE",
                 }
             )
 

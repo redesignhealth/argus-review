@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A `/dismiss` PR comment now counts only when its author has write-level standing in the repo (GitHub `author_association` OWNER, MEMBER or COLLABORATOR) and is not the PR author. Before, any comment containing `/dismiss` from anyone, including the PR author and any user on a public repo, removed findings from the review and told the reviewer not to count them toward the verdict. Comments that do not qualify are ignored and logged. If the PR author cannot be read, no comment dismisses anything.
+
 ## [0.4.3] - 2026-11-18
 
 ### Fixed
