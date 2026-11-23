@@ -2547,10 +2547,6 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
         # dismissals (a /dismiss comment or caller dismissal must not let a builder dismiss its
         # own findings into an APPROVE).
         doc = _supplied_document(req, config)
-        if req.dismissals:
-            logger.warning(
-                "Ignoring %d dismissal(s): not honoured for supplied diffs", len(req.dismissals)
-            )
         diff, description, head_sha = doc.text, SUPPLIED_DIFF_NOTE, doc.head_sha
         base_branch, scope_base_sha = "", doc.base_sha
     else:

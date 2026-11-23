@@ -62,7 +62,10 @@ class ReviewRequest(BaseModel):
         pattern=r"^[\w.-]+/[\w.-]+$",
         description="Full repo identifier, e.g. 'owner/repo'",
     )
-    pr_number: int = Field(0, description="Pull request number to review (0 if using sha mode)")
+    pr_number: int = Field(
+        0,
+        description="Pull request number to review (0 if using sha mode; must be 0 for a supplied_diff review)",
+    )
     sha: Optional[str] = Field(
         None,
         description="Specific commit SHA to review (for v1/v2 comparison testing)",
@@ -79,7 +82,8 @@ class ReviewRequest(BaseModel):
     review_kind: Literal["pr", "supplied_diff"] = Field(
         "pr",
         description="'supplied_diff' reviews the document in supplied_diff instead of a PR diff "
-        "(never writes to GitHub; /dismiss comments and dismissals are ignored). Implied by "
+        "(never writes to GitHub; /dismiss comments are ignored; pr_number must be 0 and dismissals "
+        "empty). Implied by "
         "supplied_diff.",
     )
     supplied_diff: Optional[str] = Field(
@@ -98,6 +102,8 @@ class ReviewRequest(BaseModel):
             # Rounds are stored by (repo, pr_number); a supplied-diff round must never become
             # the "prior round" of an ordinary PR review.
             raise ValueError("a supplied_diff review must not carry a pr_number")
+        if self.review_kind == "supplied_diff" and self.dismissals:
+            raise ValueError("dismissals do not apply to a supplied_diff review")
         return self
 
 

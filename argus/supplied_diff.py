@@ -67,7 +67,7 @@ def count_changed_lines(document: str) -> int:
     in_hunk = False
     count = 0
     for line in document.split("\n"):
-        if line.startswith("diff --git "):
+        if line.startswith(("diff --git ", "== commit ", "mechanical ")):
             in_hunk = False
         elif line.startswith("@@"):
             in_hunk = True

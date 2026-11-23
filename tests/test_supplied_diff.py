@@ -83,6 +83,42 @@ def test_removed_line_starting_with_dashes_counts_as_content() -> None:
     assert count_changed_lines(doc) == 2
 
 
+def test_count_changed_lines_across_files_and_commits() -> None:
+    doc = make_doc(
+        "== commit " + "1" * 40 + " own ==\n"
+        "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n"
+        "diff --git a/b b/b\nnew file mode 100644\n--- /dev/null\n+++ b/b\n@@ -0,0 +1,2 @@\n+1\n+2\n"
+        "== commit " + "2" * 40 + " own ==\n"
+        f"mechanical take-theirs docs/x.md {'d' * 40}\n"
+        "diff --git a/c b/c\n--- a/c\n+++ b/c\n@@ -1 +0,0 @@\n-gone\n"
+    )
+    assert count_changed_lines(doc) == 5
+    assert parse_supplied_diff(doc).files == ("a", "b", "c")
+
+
+def test_size_halt_reason_directly() -> None:
+    from argus.supplied_diff import size_halt_reason
+
+    assert size_halt_reason(parse_supplied_diff(make_doc())) is None
+    assert "characters" in (size_halt_reason(parse_supplied_diff(make_doc("x" * 150_001))) or "")
+
+
+def test_supplied_diff_rejects_dismissals() -> None:
+    with pytest.raises(ValueError, match="dismissals"):
+        ReviewRequest(repo="o/r", supplied_diff=make_doc(), dismissals=["B1 -- x"])
+
+
+@pytest.mark.asyncio
+async def test_precheck_checks_skips_github_for_supplied_diff() -> None:
+    from argus.graph import _node_precheck_checks
+
+    req = _request(make_doc())
+    with patch("argus.github_client.GitHubClient", _gh_that_must_not_be_called()) as gh:
+        out = await _node_precheck_checks({"request": req.model_dump(), "head_sha": HEAD})
+    gh.assert_not_called()
+    assert out == {"checks_signal": "unknown"}
+
+
 def test_supplied_diff_rejects_a_pr_number() -> None:
     with pytest.raises(ValueError, match="pr_number"):
         ReviewRequest(repo="o/r", pr_number=3, supplied_diff=make_doc())
@@ -132,7 +168,7 @@ async def test_fetch_uses_the_document_and_never_touches_github_or_dismissals() 
     doc = make_doc()
     # A trusted collaborator /dismiss comment exists on the PR, and the caller also supplies a
     # dismissal; neither may be read or applied.
-    req = _request(doc, dismissals=["B1 -- fine"])
+    req = _request(doc)
     with (
         patch("argus.github_client.GitHubClient", _gh_that_must_not_be_called()) as gh,
         patch(f"{_GRAPH}._fetch_dismissed_findings", new_callable=AsyncMock) as dismissed,
