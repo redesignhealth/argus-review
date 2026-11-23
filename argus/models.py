@@ -94,6 +94,10 @@ class ReviewRequest(BaseModel):
             self.review_kind = "supplied_diff"
         if self.review_kind == "supplied_diff" and self.supplied_diff is None:
             raise ValueError("review_kind 'supplied_diff' requires supplied_diff")
+        if self.review_kind == "supplied_diff" and self.pr_number:
+            # Rounds are stored by (repo, pr_number); a supplied-diff round must never become
+            # the "prior round" of an ordinary PR review.
+            raise ValueError("a supplied_diff review must not carry a pr_number")
         return self
 
 

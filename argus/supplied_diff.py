@@ -58,19 +58,22 @@ def compute_digest(document: str) -> str:
 
 
 def count_changed_lines(document: str) -> int:
-    """Lines starting with ``+`` or ``-``, excluding ``---``/``+++`` file headers.
+    """Lines starting with ``+`` or ``-``, excluding the ``---``/``+++`` file headers.
 
-    A ``--- `` line directly followed by a ``+++ `` line is a header; any other line that
-    starts with ``-`` or ``+`` is content (including a removed line whose text begins ``--``).
+    Headers are only recognised between a ``diff --git`` line and its first ``@@`` hunk
+    line; inside a hunk every ``+``/``-`` line is content, including a removed line whose
+    text begins ``--``.
     """
-    lines = document.split("\n")
+    in_hunk = False
     count = 0
-    for i, line in enumerate(lines):
-        if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+    for line in document.split("\n"):
+        if line.startswith("diff --git "):
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif not in_hunk and line.startswith(("--- ", "+++ ")):
             continue
-        if line.startswith("+++ ") and i > 0 and lines[i - 1].startswith("--- "):
-            continue
-        if line.startswith(("+", "-")):
+        elif line.startswith(("+", "-")):
             count += 1
     return count
 

@@ -1664,6 +1664,8 @@ async def _node_precheck_checks(state: ReviewState) -> dict[str, Any]:
 
     req = ReviewRequest.model_validate(state["request"])
     head_sha = state["head_sha"]
+    if req.review_kind == "supplied_diff":
+        return {"checks_signal": "unknown"}  # no PR; the supplied head may not exist remotely
 
     for attempt in range(_CHECKS_SIGNAL_ATTEMPTS):
         try:
@@ -2526,50 +2528,6 @@ def _supplied_document(req: ReviewRequest, config: RunnableConfig | None = None)
     return parse_supplied_diff(req.supplied_diff or "", expect_head_sha=expected)
 
 
-def _fetch_supplied_diff(req: ReviewRequest, config: RunnableConfig) -> dict[str, Any]:
-    """``fetch_diff`` for a supplied-diff review: the document IS the diff (TECH-9826).
-
-    No GitHub call, no prior round and no dismissals: a ``/dismiss`` comment or a caller
-    dismissal must not let a builder dismiss its own findings into an APPROVE.
-    """
-    doc = _supplied_document(req, config)
-    if req.dismissals:
-        logger.warning(
-            "Ignoring %d dismissal(s): not honoured for supplied diffs", len(req.dismissals)
-        )
-    worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
-    settings = get_settings()
-    bench_config_changes = [
-        f
-        for f in doc.files
-        if _is_bench_config_path(
-            f, bench_file_setting=settings.ARGUS_BENCH_FILE, worktree_path=worktree_path
-        )
-    ]
-    bench_config_changes += [
-        f"added line modifying bench routing: {line}"
-        for line in _detect_bench_config_routing_lines(doc.text)
-    ]
-    logger.info(
-        "Supplied diff review: head=%s files=%d changed_lines=%d digest=%s",
-        doc.head_sha[:12],
-        len(doc.files),
-        doc.changed_lines,
-        doc.digest,
-    )
-    return {
-        "diff": doc.text,
-        "description": SUPPLIED_DIFF_NOTE,
-        "head_sha": doc.head_sha,
-        "scope_base_sha": doc.base_sha,
-        "response": {},
-        "scope": {},
-        "prior_review": {},
-        "bench_config_changes": sorted(set(bench_config_changes)),
-        "bench_config_unconfirmed": None,
-    }
-
-
 async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
     """Fetch PR diff and description from GitHub.
 
@@ -2580,46 +2538,59 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
 
     req = ReviewRequest.model_validate(state["request"])
 
+    prior: PriorReviewContext | None = None
+    prior_sha: str | None = None
+    full_changed_files: list[dict[str, Any]]
+    unconfirmed_reason: str | None
     if req.review_kind == "supplied_diff":
-        return _fetch_supplied_diff(req, config)
-
-    # Step 0: check for prior review + dismiss commands (parallel)
-    prior, dismissals = await asyncio.gather(
-        _fetch_prior_review(req.repo, req.pr_number),
-        _fetch_dismissed_findings(req.repo, req.pr_number, extra_dismissals=req.dismissals),
-    )
-
-    # Apply dismissals before scoping the diff — fail loud if matching breaks
-    if prior and dismissals:
-        prior.findings, prior.dismissed_findings = await _apply_dismissals(
-            prior.findings, dismissals
+        # The supplied document IS the diff (TECH-9826): no GitHub call, no prior round, and no
+        # dismissals (a /dismiss comment or caller dismissal must not let a builder dismiss its
+        # own findings into an APPROVE).
+        doc = _supplied_document(req, config)
+        if req.dismissals:
+            logger.warning(
+                "Ignoring %d dismissal(s): not honoured for supplied diffs", len(req.dismissals)
+            )
+        diff, description, head_sha = doc.text, SUPPLIED_DIFF_NOTE, doc.head_sha
+        base_branch, scope_base_sha = "", doc.base_sha
+    else:
+        # Step 0: check for prior review + dismiss commands (parallel)
+        prior, dismissals = await asyncio.gather(
+            _fetch_prior_review(req.repo, req.pr_number),
+            _fetch_dismissed_findings(req.repo, req.pr_number, extra_dismissals=req.dismissals),
         )
 
-    prior_sha = prior.reviewed_sha if prior else None
+        # Apply dismissals before scoping the diff — fail loud if matching breaks
+        if prior and dismissals:
+            prior.findings, prior.dismissed_findings = await _apply_dismissals(
+                prior.findings, dismissals
+            )
 
-    pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
+        prior_sha = prior.reviewed_sha if prior else None
 
-    def fetch(sha: str | None) -> Any:
-        return _fetch_pr_diff_and_description(
-            req, prior_sha=sha, pre_resolved_head_sha=pre_resolved_head_sha
-        )
+        pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
 
-    try:
-        fetched = await fetch(prior_sha)
-    except GitHubAPIError as exc:
-        if prior is None or exc.status_code != 404:
-            raise
-        # Storage keys prior rounds by (repo, PR number), so a recreated repo or a rewritten
-        # history can return a round whose commit is gone here. Review the whole PR instead.
-        logger.warning(
-            "Prior review %s sha %s is not reachable in %s (404); treating as round 1",
-            prior.review_id,
-            prior_sha,
-            req.repo,
-        )
-        prior, prior_sha = None, None
-        fetched = await fetch(None)
-    diff, description, head_sha, base_branch, scope_base_sha = fetched
+        def fetch(sha: str | None) -> Any:
+            return _fetch_pr_diff_and_description(
+                req, prior_sha=sha, pre_resolved_head_sha=pre_resolved_head_sha
+            )
+
+        try:
+            fetched = await fetch(prior_sha)
+        except GitHubAPIError as exc:
+            if prior is None or exc.status_code != 404:
+                raise
+            # Storage keys prior rounds by (repo, PR number), so a recreated repo or a rewritten
+            # history can return a round whose commit is gone here. Review the whole PR instead.
+            logger.warning(
+                "Prior review %s sha %s is not reachable in %s (404); treating as round 1",
+                prior.review_id,
+                prior_sha,
+                req.repo,
+            )
+            prior, prior_sha = None, None
+            fetched = await fetch(None)
+        diff, description, head_sha, base_branch, scope_base_sha = fetched
 
     # Log review metadata
     lines = diff.splitlines()
@@ -2640,14 +2611,21 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
     settings = get_settings()
 
-    full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
-        req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
-    )
+    if req.review_kind == "supplied_diff":
+        full_changed_files = [
+            {"filename": f, "status": "modified", "patch": filter_diff_for_files(diff, [f])}
+            for f in doc.files
+        ]
+        unconfirmed_reason = None
+    else:
+        full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
+            req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
+        )
 
-    if prior_sha and full_changed_files and not unconfirmed_reason:
-        # A catch-up merge puts the base branch's changes inside prior_sha..head. Keep only
-        # files the PR itself changes, or the plan fans out over code nobody here wrote.
-        diff = filter_diff_for_files(diff, [f.get("filename", "") for f in full_changed_files])
+        if prior_sha and full_changed_files and not unconfirmed_reason:
+            # A catch-up merge puts the base branch's changes inside prior_sha..head. Keep only
+            # files the PR itself changes, or the plan fans out over code nobody here wrote.
+            diff = filter_diff_for_files(diff, [f.get("filename", "") for f in full_changed_files])
 
     bench_config_changes: list[str] = []
     for f in full_changed_files:

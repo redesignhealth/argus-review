@@ -78,6 +78,14 @@ def test_parse_extracts_shas_files_and_changed_lines() -> None:
 def test_removed_line_starting_with_dashes_counts_as_content() -> None:
     doc = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n--- sql comment\n+ok\n"
     assert count_changed_lines(doc) == 2
+    # a removed "-- x" directly followed by an added "++ y" inside a hunk is still content
+    doc = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n--- x\n+++ y\n"
+    assert count_changed_lines(doc) == 2
+
+
+def test_supplied_diff_rejects_a_pr_number() -> None:
+    with pytest.raises(ValueError, match="pr_number"):
+        ReviewRequest(repo="o/r", pr_number=3, supplied_diff=make_doc())
 
 
 @pytest.mark.parametrize(
@@ -124,7 +132,7 @@ async def test_fetch_uses_the_document_and_never_touches_github_or_dismissals() 
     doc = make_doc()
     # A trusted collaborator /dismiss comment exists on the PR, and the caller also supplies a
     # dismissal; neither may be read or applied.
-    req = _request(doc, pr_number=7, dismissals=["B1 -- fine"])
+    req = _request(doc, dismissals=["B1 -- fine"])
     with (
         patch("argus.github_client.GitHubClient", _gh_that_must_not_be_called()) as gh,
         patch(f"{_GRAPH}._fetch_dismissed_findings", new_callable=AsyncMock) as dismissed,
@@ -354,11 +362,15 @@ def test_cli_rejects_posting_with_a_diff_file() -> None:
 
 
 def test_cli_kind_and_diff_file_must_agree() -> None:
-    parser, args = _parse("--review-kind", "supplied_diff", "--pr", "1")
+    parser, args = _parse("--review-kind", "supplied_diff")
     with pytest.raises(SystemExit):
         cli._validate_review_args(parser, args)
     parser, args = _parse("--review-kind", "pr", "--diff-file", "x.diff")
     with pytest.raises(SystemExit):
         cli._validate_review_args(parser, args)
+    for extra in (["--pr", "1"], ["--dismiss", "B1 -- x"]):
+        parser, args = _parse("--diff-file", "x.diff", *extra)
+        with pytest.raises(SystemExit):
+            cli._validate_review_args(parser, args)
     parser, args = _parse("--diff-file", "x.diff")
     cli._validate_review_args(parser, args)  # diff-file alone implies the kind

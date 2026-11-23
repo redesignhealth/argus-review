@@ -345,7 +345,7 @@ def _add_review_args(parser: argparse.ArgumentParser) -> None:
             "upstream-sync-resolution-diff v1) instead of a PR diff. Implies "
             "--review-kind supplied_diff. Argus fetches no compare diff, ignores /dismiss "
             "comments and --dismiss, never posts to GitHub, and records a sha256 digest of the "
-            "document's exact bytes. --pr/--sha are optional; --sha must equal the document's head."
+            "document's exact bytes. --pr and --dismiss are not allowed; --sha is optional and must equal the document's head."
         ),
     )
     parser.add_argument(
@@ -523,6 +523,8 @@ def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namesp
         parser.error("--review-kind supplied_diff requires --diff-file")
     if args.review_kind == "pr" and args.diff_file:
         parser.error("--diff-file cannot be combined with --review-kind pr")
+    if args.diff_file and (args.pr or args.dismiss):
+        parser.error("--diff-file cannot be combined with --pr or --dismiss (both are ignored)")
     if args.diff_file and (args.post or args.commit_status):
         parser.error("--post/--commit-status are not available with --diff-file (no GitHub writes)")
     if args.post and args.sha and not args.pr:
