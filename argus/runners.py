@@ -11,6 +11,7 @@ LangSmith tracing is automatic when LANGCHAIN_TRACING_V2=true (no @traceable shi
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import json
 import logging
@@ -425,6 +426,20 @@ You SHOULD explore unchanged files to understand context, verify claims, and \
 trace dependencies. But only REPORT findings that pass the causal test above.
 """
 
+# Review kind of the reviewer session being built (set by the graph per reviewer node). For
+# "supplied_diff" every reviewer prompt also carries the resolution-diff note (TECH-9826).
+review_kind_var: contextvars.ContextVar[str] = contextvars.ContextVar("review_kind", default="pr")
+
+
+def _causal_scope_directive() -> str:
+    """The causal-scope directive, plus the resolution-diff note for supplied-diff reviews."""
+    if review_kind_var.get() != "supplied_diff":
+        return _CAUSAL_SCOPE_DIRECTIVE
+    from argus.supplied_diff import REVIEWER_NOTE
+
+    return f"{_CAUSAL_SCOPE_DIRECTIVE}\n## Resolution Diff\n\n{REVIEWER_NOTE}\n"
+
+
 # Shared directive steering reviewers away from full-file Reads on large
 # targets. Root cause of TECH-4643: specialists tracing execution paths into
 # a multi-thousand-line file would Read it whole, exhaust a large fraction of
@@ -838,7 +853,7 @@ async def run_system_reviewer(
         f"```diff\n{filtered_diff}\n```\n\n"
         "Use Read, Glob, and Grep to explore the surrounding codebase for context. "
         "Focus on correctness, security, and adherence to the conventions above."
-        f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_causal_scope_directive()}"
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
@@ -937,7 +952,7 @@ async def run_specialist_reviewer(
         f"Files: {', '.join(safe_files)}\n\n"
         f"```diff\n{filtered_diff}\n```\n\n"
         "Use Read, Glob, and Grep to explore the codebase for context."
-        f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_causal_scope_directive()}"
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
@@ -1018,7 +1033,7 @@ async def run_cross_cutting_reviewer(
         f"## All Changed Files\n\n{all_files}\n\n"
         f"## Full PR Diff\n\n```diff\n{diff_text}\n```\n\n"
         "Use Read, Glob, and Grep to trace execution paths across files."
-        f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_causal_scope_directive()}"
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 
@@ -1080,7 +1095,7 @@ async def run_tests_and_docs_reviewer(
         f"## All Changed Files\n\n{all_files}\n\n"
         f"## Full PR Diff\n\n```diff\n{diff_text}\n```\n\n"
         "Use Read, Glob, and Grep to check test directories and .cursorrules files."
-        f"{_CAUSAL_SCOPE_DIRECTIVE}"
+        f"{_causal_scope_directive()}"
         f"{_LARGE_FILE_READ_DIRECTIVE}"
     )
 

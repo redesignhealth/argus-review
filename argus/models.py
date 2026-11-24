@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -62,7 +62,10 @@ class ReviewRequest(BaseModel):
         pattern=r"^[\w.-]+/[\w.-]+$",
         description="Full repo identifier, e.g. 'owner/repo'",
     )
-    pr_number: int = Field(0, description="Pull request number to review (0 if using sha mode)")
+    pr_number: int = Field(
+        0,
+        description="Pull request number to review (0 if using sha mode; must be 0 for a supplied_diff review)",
+    )
     sha: Optional[str] = Field(
         None,
         description="Specific commit SHA to review (for v1/v2 comparison testing)",
@@ -76,6 +79,32 @@ class ReviewRequest(BaseModel):
         description="Local-only dismiss commands (from argus_review_local.py --dismiss). "
         "Not exposed via API or an external orchestrator — those paths always default to [].",
     )
+    review_kind: Literal["pr", "supplied_diff"] = Field(
+        "pr",
+        description="'supplied_diff' reviews the document in supplied_diff instead of a PR diff "
+        "(never writes to GitHub; /dismiss comments are ignored; pr_number must be 0 and dismissals "
+        "empty). Implied by "
+        "supplied_diff.",
+    )
+    supplied_diff: Optional[str] = Field(
+        None,
+        description="Contract document (upstream-sync-resolution-diff v1) to review as the diff. "
+        "Its head must equal sha when sha is given.",
+    )
+
+    @model_validator(mode="after")
+    def _check_supplied_diff(self) -> "ReviewRequest":
+        if self.supplied_diff is not None:
+            self.review_kind = "supplied_diff"
+        if self.review_kind == "supplied_diff" and self.supplied_diff is None:
+            raise ValueError("review_kind 'supplied_diff' requires supplied_diff")
+        if self.review_kind == "supplied_diff" and self.pr_number:
+            # Rounds are stored by (repo, pr_number); a supplied-diff round must never become
+            # the "prior round" of an ordinary PR review.
+            raise ValueError("a supplied_diff review must not carry a pr_number")
+        if self.review_kind == "supplied_diff" and self.dismissals:
+            raise ValueError("dismissals do not apply to a supplied_diff review")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -254,4 +283,12 @@ class ReviewResponse(BaseModel):
     halt: Optional[ReviewHalt] = Field(
         None,
         description="Set when the pipeline halted before a normal verdict; never LLM-generated",
+    )
+    review_kind: Literal["pr", "supplied_diff"] = Field(
+        "pr", description="'supplied_diff' when the diff was supplied by the caller, else 'pr'"
+    )
+    diff_digest: Optional[str] = Field(
+        None,
+        description="'sha256:<hex>' of the exact UTF-8 bytes of the supplied diff document "
+        "(None for ordinary PR reviews)",
     )

@@ -83,6 +83,12 @@ from argus.models import (
     Severity,
     Verdict,
 )
+from argus.supplied_diff import (
+    REVIEWER_NOTE as SUPPLIED_DIFF_NOTE,
+    SuppliedDiff,
+    parse_supplied_diff,
+    size_halt_reason,
+)
 from argus.scope import (
     SCOPE_PROMPT,
     SHA40,
@@ -121,7 +127,7 @@ from argus.runners import (
 from argus.runners import (
     run_feedback_verifier as run_feedback_verifier_session,
 )
-from argus.runners import run_tests_and_docs_reviewer
+from argus.runners import review_kind_var, run_tests_and_docs_reviewer
 from argus.runners import (
     run_specialist_reviewer as run_specialist_session,
 )
@@ -1658,6 +1664,8 @@ async def _node_precheck_checks(state: ReviewState) -> dict[str, Any]:
 
     req = ReviewRequest.model_validate(state["request"])
     head_sha = state["head_sha"]
+    if req.review_kind == "supplied_diff":
+        return {"checks_signal": "unknown"}  # no PR; the supplied head may not exist remotely
 
     for attempt in range(_CHECKS_SIGNAL_ATTEMPTS):
         try:
@@ -1914,6 +1922,20 @@ async def _node_scope_gate(state: ReviewState, config: RunnableConfig) -> dict[s
     """
     req = ReviewRequest.model_validate(state["request"])
     head_sha = state["head_sha"]
+    if req.review_kind == "supplied_diff":
+        # Size limits apply to the document; the 300-file compare limit and the one-behaviour
+        # rule do not (no PR file list, and a resolution diff is not one mergeable behavior).
+        doc = _supplied_document(req, config)
+        reason = size_halt_reason(doc)
+        if reason:
+            return _halt_update(state, "scope_unverified", reason)
+        receipt = ScopeReceipt(
+            base_sha=doc.base_sha,
+            head_sha=doc.head_sha,
+            behaviors=[],
+            rationale="supplied diff: size limits checked; one-behaviour rule not applied",
+        )
+        return {"scope": receipt.model_dump()}
     try:
         pinned_base = state.get("scope_base_sha")
         if not (pinned_base and SHA40.fullmatch(pinned_base)):
@@ -2500,6 +2522,12 @@ async def _node_lite_review(state: ReviewState) -> dict[str, Any]:
     return {"response": response.model_dump()}
 
 
+def _supplied_document(req: ReviewRequest, config: RunnableConfig | None = None) -> SuppliedDiff:
+    """Parse the request's supplied diff; its head must equal the review head when one is given."""
+    expected = req.sha or (config or {}).get("configurable", {}).get("head_sha")
+    return parse_supplied_diff(req.supplied_diff or "", expect_head_sha=expected)
+
+
 async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[str, Any]:
     """Fetch PR diff and description from GitHub.
 
@@ -2510,43 +2538,55 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
 
     req = ReviewRequest.model_validate(state["request"])
 
-    # Step 0: check for prior review + dismiss commands (parallel)
-    prior, dismissals = await asyncio.gather(
-        _fetch_prior_review(req.repo, req.pr_number),
-        _fetch_dismissed_findings(req.repo, req.pr_number, extra_dismissals=req.dismissals),
-    )
-
-    # Apply dismissals before scoping the diff — fail loud if matching breaks
-    if prior and dismissals:
-        prior.findings, prior.dismissed_findings = await _apply_dismissals(
-            prior.findings, dismissals
+    prior: PriorReviewContext | None = None
+    prior_sha: str | None = None
+    full_changed_files: list[dict[str, Any]]
+    unconfirmed_reason: str | None
+    if req.review_kind == "supplied_diff":
+        # The supplied document IS the diff (TECH-9826): no GitHub call, no prior round, and no
+        # dismissals (a /dismiss comment or caller dismissal must not let a builder dismiss its
+        # own findings into an APPROVE).
+        doc = _supplied_document(req, config)
+        diff, description, head_sha = doc.text, SUPPLIED_DIFF_NOTE, doc.head_sha
+        base_branch, scope_base_sha = "", doc.base_sha
+    else:
+        # Step 0: check for prior review + dismiss commands (parallel)
+        prior, dismissals = await asyncio.gather(
+            _fetch_prior_review(req.repo, req.pr_number),
+            _fetch_dismissed_findings(req.repo, req.pr_number, extra_dismissals=req.dismissals),
         )
 
-    prior_sha = prior.reviewed_sha if prior else None
+        # Apply dismissals before scoping the diff — fail loud if matching breaks
+        if prior and dismissals:
+            prior.findings, prior.dismissed_findings = await _apply_dismissals(
+                prior.findings, dismissals
+            )
 
-    pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
+        prior_sha = prior.reviewed_sha if prior else None
 
-    def fetch(sha: str | None) -> Any:
-        return _fetch_pr_diff_and_description(
-            req, prior_sha=sha, pre_resolved_head_sha=pre_resolved_head_sha
-        )
+        pre_resolved_head_sha: str | None = config.get("configurable", {}).get("head_sha")
 
-    try:
-        fetched = await fetch(prior_sha)
-    except GitHubAPIError as exc:
-        if prior is None or exc.status_code != 404:
-            raise
-        # Storage keys prior rounds by (repo, PR number), so a recreated repo or a rewritten
-        # history can return a round whose commit is gone here. Review the whole PR instead.
-        logger.warning(
-            "Prior review %s sha %s is not reachable in %s (404); treating as round 1",
-            prior.review_id,
-            prior_sha,
-            req.repo,
-        )
-        prior, prior_sha = None, None
-        fetched = await fetch(None)
-    diff, description, head_sha, base_branch, scope_base_sha = fetched
+        def fetch(sha: str | None) -> Any:
+            return _fetch_pr_diff_and_description(
+                req, prior_sha=sha, pre_resolved_head_sha=pre_resolved_head_sha
+            )
+
+        try:
+            fetched = await fetch(prior_sha)
+        except GitHubAPIError as exc:
+            if prior is None or exc.status_code != 404:
+                raise
+            # Storage keys prior rounds by (repo, PR number), so a recreated repo or a rewritten
+            # history can return a round whose commit is gone here. Review the whole PR instead.
+            logger.warning(
+                "Prior review %s sha %s is not reachable in %s (404); treating as round 1",
+                prior.review_id,
+                prior_sha,
+                req.repo,
+            )
+            prior, prior_sha = None, None
+            fetched = await fetch(None)
+        diff, description, head_sha, base_branch, scope_base_sha = fetched
 
     # Log review metadata
     lines = diff.splitlines()
@@ -2567,14 +2607,21 @@ async def _node_fetch_diff(state: ReviewState, config: RunnableConfig) -> dict[s
     worktree_path: str | None = config.get("configurable", {}).get("worktree_path")
     settings = get_settings()
 
-    full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
-        req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
-    )
+    if req.review_kind == "supplied_diff":
+        full_changed_files = [
+            {"filename": f, "status": "modified", "patch": filter_diff_for_files(diff, [f])}
+            for f in doc.files
+        ]
+        unconfirmed_reason = None
+    else:
+        full_changed_files, unconfirmed_reason = await _fetch_full_pr_changed_files(
+            req, base_branch, head_sha, diff, prior_sha=prior_sha, base_sha=scope_base_sha
+        )
 
-    if prior_sha and full_changed_files and not unconfirmed_reason:
-        # A catch-up merge puts the base branch's changes inside prior_sha..head. Keep only
-        # files the PR itself changes, or the plan fans out over code nobody here wrote.
-        diff = filter_diff_for_files(diff, [f.get("filename", "") for f in full_changed_files])
+        if prior_sha and full_changed_files and not unconfirmed_reason:
+            # A catch-up merge puts the base branch's changes inside prior_sha..head. Keep only
+            # files the PR itself changes, or the plan fans out over code nobody here wrote.
+            diff = filter_diff_for_files(diff, [f.get("filename", "") for f in full_changed_files])
 
     bench_config_changes: list[str] = []
     for f in full_changed_files:
@@ -2838,6 +2885,7 @@ async def _node_run_reviewer(inputs: ReviewerInput, config: RunnableConfig) -> d
     reviewer_type = inputs["reviewer_type"]
     diff = inputs["diff"]
     repo_root: str | None = config.get("configurable", {}).get("worktree_path")
+    review_kind_var.set(config.get("configurable", {}).get("review_kind") or "pr")
     group: SystemGroup | None = None
 
     try:
@@ -3656,6 +3704,13 @@ async def run_review(
 
     override = validate_override(review_override_sha, review_override_reason)
     validate_expect_head_sha(expect_head_sha)
+    # A supplied diff is validated before any storage or LLM work: a malformed document, or a
+    # head that differs from the requested sha, fails here with a clear error.
+    supplied = (
+        parse_supplied_diff(request.supplied_diff, expect_head_sha=request.sha)
+        if request.supplied_diff is not None
+        else None
+    )
 
     # Fail fast on a bad ARGUS_DB_URL / ARGUS_HISTORY_DB_PATH, before any of
     # the pipeline's LLM cost runs. Both history-backend implementations
@@ -3691,8 +3746,8 @@ async def run_review(
                 flow_run_id=flow_run_id,
                 repo=request.repo,
                 pr_number=request.pr_number,
-                sha=request.sha,
-                base_ref=request.base_ref,
+                sha=supplied.head_sha if supplied else request.sha,
+                base_ref=(supplied.base_sha if supplied else None) or request.base_ref,
             )
             logger.info("Upserted progress row for flow_run_id=%s", flow_run_id)
         except (OSError, asyncio.CancelledError, ModuleNotFoundError):
@@ -3715,7 +3770,9 @@ async def run_review(
     # (which ran after a full diff fetch) and lets us wrap the entire graph
     # invocation in the provisioned_worktree context manager so teardown is
     # always guaranteed — even on graph cancellation or exception.
-    if request.sha:
+    if supplied:
+        head_sha_for_worktree = supplied.head_sha
+    elif request.sha:
         head_sha_for_worktree = request.sha
     elif request.pr_number:
         from argus.github_client import GitHubClient
@@ -3761,6 +3818,7 @@ async def run_review(
                             "thread_id": thread_id,
                             "worktree_path": worktree_path,
                             "head_sha": head_sha,
+                            "review_kind": request.review_kind,
                             "review_override_sha": override[0] if override else None,
                             "review_override_reason": override[1] if override else None,
                         },
@@ -3792,6 +3850,8 @@ async def run_review(
         response = ReviewResponse.model_validate(result["response"])
         scope = result.get("scope")
         response.scope = ScopeReceipt.model_validate(scope) if scope else None
+        response.review_kind = request.review_kind
+        response.diff_digest = supplied.digest if supplied else None
         response.stage_costs = stage_costs()
         response.stage_seconds = stage_seconds()
 
@@ -3918,8 +3978,10 @@ async def run_review(
         orchestrator_model=None if is_lite else _PLANNER_MODEL.removeprefix("anthropic:"),
         subagent_model=CLAUDE_DEFAULT,
         sha=reviewed_sha,
-        base_ref=request.base_ref,
+        base_ref=(supplied.base_sha if supplied else None) or request.base_ref,
         current_stage="completed",
+        review_kind=request.review_kind,
+        diff_digest=supplied.digest if supplied else None,
     )
     agent_runs_data = result.get("agent_runs", [])
 

@@ -159,6 +159,11 @@ class HttpStorageClient:
         # typically store it as JSONB, so any string-serializable value
         # is fine.
         body = round_data.model_dump(mode="json")
+        # Ordinary PR rounds omit the supplied-diff fields so a server that predates them
+        # (and forbids unknown keys) keeps accepting the payload unchanged.
+        if round_data.review_kind == "pr" and round_data.diff_digest is None:
+            body.pop("review_kind", None)
+            body.pop("diff_digest", None)
         try:
             response = await client.post(url, json=body, headers=self._headers())
             response.raise_for_status()

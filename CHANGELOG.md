@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Supplied-diff review kind (TECH-9826). `argus review --diff-file PATH` (or `ReviewRequest.supplied_diff`, with `review_kind="supplied_diff"` implied; `pr_number` must be 0 so the round can never become an ordinary PR's prior round) reviews a caller-supplied `upstream-sync-resolution-diff v1` document as the diff: Argus fetches no compare diff, validates the `format`/`base`/`head` header (and that `head` equals `--sha` when given), halts with `scope_unverified` and a clear reason when the document exceeds 150,000 characters or 5,000 changed lines, and skips the 300-file and one-behaviour checks. It never posts a PR comment or commit status (`--post`/`--commit-status` are rejected with `--diff-file`), ignores `/dismiss` comments (`--pr` and `--dismiss`, and `pr_number`/`dismissals` on the request, are rejected), and tells every reviewer it is seeing a resolution diff only (`mechanical` lines are not reviewed). The result JSON and the storage models (`CodeReviewRound`, `CodeReviewRoundIn`, `CodeReviewRoundRow`) now carry `review_kind` (`pr` by default) and `diff_digest` (`sha256:<hex>` of the document's exact UTF-8 bytes, `None` for ordinary PRs). The built-in Postgres/SQLite tables are unchanged; a storage backend that wants the columns persists them from these fields. The HTTP storage client omits both fields for ordinary PRs. Ordinary PR reviews are unchanged.
+
 ## [0.4.3] - 2026-11-18
 
 ### Fixed
