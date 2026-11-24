@@ -166,8 +166,8 @@ async def _fetch(req: ReviewRequest, **conf: Any) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_fetch_uses_the_document_and_never_touches_github_or_dismissals() -> None:
     doc = make_doc()
-    # A trusted collaborator /dismiss comment exists on the PR, and the caller also supplies a
-    # dismissal; neither may be read or applied.
+    # A /dismiss comment may exist on the PR and a caller may supply a dismissal; neither may
+    # be read or applied.
     req = _request(doc)
     with (
         patch("argus.github_client.GitHubClient", _gh_that_must_not_be_called()) as gh,
